@@ -42,7 +42,7 @@ export function TierGlyph({ tier, size = 12 }: { tier: TierId | null; size?: num
             d="M8 0.5l1.3 4.6 4.1-2.5-2.5 4.1L15.5 8l-4.6 1.3 2.5 4.1-4.1-2.5L8 15.5l-1.3-4.6-4.1 2.5 2.5-4.1L0.5 8l4.6-1.3-2.5-4.1 4.1 2.5z"
             fill="currentColor"
           />
-          <circle cx="8" cy="8" r="2" fill="var(--fx-nova-core)" />
+          <circle cx="8" cy="8" r="2" fill="var(--glint)" />
         </svg>
       );
     default:

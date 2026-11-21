@@ -4,48 +4,62 @@ import { IconChevron, IconFile } from "../icons";
 
 type FileChangeItem = Extract<ThreadItem, { type: "fileChange" }>;
 
+/** One line per file ("Edited ui/src/x.ts +3 −1"), the diff on demand. */
 export function FileChangeCard({ item }: { item: FileChangeItem }) {
-  const verb =
-    item.status === "inProgress"
-      ? "Editing"
-      : item.status === "declined"
-        ? "Declined"
-        : item.status === "failed"
-          ? "Failed to edit"
-          : "Edited";
   return (
-    <div className={`card filechange ${item.status === "failed" ? "cmd-failed" : ""}`}>
-      <div className="card-label">
-        <IconFile size={14} /> {verb} {item.changes.length} file
-        {item.changes.length === 1 ? "" : "s"}
-      </div>
+    <div className={`filechange ${item.status === "failed" ? "failed" : ""}`}>
       {item.changes.map((c) => (
-        <FileDiff key={c.path} change={c} />
+        <FileDiff key={c.path} change={c} status={item.status} />
       ))}
     </div>
   );
 }
 
-function FileDiff({ change }: { change: FileUpdateChange }) {
+function FileDiff({
+  change,
+  status,
+}: {
+  change: FileUpdateChange;
+  status: FileChangeItem["status"];
+}) {
   const { adds, dels } = countLines(change.diff);
-  const kind = change.kind.type === "add" ? "A" : change.kind.type === "delete" ? "D" : "M";
+  const kind = change.kind.type;
+  const verb =
+    status === "inProgress"
+      ? kind === "add"
+        ? "Creating"
+        : kind === "delete"
+          ? "Deleting"
+          : "Editing"
+      : status === "declined"
+        ? "Declined"
+        : status === "failed"
+          ? "Failed"
+          : kind === "add"
+            ? "Created"
+            : kind === "delete"
+              ? "Deleted"
+              : "Edited";
   const moved =
     change.kind.type === "update" && change.kind.move_path ? ` → ${change.kind.move_path}` : "";
   return (
-    <details className="file-diff">
-      <summary>
-        <IconChevron size={12} />
-        <span className={`kind kind-${kind}`}>{kind}</span>
-        <span className="mono">
+    <details className={`tool-row file-diff ${status === "failed" ? "failed" : ""}`}>
+      <summary title={change.path + moved}>
+        <IconChevron size={11} />
+        <IconFile size={13} />
+        <span className={`tool-verb ${status === "inProgress" ? "shimmer" : ""}`}>{verb}</span>
+        <code className="tool-target">
           {change.path}
           {moved}
-        </span>
-        <span className="diffstat">
-          <span className="good">+{adds}</span> <span className="bad">-{dels}</span>
-          <DiffBar adds={adds} dels={dels} />
+        </code>
+        <span className="tool-meta diffstat">
+          <span className="good">+{adds}</span>
+          <span className="bad">−{dels}</span>
         </span>
       </summary>
-      <DiffView diff={change.diff} />
+      <div className="tool-body">
+        <DiffView diff={change.diff} />
+      </div>
     </details>
   );
 }
@@ -58,18 +72,4 @@ function countLines(diff: string): { adds: number; dels: number } {
     else if (l.startsWith("-") && !l.startsWith("---")) dels++;
   }
   return { adds, dels };
-}
-
-/** GitHub-style 5-block +/- ratio. */
-function DiffBar({ adds, dels }: { adds: number; dels: number }) {
-  const total = adds + dels;
-  const a = total ? Math.round((adds / total) * 5) : 0;
-  const d = total ? Math.min(5 - a, Math.round((dels / total) * 5)) : 0;
-  return (
-    <span className="diffbar" aria-hidden>
-      {Array.from({ length: 5 }, (_, i) => (
-        <span key={i} className={i < a ? "add" : i < a + d ? "del" : ""} />
-      ))}
-    </span>
-  );
 }

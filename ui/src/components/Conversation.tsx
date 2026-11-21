@@ -5,13 +5,21 @@ import { useAppState } from "../store/store";
 import { Approvals } from "./Approvals";
 import { DiffView } from "./DiffView";
 import { formatDuration } from "./format";
-import { ItemView } from "./items/ItemView";
+import { isToolItem, ItemView } from "./items/ItemView";
+import type { ThreadItem } from "../protocol";
+import { IconChevron, IconDiff } from "./icons";
 import { tierOf } from "../theme/tiers";
 import { TierBadge } from "./TierBadge";
 
 /** Centered, scrolling transcript of one thread. */
 export function Conversation({ threadId }: { threadId: string }) {
   const view = useAppState((s) => s.views[threadId]);
+  // Re-render (and so re-pin to the bottom) when an approval for this thread arrives.
+  const pending = useAppState(
+    (s) =>
+      s.serverRequests.filter((r) => (r.params as { threadId?: string }).threadId === threadId)
+        .length,
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -48,7 +56,7 @@ export function Conversation({ threadId }: { threadId: string }) {
           </div>
         )}
         {view.turns.map((turn) => (
-          <Turn key={turn.id} turn={turn} model={turn.model ?? view.model} />
+          <Turn key={turn.id} turn={turn} model={turn.model ?? view.model} waiting={pending > 0} />
         ))}
         <Approvals threadId={threadId} />
       </div>
@@ -56,15 +64,31 @@ export function Conversation({ threadId }: { threadId: string }) {
   );
 }
 
-function Turn({ turn, model }: { turn: TurnView; model: string | null }) {
+function Turn({
+  turn,
+  model,
+  waiting,
+}: {
+  turn: TurnView;
+  model: string | null;
+  waiting: boolean;
+}) {
   const running = turn.status === "inProgress";
   const last = turn.items[turn.items.length - 1];
   const streamingText = running && last?.type === "agentMessage" && !last.completedAtMs;
   return (
     <section className="turn" data-tier={tierOf(model)?.id}>
-      {turn.items.map((item) => (
-        <ItemView key={item.id} item={item} />
-      ))}
+      {groupItems(turn.items).map((g) =>
+        Array.isArray(g) ? (
+          <div key={g[0].id} className="tool-group">
+            {g.map((item) => (
+              <ItemView key={item.id} item={item} />
+            ))}
+          </div>
+        ) : (
+          <ItemView key={g.id} item={g} />
+        ),
+      )}
       {turn.errors
         .filter((e) => e.willRetry)
         .slice(-1)
@@ -77,14 +101,25 @@ function Turn({ turn, model }: { turn: TurnView; model: string | null }) {
       {running && !streamingText && (
         <div className="working">
           <TierBadge model={model} compact />
-          <span className="shimmer">Working…</span>
+          {waiting ? (
+            <span className="working-wait">Waiting for your approval</span>
+          ) : (
+            <span className="shimmer">Working…</span>
+          )}
         </div>
       )}
       {turn.status === "interrupted" && <div className="turn-note">Interrupted</div>}
       {turn.diff && !running && (
-        <details className="card turn-diff">
-          <summary>Turn diff</summary>
-          <DiffView diff={turn.diff} />
+        <details className="tool-row turn-diff">
+          <summary>
+            <IconChevron size={11} />
+            <IconDiff size={13} />
+            <span className="tool-verb">Changes</span>
+            <DiffStat diff={turn.diff} />
+          </summary>
+          <div className="tool-body">
+            <DiffView diff={turn.diff} />
+          </div>
         </details>
       )}
       {!running && turn.durationMs != null && turn.status === "completed" && (
@@ -94,5 +129,35 @@ function Turn({ turn, model }: { turn: TurnView; model: string | null }) {
         </div>
       )}
     </section>
+  );
+}
+
+/** Runs of consecutive tool items (commands, edits, thinking) render as one compact group. */
+function groupItems(items: ThreadItem[]): (ThreadItem | ThreadItem[])[] {
+  const out: (ThreadItem | ThreadItem[])[] = [];
+  for (const item of items) {
+    const prev = out[out.length - 1];
+    if (isToolItem(item)) {
+      if (Array.isArray(prev)) prev.push(item);
+      else out.push([item]);
+    } else out.push(item);
+  }
+  return out;
+}
+
+function DiffStat({ diff }: { diff: string }) {
+  let adds = 0;
+  let dels = 0;
+  let files = 0;
+  for (const l of diff.split("\n")) {
+    if (l.startsWith("+++")) files++;
+    else if (l.startsWith("+")) adds++;
+    else if (l.startsWith("-") && !l.startsWith("---")) dels++;
+  }
+  return (
+    <span className="tool-target">
+      {files} file{files === 1 ? "" : "s"} <span className="good">+{adds}</span>{" "}
+      <span className="bad">−{dels}</span>
+    </span>
   );
 }

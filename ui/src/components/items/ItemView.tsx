@@ -10,6 +10,21 @@ import { GenericItem } from "./GenericItem";
 import { Reasoning } from "./Reasoning";
 import { UserMessage } from "./UserMessage";
 
+const TOOL_TYPES = new Set<ThreadItem["type"]>([
+  "reasoning",
+  "commandExecution",
+  "fileChange",
+  "mcpToolCall",
+  "dynamicToolCall",
+  "webSearch",
+  "imageView",
+]);
+
+/** Items that render as one-line tool rows (grouped together in a turn). */
+export function isToolItem(item: ThreadItem): boolean {
+  return TOOL_TYPES.has(item.type);
+}
+
 export const ItemView = memo(function ItemView({ item }: { item: ThreadItem }) {
   switch (item.type) {
     case "userMessage":
@@ -28,8 +43,8 @@ export const ItemView = memo(function ItemView({ item }: { item: ThreadItem }) {
       return <FileChangeCard item={item} />;
     case "plan":
       return (
-        <div className="card plan">
-          <div className="card-label">Plan</div>
+        <div className="plan">
+          <div className="plan-label">Plan</div>
           <Markdown text={item.text} />
         </div>
       );

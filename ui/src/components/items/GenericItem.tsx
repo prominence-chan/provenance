@@ -3,31 +3,37 @@ import { IconChevron, IconTool } from "../icons";
 
 /** Fallback for item types without a dedicated renderer (MCP tools, web search, ...). */
 export function GenericItem({ item }: { item: ThreadItem }) {
-  const title = titleFor(item);
+  const { verb, target } = titleFor(item);
   const { id: _id, type: _type, ...rest } = item as ThreadItem & Record<string, unknown>;
   return (
-    <details className="card generic">
+    <details className="tool-row generic">
       <summary>
-        <IconChevron size={13} />
-        <IconTool size={14} />
-        <span>{title}</span>
+        <IconChevron size={11} />
+        <IconTool size={13} />
+        <span className="tool-verb">{verb}</span>
+        {target && <code className="tool-target">{target}</code>}
       </summary>
-      <pre className="cmd-output">{JSON.stringify(rest, null, 2)}</pre>
+      <div className="tool-body">
+        <pre className="cmd-output">{JSON.stringify(rest, null, 2)}</pre>
+      </div>
     </details>
   );
 }
 
-function titleFor(item: ThreadItem): string {
+function titleFor(item: ThreadItem): { verb: string; target?: string } {
   switch (item.type) {
     case "mcpToolCall":
-      return `${item.server}.${item.tool}`;
+      return { verb: "Called", target: `${item.server}.${item.tool}` };
     case "dynamicToolCall":
-      return `${item.namespace ? item.namespace + "." : ""}${item.tool}`;
+      return {
+        verb: "Called",
+        target: `${item.namespace ? item.namespace + "." : ""}${item.tool}`,
+      };
     case "webSearch":
-      return "Web search";
+      return { verb: "Searched the web" };
     case "imageView":
-      return `Viewed image ${item.path}`;
+      return { verb: "Viewed", target: item.path };
     default:
-      return item.type;
+      return { verb: item.type };
   }
 }

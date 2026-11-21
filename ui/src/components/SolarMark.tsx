@@ -13,7 +13,7 @@ export function SolarMark({ size = 20, className }: { size?: number; className?:
     >
       <defs>
         <radialGradient id={`${id}-disc`} cx="42%" cy="40%" r="62%">
-          <stop offset="0%" stopColor="var(--fx-nova-core)" />
+          <stop offset="0%" stopColor="var(--glint)" />
           <stop offset="35%" stopColor="var(--corona)" />
           <stop offset="75%" stopColor="var(--ember)" />
           <stop offset="100%" stopColor="var(--crimson)" />

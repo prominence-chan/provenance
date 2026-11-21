@@ -1,33 +1,33 @@
 /* Provenance design tokens. Every color, font, radius, shadow and motion value the UI
    uses lives here; styles.css and effects.css only reference these variables.
 
-   Identity: a solar prominence. Warm charcoal "space" backgrounds, soft off-white text,
+   Identity: a solar prominence. Near-black warm "space" backgrounds, soft off-white text,
    and plasma accents (ember orange, crimson, pink-magenta) used sparingly.
 
    Dark is the default. `<html data-theme="light">` switches to the light set below
    (toggle in the sidebar footer, persisted in localStorage). */
 
 :root {
-  /* ---- surfaces (warm charcoal, darkest to lightest) ------------------- */
-  --bg: #12100e;
-  --bg-sunken: #0d0b0a;
-  --sidebar: #171412;
-  --panel: #1c1815;
-  --panel-2: #241f1b;
-  --panel-3: #2d2722;
-  --hover: rgba(255, 236, 220, 0.045);
-  --selected: rgba(255, 236, 220, 0.075);
-  --border: #2a2420;
-  --border-strong: #3a322c;
-  --bubble: #262019;
-  --overlay-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
-  --composer-shadow: 0 10px 34px rgba(0, 0, 0, 0.32);
+  /* ---- surfaces (near-black with a warm cast, darkest to lightest) ----- */
+  --bg: #0d0b0a;
+  --bg-sunken: #080706;
+  --sidebar: #0a0908;
+  --panel: #151210;
+  --panel-2: #1b1714;
+  --panel-3: #25201c;
+  --hover: rgba(255, 236, 220, 0.035);
+  --selected: rgba(255, 236, 220, 0.085);
+  --border: #201b17;
+  --border-strong: #2e2722;
+  --bubble: #1c1815;
+  --overlay-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.45);
+  --composer-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
 
   /* ---- text ------------------------------------------------------------ */
-  --text: #f1ebe4;
-  --text-2: #c7bbb0;
-  --muted: #8d8076;
-  --faint: #5f554d;
+  --text: #ede6de;
+  --text-2: #c2b6ab;
+  --muted: #9a8d83;
+  --faint: #8a7e74;
 
   /* ---- plasma accents --------------------------------------------------- */
   --ember: #ff7a3d; /* primary accent */
@@ -35,6 +35,7 @@
   --crimson: #e23a52;
   --magenta: #ff4fa3; /* highlight, used sparingly */
   --corona: #ffc061; /* gold, sun-core */
+  --glint: #fff1f7; /* white-hot centre of the logo and the nova glyph */
   --accent: var(--ember);
   --accent-fg: #1c0e07; /* text on accent fills */
   --accent-grad: linear-gradient(135deg, var(--corona) 0%, var(--ember) 45%, var(--crimson) 100%);
@@ -73,14 +74,16 @@
   --tier-nova-grad: linear-gradient(135deg, #ffe3f1, #ff4fa3 45%, #c2185b 80%, #7a1fa2);
 
   /* ---- effects (see src/theme/effects.css + src/components/effects/) ---- */
-  --fx-solstice-a: #ffc061;
-  --fx-solstice-b: #ff6a3d;
-  --fx-solstice-c: #e23a52;
-  --fx-nova-a: #ff4fa3;
-  --fx-nova-b: #ff7a3d;
-  --fx-nova-c: #b44dff;
-  --fx-nova-core: #ffe7f3;
-  --fx-glow-strength: 1; /* 0 disables glows, >1 brighter */
+  /* Flame colour ramps, coolest to hottest (deep -> mid -> hot -> core). */
+  --fx-solstice-deep: #5c0e08;
+  --fx-solstice-mid: #d8391b;
+  --fx-solstice-hot: #ff9b3d;
+  --fx-solstice-core: #fff0c8;
+  --fx-nova-deep: #3d0624;
+  --fx-nova-mid: #e0287f;
+  --fx-nova-hot: #ff9ab8;
+  --fx-nova-core: #f6f1ff;
+  --fx-glow-strength: 1; /* static fallback glow (reduced motion / no WebGL2) */
 
   /* ---- typography ------------------------------------------------------- */
   --font-ui:
@@ -89,27 +92,28 @@
   --font-mono:
     "JetBrains Mono", "Berkeley Mono", "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas,
     monospace;
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-md: 13px;
-  --fs-base: 14px;
-  --fs-lg: 16px;
-  --fs-hero: 28px;
-  --fs-code: 12.5px;
+  --fs-xs: 10.5px;
+  --fs-sm: 11.5px;
+  --fs-md: 12.5px;
+  --fs-base: 13.5px;
+  --fs-lg: 15px;
+  --fs-hero: 20px;
+  --fs-code: 12px;
 
   /* ---- shape & motion --------------------------------------------------- */
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  --radius-sm: 5px;
+  --radius: 7px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-fast: 120ms;
   --dur: 200ms;
   --dur-slow: 360ms;
 
-  --content-width: 780px;
-  --sidebar-width: 272px;
+  --content-width: 740px;
+  --sidebar-width: 264px;
+  --header-height: 40px;
 
   color-scheme: dark;
 }
@@ -117,7 +121,7 @@
 [data-theme="light"] {
   --bg: #fbf8f5;
   --bg-sunken: #f3eee9;
-  --sidebar: #f5f0eb;
+  --sidebar: #f4efea;
   --panel: #ffffff;
   --panel-2: #f5efe9;
   --panel-3: #ece4dc;
@@ -131,8 +135,8 @@
 
   --text: #231b16;
   --text-2: #4d4038;
-  --muted: #85776c;
-  --faint: #b3a598;
+  --muted: #6f6258;
+  --faint: #7d7066;
 
   --ember: #e85d1f;
   --ember-soft: #c4511c;
@@ -166,6 +170,15 @@
   --tier-solstice: #e2531f;
   --tier-nova: #d6307f;
 
+  /* On paper the ramp runs the other way: pale tips, deep saturated base. */
+  --fx-solstice-deep: #fdba74;
+  --fx-solstice-mid: #f97316;
+  --fx-solstice-hot: #dc2626;
+  --fx-solstice-core: #9f1239;
+  --fx-nova-deep: #f9a8d4;
+  --fx-nova-mid: #ec4899;
+  --fx-nova-hot: #be185d;
+  --fx-nova-core: #701a75;
   --fx-glow-strength: 0.6;
 
   color-scheme: light;

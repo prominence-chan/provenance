@@ -63,16 +63,17 @@ ui/
     │   ├── reducer.ts   applyNotification(): app-server notifications -> state (pure)
     │   └── actions.ts   everything that sends requests (threads, turns, approvals, interrupt)
     ├── components/
-    │   ├── Sidebar.tsx        thread list, search, new thread, archive, connection status
-    │   ├── ThreadHeader.tsx   title, cwd, model, token usage
+    │   ├── Sidebar.tsx        threads grouped by project (cwd), search, new thread, archive, status
+    │   ├── ThreadHeader.tsx   slim bar: sidebar toggle (when hidden), title, cwd, tier, context ring
     │   ├── Conversation.tsx   centered transcript; turns -> items; auto-scroll
-    │   ├── items/             one renderer per ThreadItem type (ItemView.tsx dispatches)
+    │   ├── items/             one renderer per ThreadItem type (ItemView.tsx dispatches); tool
+    │   │                      items render as one-line rows, consecutive ones grouped
     │   ├── Approvals.tsx      command / file-change approval cards
     │   ├── Composer.tsx       prompt box, tier picker, permissions preset, cwd, send/stop
     │   ├── Markdown.tsx, DiffView.tsx, Notices.tsx, icons.tsx, format.ts
-    ├── components/effects/  FireFx.tsx (aura + top-edge plasma), SparkField.tsx (canvas), useFx.ts
+    ├── components/effects/  FlameFx.tsx (WebGL2 flames, filament, embers), useFx.ts
     ├── components/TierPicker.tsx, TierBadge.tsx, SolarMark.tsx
-    ├── theme/           tokens.css, effects.css, tiers.ts, theme.ts (see "Theme" below)
+    ├── theme/           tokens.css, effects.css, tiers.ts, theme.ts, ui.ts (see "Theme" below)
     ├── App.tsx, main.tsx
     └── styles.css       layout + components; only references theme tokens
 ```
@@ -139,32 +140,47 @@ the state bottom-left and re-attaches to the open thread once app-server is back
 
 ## Theme
 
-The look is "solar prominence": warm charcoal backgrounds, soft off-white text, plasma
-accents (ember orange, crimson, a pink-magenta highlight) used sparingly.
+The look is "solar prominence": near-black warm backgrounds, soft off-white text, plasma
+accents (ember orange, crimson, a pink-magenta highlight) used sparingly. The layout is
+compact in the spirit of the Claude Code and Codex desktop apps: 28 px sidebar rows,
+a 40 px header, 13.5 px body text, tool calls as one-line rows that open on click.
 
 - **Tokens:** `src/theme/tokens.css` is the single place to tweak it: surfaces, text, accents
   (`--ember`, `--crimson`, `--magenta`, `--corona`), status and diff colors, fonts
-  (`--font-ui`, `--font-mono`), sizes, radii, motion, and per-tier colors
-  (`--tier-<id>`, `--tier-<id>-grad`). `[data-theme="light"]` in the same file overrides
-  them for light mode (sun/moon toggle bottom-left, stored in localStorage
-  `provenance-ui.theme`). `styles.css` uses only these variables.
+  (`--font-ui`, `--font-mono`), the type scale (`--fs-*`), radii, motion, layout sizes
+  (`--sidebar-width`, `--header-height`, `--content-width`), per-tier colors
+  (`--tier-<id>`, `--tier-<id>-grad`) and the flame ramps (`--fx-<tier>-deep/mid/hot/core`).
+  `[data-theme="light"]` in the same file overrides them for light mode (sun/moon toggle
+  bottom-left, stored in localStorage `provenance-ui.theme`). `styles.css` uses only these
+  variables.
+- **Sidebar:** threads are grouped by working directory, most recent project first; a
+  project's header collapses it (remembered). `⌘B` / `Ctrl+B` or the panel button hides the
+  sidebar (remembered). Below 860 px it becomes a drawer that starts closed and closes after
+  you pick a thread. The state lives in `src/theme/ui.ts`.
 - **Tiers:** `src/theme/tiers.ts` holds the order (ember < spark < solstice < nova), the blurbs
   shown in the picker, and which effect each tier gets (`none` / `warm` / `plasma`). Any element
   with `data-tier="..."` gets `--tier-color` / `--tier-grad` for its subtree. `TierBadge`
   appears in the header, on the "Working…" line and in each turn's footer; `TierPicker` is the
   composer dropdown.
-- **Effects** (only while a turn streams on the selected thread):
-  - solstice: a slow gold-to-crimson beam circling the composer, a soft warm breathing glow,
-    and a shimmer along the top edge of the main column;
-  - nova: twin magenta/ember beams, an ignition flash with a stronger glow, a faster plasma
-    flow along the top edge, and sparks rising off the composer (a burst at turn start, then
-    a trickle).
-    The CSS is in `src/theme/effects.css` (transform/opacity animations only, colors from the
-    `--fx-*` tokens, `--fx-glow-strength` scales or disables the glows). The markup is in
-    `src/components/effects/FireFx.tsx`, the sparks in `SparkField.tsx` (one canvas, sprites
-    rendered once, rAF only while particles are alive, stopped while the tab is hidden), and the
-    "which effect now" logic in `useFx.ts`. Every layer is `pointer-events: none`.
-    `prefers-reduced-motion` turns it all into a static glow with no particles.
+- **Effects** (only while a turn streams on the selected thread), all in one WebGL2 canvas
+  behind the main column, `src/components/effects/FlameFx.tsx`:
+  - flames: domain-warped fbm noise licking up off the composer's top edge (tallest in the
+    middle, low on the sides), a living rim that replaces the composer's border, a soft
+    corona, and faint heat-haze wisps;
+  - a thin plasma filament under the header;
+  - embers: GL points with buoyancy that fades as they cool, drag and a swirling turbulence
+    field, coloured by temperature;
+  - solstice kindles gently in gold and crimson; nova ignites: a shockwave ring, a flash, the
+    filament lighting from the centre outwards and an ember burst, settling into a breathing
+    magenta corona.
+
+  The shader is evaluated only in a band around the composer and a strip under the header,
+  DPR is capped at 1.5, the loop runs only while something is visible (it fades out, then
+  stops), pauses while the tab is hidden and drops to ~30 fps when the window is in the
+  background. The canvas is `pointer-events: none`. Under `prefers-reduced-motion`, or without
+  WebGL2, nothing animates: `src/theme/effects.css` draws a static tier-coloured border and
+  glow instead.
+
 - **Preview without a turn (dev only):** open `http://localhost:5173/?fx=nova` (or
   `solstice`), or run `__provenanceFx("nova")` / `__provenanceFx(null)` in the console.
   Production builds strip this.

@@ -74,7 +74,6 @@ export function TierPicker() {
       </button>
       {open && (
         <div className="tier-menu" role="listbox" aria-label="Model tier">
-          <div className="tier-menu-head">Model tier</div>
           {list.map((m, i) => {
             const t = tierOf(m);
             return (

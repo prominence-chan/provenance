@@ -1,4 +1,5 @@
 import type { ThreadItem } from "../../protocol";
+import { IconChevron, IconThought } from "../icons";
 import { Markdown } from "../Markdown";
 
 type ReasoningItem = Extract<ThreadItem, { type: "reasoning" }>;
@@ -11,12 +12,18 @@ export function Reasoning({ item }: { item: ReasoningItem }) {
   const done = item.completedAtMs != null;
   const headline = /\*\*(.+?)\*\*/.exec(summary)?.[1];
   return (
-    <details className="reasoning">
+    <details className="tool-row reasoning">
       <summary>
-        <span className={done ? "" : "shimmer"}>{done ? "Thought" : "Thinking"}</span>
-        {headline && <span className="muted"> · {headline}</span>}
+        <IconChevron size={11} />
+        <IconThought size={13} />
+        <span className={`tool-verb ${done ? "" : "shimmer"}`}>
+          {done ? "Thought" : "Thinking"}
+        </span>
+        {headline && <span className="tool-target plain">{headline}</span>}
       </summary>
-      {text ? <Markdown text={text} /> : <div className="muted small">No reasoning text.</div>}
+      <div className="reasoning-body">
+        {text ? <Markdown text={text} /> : <div className="muted small">No reasoning text.</div>}
+      </div>
     </details>
   );
 }

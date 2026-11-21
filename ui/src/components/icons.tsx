@@ -100,3 +100,33 @@ export const IconMoon = ({ size }: P) => (
     <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
   </svg>
 );
+export const IconSidebar = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <rect x="3" y="4" width="18" height="16" rx="3" />
+    <path d="M9 4v16" />
+  </svg>
+);
+export const IconCompose = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
+    <path d="M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z" />
+  </svg>
+);
+export const IconEye = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+export const IconDiff = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <path d="M12 3v8M8 7h8M8 17h8" />
+    <rect x="3" y="3" width="18" height="18" rx="3" />
+  </svg>
+);
+export const IconThought = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <path d="M9 18h6M10 21h4" />
+    <path d="M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2V16h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z" />
+  </svg>
+);
