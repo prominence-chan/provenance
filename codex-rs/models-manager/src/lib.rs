@@ -23,10 +23,10 @@ pub fn bundled_models_response()
 /// Provenance: the tierlm strength tiers offered by the built-in `tierlm` provider.
 pub fn tierlm_models_response() -> codex_protocol::openai_models::ModelsResponse {
     const TIERS: [(&str, &str, &str); 4] = [
-        ("supernova", "Supernova", "Hyperfrontier: strongest pooled models"),
-        ("blaze", "Blaze", "Frontier: default for everyday coding"),
-        ("ember", "Ember", "Strong mid tier: capable, plentiful"),
-        ("cinder", "Cinder", "Fast: small models for quick tasks"),
+        ("nova", "Nova", "Hyperfrontier: strongest pooled models"),
+        ("solstice", "Solstice", "Frontier: default for everyday coding"),
+        ("spark", "Spark", "Strong mid tier: capable, plentiful"),
+        ("ember", "Ember", "Fast: small models for quick tasks"),
     ];
     let models = TIERS
         .into_iter()

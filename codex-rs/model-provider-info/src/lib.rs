@@ -757,7 +757,7 @@ pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 /// Provenance: the tierlm proxy (pooled free-tier models grouped by strength).
 pub const TIERLM_PROVIDER_ID: &str = "tierlm";
 pub const TIERLM_DEFAULT_BASE_URL: &str = "http://127.0.0.1:4141/v1";
-pub const TIERLM_DEFAULT_MODEL: &str = "blaze";
+pub const TIERLM_DEFAULT_MODEL: &str = "solstice";
 
 /// Built-in tierlm provider. `TIERLM_BASE_URL` overrides the base URL and the
 /// optional `TIERLM_TOKEN` is sent as a bearer token. No OpenAI login needed.

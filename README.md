@@ -6,10 +6,10 @@ models instead of OpenAI's. You pick a strength tier, not a model:
 
 | Model    | Tier                                   |
 |----------|----------------------------------------|
-| `supernova` | hyperfrontier                          |
-| `blaze`  | frontier (default)                     |
-| `ember`  | strong mid                             |
-| `cinder` | fast / small                           |
+| `nova` | hyperfrontier                          |
+| `solstice`  | frontier (default)                     |
+| `spark`  | strong mid                             |
+| `ember` | fast / small                           |
 
 What differs from upstream Codex:
 
@@ -41,7 +41,7 @@ Start tierlm (it listens on `127.0.0.1:4141` and serves `/v1/responses`), then:
 ```shell
 provenance                          # interactive TUI
 provenance exec "<task>"            # non-interactive
-provenance -m supernova exec "<task>"  # choose a tier
+provenance -m nova exec "<task>"  # choose a tier
 ```
 
 ## Configure
@@ -51,7 +51,7 @@ provenance -m supernova exec "<task>"  # choose a tier
 | tierlm base URL         | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
 | tierlm bearer token     | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)   |
 | config home             | `PROVENANCE_HOME` (default `~/.provenance`)                     |
-| default tier            | `model = "ember"` in `~/.provenance/config.toml`, or `-m ember` |
+| default tier            | `model = "spark"` in `~/.provenance/config.toml`, or `-m spark` |
 
 Any upstream Codex setting works in `~/.provenance/config.toml`. To use another provider, set
 `model_provider = "openai"` or define your own under `[model_providers.<id>]`.
