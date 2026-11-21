@@ -47,10 +47,15 @@ export interface ResponseMap {
   "turn/interrupt": v2.TurnInterruptResponse;
   "model/list": v2.ModelListResponse;
 }
-export type ResultOf<M extends ClientMethod> = M extends keyof ResponseMap ? ResponseMap[M] : unknown;
+export type ResultOf<M extends ClientMethod> = M extends keyof ResponseMap
+  ? ResponseMap[M]
+  : unknown;
 
 export type NotificationMethod = ServerNotification["method"];
-export type NotificationOf<M extends NotificationMethod> = Extract<ServerNotification, { method: M }>["params"];
+export type NotificationOf<M extends NotificationMethod> = Extract<
+  ServerNotification,
+  { method: M }
+>["params"];
 
 export type ServerRequestMethod = ServerRequest["method"];
 

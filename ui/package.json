@@ -14,7 +14,9 @@
     "typecheck": "tsc -b",
     "gen:protocol": "node scripts/gen-protocol.ts",
     "smoke": "node scripts/smoke.ts",
-    "e2e": "node scripts/e2e.ts"
+    "e2e": "node scripts/e2e.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -30,6 +32,7 @@
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^6.3.0",
     "playwright": "^1.65.1",
+    "prettier": "^3.10.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
   }

@@ -87,13 +87,20 @@ export class RpcClient {
     this.ws?.send(JSON.stringify({ id, error: { code, message } }));
   }
 
-  private onMessage(msg: { id?: RequestId; method?: string; params?: unknown; result?: unknown; error?: { code: number; message: string; data?: unknown } }): void {
+  private onMessage(msg: {
+    id?: RequestId;
+    method?: string;
+    params?: unknown;
+    result?: unknown;
+    error?: { code: number; message: string; data?: unknown };
+  }): void {
     const hasId = msg.id !== undefined && msg.id !== null;
     if (hasId && !msg.method) {
       const p = this.pending.get(msg.id!);
       if (!p) return;
       this.pending.delete(msg.id!);
-      if (msg.error) p.reject(new RpcError(msg.error.code, `${p.method}: ${msg.error.message}`, msg.error.data));
+      if (msg.error)
+        p.reject(new RpcError(msg.error.code, `${p.method}: ${msg.error.message}`, msg.error.data));
       else p.resolve(msg.result);
       return;
     }

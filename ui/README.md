@@ -21,14 +21,14 @@ New threads then default to the directory you ran it from.
 
 Other scripts:
 
-| command | what it does |
-| --- | --- |
-| `npm run dev` | Dev server with HMR + bridge, one process, one port |
-| `npm run build` / `npm start` | Type-check + build to `dist/`, then serve it with the bridge (`--prod`) |
-| `npm run typecheck` | `tsc -b` for both the app and the server/scripts |
-| `npm run gen:protocol` | Regenerate protocol types from the installed binary |
-| `npm run smoke` | Headless check through the bridge (no browser): new thread, "reply with just ok", resume |
-| `npm run e2e` | Headless Chromium (Playwright) drives the real UI; `APPROVAL=1` also tests a command approval |
+| command                       | what it does                                                                                  |
+| ----------------------------- | --------------------------------------------------------------------------------------------- |
+| `npm run dev`                 | Dev server with HMR + bridge, one process, one port                                           |
+| `npm run build` / `npm start` | Type-check + build to `dist/`, then serve it with the bridge (`--prod`)                       |
+| `npm run typecheck`           | `tsc -b` for both the app and the server/scripts                                              |
+| `npm run gen:protocol`        | Regenerate protocol types from the installed binary                                           |
+| `npm run smoke`               | Headless check through the bridge (no browser): new thread, "reply with just ok", resume      |
+| `npm run e2e`                 | Headless Chromium (Playwright) drives the real UI; `APPROVAL=1` also tests a command approval |
 
 Both checks expect the server to already be running. `MODEL=spark` picks a different tier.
 The free upstream models sometimes return 503; both checks retry.
@@ -106,7 +106,7 @@ The human docs for the protocol are in `codex-rs/app-server/README.md`.
    (`item/agentMessage/delta`, `item/reasoning/*Delta`, `item/commandExecution/outputDelta`,
    ...), `item/completed`, `thread/tokenUsage/updated`, `turn/completed`.
    `store/reducer.ts` folds each one into `views[threadId].turns[].items[]`.
-4. **Approvals.** app-server sends a *request* (`item/commandExecution/requestApproval`,
+4. **Approvals.** app-server sends a _request_ (`item/commandExecution/requestApproval`,
    `item/fileChange/requestApproval`) and blocks the turn until the client replies
    `{decision: "accept" | "acceptForSession" | "decline" | "cancel"}`. These land in
    `state.serverRequests` and show up as cards under the transcript.
@@ -131,7 +131,7 @@ the state bottom-left and re-attaches to the open thread once app-server is back
   `components/Approvals.tsx` and reply with `rpc.respond(req.id, result)`. Unsupported ones
   currently render a card that replies with a JSON-RPC error.
 - **Tiers:** the picker lists tierlm's own models (`/v1/models` where `owned_by ==
-  "tierlm"`), falling back to `nova / solstice / spark / ember` (`server/main.ts`). Default
+"tierlm"`), falling back to `nova / solstice / spark / ember` (`server/main.ts`). Default
   is `solstice`.
 
 ## Not done yet (v1)

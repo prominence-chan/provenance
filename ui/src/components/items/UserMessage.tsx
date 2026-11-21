@@ -11,12 +11,24 @@ export function UserMessage({ item }: { item: UserItem }) {
             case "text":
               return <span key={i}>{c.text}</span>;
             case "localImage":
-              return <span key={i} className="chip">image: {c.path}</span>;
+              return (
+                <span key={i} className="chip">
+                  image: {c.path}
+                </span>
+              );
             case "mention":
             case "skill":
-              return <span key={i} className="chip">@{c.name}</span>;
+              return (
+                <span key={i} className="chip">
+                  @{c.name}
+                </span>
+              );
             default:
-              return <span key={i} className="chip">{c.type}</span>;
+              return (
+                <span key={i} className="chip">
+                  {c.type}
+                </span>
+              );
           }
         })}
       </div>

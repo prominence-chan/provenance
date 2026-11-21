@@ -62,7 +62,13 @@ function sendJson(res: http.ServerResponse, body: unknown): void {
 async function handleApi(req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
   const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname === "/api/info") {
-    sendJson(res, { defaultCwd, cwdFromLauncher: !!process.env.PROVENANCE_UI_CWD, bin, defaultTier: DEFAULT_TIER, tierlmUrl });
+    sendJson(res, {
+      defaultCwd,
+      cwdFromLauncher: !!process.env.PROVENANCE_UI_CWD,
+      bin,
+      defaultTier: DEFAULT_TIER,
+      tierlmUrl,
+    });
     return true;
   }
   if (url.pathname === "/api/tiers") {

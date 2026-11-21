@@ -66,11 +66,20 @@ export function Composer() {
           <PermissionsPicker settings={settings} />
           <label className="cwd-input" title="Working directory">
             <IconFolder size={13} />
-            <input value={cwdDraft} onChange={(e) => setCwdDraft(e.target.value)} spellCheck={false} placeholder="working directory" />
+            <input
+              value={cwdDraft}
+              onChange={(e) => setCwdDraft(e.target.value)}
+              spellCheck={false}
+              placeholder="working directory"
+            />
           </label>
           <div className="spacer" />
           {running ? (
-            <button className="send-btn stop" title="Interrupt" onClick={() => selected && void interrupt(selected)}>
+            <button
+              className="send-btn stop"
+              title="Interrupt"
+              onClick={() => selected && void interrupt(selected)}
+            >
               <IconStop size={14} />
             </button>
           ) : (
@@ -87,7 +96,12 @@ export function Composer() {
 function ModelPicker({ settings }: { settings: Settings }) {
   const tiers = useAppState((s) => s.tiers);
   return (
-    <select className="picker" title="Model tier" value={settings.model} onChange={(e) => updateSettings({ model: e.target.value })}>
+    <select
+      className="picker"
+      title="Model tier"
+      value={settings.model}
+      onChange={(e) => updateSettings({ model: e.target.value })}
+    >
       {tiers.map((t) => (
         <option key={t} value={t}>
           {t}
@@ -98,15 +112,27 @@ function ModelPicker({ settings }: { settings: Settings }) {
 }
 
 /** Codex-style presets over (approvalPolicy, sandbox). */
-const PRESETS: { id: string; label: string; approvalPolicy: Settings["approvalPolicy"]; sandbox: SandboxMode }[] = [
+const PRESETS: {
+  id: string;
+  label: string;
+  approvalPolicy: Settings["approvalPolicy"];
+  sandbox: SandboxMode;
+}[] = [
   { id: "ask", label: "Ask every time", approvalPolicy: "untrusted", sandbox: "workspace-write" },
-  { id: "auto", label: "Auto (ask when needed)", approvalPolicy: "on-request", sandbox: "workspace-write" },
+  {
+    id: "auto",
+    label: "Auto (ask when needed)",
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
+  },
   { id: "readonly", label: "Read only", approvalPolicy: "on-request", sandbox: "read-only" },
   { id: "full", label: "Full access", approvalPolicy: "never", sandbox: "danger-full-access" },
 ];
 
 function PermissionsPicker({ settings }: { settings: Settings }) {
-  const current = PRESETS.find((p) => p.approvalPolicy === settings.approvalPolicy && p.sandbox === settings.sandbox);
+  const current = PRESETS.find(
+    (p) => p.approvalPolicy === settings.approvalPolicy && p.sandbox === settings.sandbox,
+  );
   return (
     <select
       className="picker"

@@ -37,7 +37,11 @@ export const rpc = new RpcClient({
   },
   onNotification: (n) => {
     setState((s) => applyNotification(s, n));
-    if (n.method === "warning" || n.method === "configWarning" || n.method === "deprecationNotice") {
+    if (
+      n.method === "warning" ||
+      n.method === "configWarning" ||
+      n.method === "deprecationNotice"
+    ) {
       const p = n.params as { message?: string; summary?: string };
       notify("warn", p.message ?? p.summary ?? n.method);
     }
@@ -64,7 +68,11 @@ async function onReady(reconnected: boolean): Promise<void> {
 
 export async function boot(): Promise<void> {
   const [info, tiers] = await Promise.all([
-    fetch("/api/info").then((r) => r.json()) as Promise<{ defaultCwd: string; cwdFromLauncher: boolean; defaultTier: string }>,
+    fetch("/api/info").then((r) => r.json()) as Promise<{
+      defaultCwd: string;
+      cwdFromLauncher: boolean;
+      defaultTier: string;
+    }>,
     fetch("/api/tiers").then((r) => r.json()) as Promise<{ tiers: string[]; defaultTier: string }>,
   ]).catch(() => [null, null] as const);
   setState((s) => {
@@ -72,7 +80,8 @@ export async function boot(): Promise<void> {
     // The launcher's directory wins; otherwise keep the last-used cwd.
     if (info && (info.cwdFromLauncher || !settings.cwd)) settings.cwd = info.defaultCwd;
     const list = tiers?.tiers?.length ? tiers.tiers : s.tiers;
-    if (!list.includes(settings.model)) settings.model = list.includes("solstice") ? "solstice" : list[0];
+    if (!list.includes(settings.model))
+      settings.model = list.includes("solstice") ? "solstice" : list[0];
     return { ...s, settings, tiers: list };
   });
   rpc.connect();
@@ -153,13 +162,19 @@ export async function openThread(threadId: string, opts: { force?: boolean } = {
         model: resumed.model,
         cwd: resumed.cwd,
       };
-      return { ...upsertThreadInList(s, resumed.thread, false), views: { ...s.views, [threadId]: view } };
+      return {
+        ...upsertThreadInList(s, resumed.thread, false),
+        views: { ...s.views, [threadId]: view },
+      };
     });
   } catch (e) {
     setState((s) => {
       const prev = s.views[threadId];
       return prev
-        ? { ...s, views: { ...s.views, [threadId]: { ...prev, load: "error", loadError: errText(e) } } }
+        ? {
+            ...s,
+            views: { ...s.views, [threadId]: { ...prev, load: "error", loadError: errText(e) } },
+          }
         : s;
     });
   }
@@ -221,8 +236,16 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
     setState((s) => {
       const v = s.views[tid];
       if (!v) return s;
-      const turns = v.turns.some((t) => t.id === res.turn.id) ? v.turns : [...v.turns, turnFromProtocol(res.turn)];
-      return { ...s, views: { ...s.views, [tid]: { ...v, turns, cwd: cwdOverride ?? v.cwd, model: settings.model } } };
+      const turns = v.turns.some((t) => t.id === res.turn.id)
+        ? v.turns
+        : [...v.turns, turnFromProtocol(res.turn)];
+      return {
+        ...s,
+        views: {
+          ...s.views,
+          [tid]: { ...v, turns, cwd: cwdOverride ?? v.cwd, model: settings.model },
+        },
+      };
     });
   } catch (e) {
     notify("error", errText(e));
@@ -244,12 +267,18 @@ export async function interrupt(threadId: string): Promise<void> {
 
 // ---- approvals -------------------------------------------------------------
 
-export function answerCommandApproval(req: ServerRequest, decision: CommandExecutionApprovalDecision): void {
+export function answerCommandApproval(
+  req: ServerRequest,
+  decision: CommandExecutionApprovalDecision,
+): void {
   rpc.respond(req.id, { decision });
   dropServerRequest(req);
 }
 
-export function answerFileChangeApproval(req: ServerRequest, decision: FileChangeApprovalDecision): void {
+export function answerFileChangeApproval(
+  req: ServerRequest,
+  decision: FileChangeApprovalDecision,
+): void {
   rpc.respond(req.id, { decision });
   dropServerRequest(req);
 }
@@ -261,13 +290,24 @@ export function rejectServerRequest(req: ServerRequest): void {
 }
 
 function dropServerRequest(req: ServerRequest): void {
-  setState((s) => ({ ...s, serverRequests: s.serverRequests.filter((r) => String(r.id) !== String(req.id)) }));
+  setState((s) => ({
+    ...s,
+    serverRequests: s.serverRequests.filter((r) => String(r.id) !== String(req.id)),
+  }));
 }
 
 // ---- utils -----------------------------------------------------------------
 
 function blankView(thread: Thread, load: ThreadView["load"]): ThreadView {
-  return { id: thread.id, thread, load, turns: [], tokenUsage: null, model: thread.model ?? null, cwd: thread.cwd ?? null };
+  return {
+    id: thread.id,
+    thread,
+    load,
+    turns: [],
+    tokenUsage: null,
+    model: thread.model ?? null,
+    cwd: thread.cwd ?? null,
+  };
 }
 
 function sandboxPolicyFor(mode: SandboxMode): SandboxPolicy {

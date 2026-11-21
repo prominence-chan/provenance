@@ -22,7 +22,9 @@ export function TokenUsage({ threadId }: { threadId: string }) {
   const usage = useAppState((s) => s.views[threadId]?.tokenUsage);
   if (!usage) return null;
   const { total, last, modelContextWindow } = usage;
-  const pct = modelContextWindow ? Math.min(100, Math.round((last.totalTokens / modelContextWindow) * 100)) : null;
+  const pct = modelContextWindow
+    ? Math.min(100, Math.round((last.totalTokens / modelContextWindow) * 100))
+    : null;
   const title =
     `Total: ${total.totalTokens.toLocaleString()} tokens ` +
     `(in ${total.inputTokens.toLocaleString()}, cached ${total.cachedInputTokens.toLocaleString()}, ` +

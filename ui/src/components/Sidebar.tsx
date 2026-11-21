@@ -15,7 +15,9 @@ export function Sidebar() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return threads;
-    return threads.filter((t) => threadTitle(t).toLowerCase().includes(q) || t.cwd.toLowerCase().includes(q));
+    return threads.filter(
+      (t) => threadTitle(t).toLowerCase().includes(q) || t.cwd.toLowerCase().includes(q),
+    );
   }, [threads, query]);
 
   return (
@@ -34,7 +36,12 @@ export function Sidebar() {
       </div>
       <div className="sidebar-section">
         <span>Threads</span>
-        <button className="icon-btn" title="Refresh" onClick={() => void refreshThreads()} disabled={loading}>
+        <button
+          className="icon-btn"
+          title="Refresh"
+          onClick={() => void refreshThreads()}
+          disabled={loading}
+        >
           <IconRefresh size={13} />
         </button>
       </div>
@@ -42,7 +49,9 @@ export function Sidebar() {
         {filtered.map((t) => (
           <ThreadRow key={t.id} thread={t} selected={t.id === selected} />
         ))}
-        {!filtered.length && <div className="muted thread-empty">{loading ? "Loading…" : "No threads yet"}</div>}
+        {!filtered.length && (
+          <div className="muted thread-empty">{loading ? "Loading…" : "No threads yet"}</div>
+        )}
       </nav>
       <ConnectionStatus />
     </aside>
@@ -50,12 +59,19 @@ export function Sidebar() {
 }
 
 function ThreadRow({ thread, selected }: { thread: Thread; selected: boolean }) {
-  const waiting = useAppState((s) => s.serverRequests.some((r) => (r.params as { threadId?: string }).threadId === thread.id));
+  const waiting = useAppState((s) =>
+    s.serverRequests.some((r) => (r.params as { threadId?: string }).threadId === thread.id),
+  );
   return (
-    <div className={`thread-row ${selected ? "selected" : ""}`} onClick={() => void openThread(thread.id)}>
+    <div
+      className={`thread-row ${selected ? "selected" : ""}`}
+      onClick={() => void openThread(thread.id)}
+    >
       <div className="thread-row-main">
         <div className="thread-title">
-          {isThreadActive(thread.status) && <span className={`dot ${waiting ? "dot-warn" : "dot-busy"}`} />}
+          {isThreadActive(thread.status) && (
+            <span className={`dot ${waiting ? "dot-warn" : "dot-busy"}`} />
+          )}
           {threadTitle(thread)}
         </div>
         <div className="thread-meta">

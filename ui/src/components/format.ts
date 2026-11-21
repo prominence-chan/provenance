@@ -16,7 +16,10 @@ export function relativeTime(unixSeconds: number): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
   if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d`;
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 export function compactNumber(n: number): string {

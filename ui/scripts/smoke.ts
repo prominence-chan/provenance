@@ -31,7 +31,9 @@ ws.onmessage = (ev) => {
 function request(method: string, params: unknown): Promise<any> {
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    pending.set(id, (m) => (m.error ? reject(new Error(`${method}: ${JSON.stringify(m.error)}`)) : resolve(m.result)));
+    pending.set(id, (m) =>
+      m.error ? reject(new Error(`${method}: ${JSON.stringify(m.error)}`)) : resolve(m.result),
+    );
     ws.send(JSON.stringify({ id, method, params }));
   });
 }
@@ -69,7 +71,12 @@ await request("initialize", {
   capabilities: { experimentalApi: true, requestAttestation: false },
 });
 
-const started = await request("thread/start", { model, cwd: "/tmp", approvalPolicy: "on-request", sandbox: "read-only" });
+const started = await request("thread/start", {
+  model,
+  cwd: "/tmp",
+  approvalPolicy: "on-request",
+  sandbox: "read-only",
+});
 const threadId: string = started.thread.id;
 log(`thread/start -> ${threadId} (model ${started.model}, provider ${started.modelProvider})`);
 
@@ -83,10 +90,14 @@ for (let i = 1; i <= attempts && !ok; i++) {
       streamed += m.params.delta;
       deltas++;
     }
-    if (m.method === "error" && m.params.threadId === threadId) log(`  error notification: ${m.params.error.message} (willRetry=${m.params.willRetry})`);
+    if (m.method === "error" && m.params.threadId === threadId)
+      log(`  error notification: ${m.params.error.message} (willRetry=${m.params.willRetry})`);
   };
   listeners.add(onDelta);
-  const done = waitFor((m) => m.method === "turn/completed" && m.params.threadId === threadId, 180_000);
+  const done = waitFor(
+    (m) => m.method === "turn/completed" && m.params.threadId === threadId,
+    180_000,
+  );
   const turn = await request("turn/start", {
     threadId,
     model,
@@ -96,7 +107,9 @@ for (let i = 1; i <= attempts && !ok; i++) {
   const completed = await done;
   listeners.delete(onDelta);
   const status = completed.params.turn.status;
-  log(`attempt ${i}: turn/completed status=${status} deltas=${deltas} streamed=${JSON.stringify(streamed)}`);
+  log(
+    `attempt ${i}: turn/completed status=${status} deltas=${deltas} streamed=${JSON.stringify(streamed)}`,
+  );
   if (status === "completed" && streamed.trim()) {
     reply = streamed;
     ok = true;
@@ -111,11 +124,20 @@ if (!ok) {
 
 const list = await request("thread/list", { limit: 20, sortKey: "updated_at" });
 const listed = list.data.find((t: { id: string }) => t.id === threadId);
-log(`thread/list: ${list.data.length} threads; new thread listed=${!!listed} preview=${JSON.stringify(listed?.preview)}`);
+log(
+  `thread/list: ${list.data.length} threads; new thread listed=${!!listed} preview=${JSON.stringify(listed?.preview)}`,
+);
 
 const resumed = await request("thread/resume", { threadId, excludeTurns: true });
-const turns = await request("thread/turns/list", { threadId, limit: 10, sortDirection: "desc", itemsView: "full" });
-const items = turns.data.flatMap((t: { items: { type: string }[] }) => t.items.map((it) => it.type));
+const turns = await request("thread/turns/list", {
+  threadId,
+  limit: 10,
+  sortDirection: "desc",
+  itemsView: "full",
+});
+const items = turns.data.flatMap((t: { items: { type: string }[] }) =>
+  t.items.map((it) => it.type),
+);
 log(`thread/resume ok (cwd ${resumed.cwd}); history items: ${items.join(", ")}`);
 
 const pass = /\bok\b/i.test(reply) && !!listed && items.includes("agentMessage");

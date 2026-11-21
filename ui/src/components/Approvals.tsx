@@ -1,5 +1,9 @@
 import type { ServerRequest, ThreadItem } from "../protocol";
-import { answerCommandApproval, answerFileChangeApproval, rejectServerRequest } from "../store/actions";
+import {
+  answerCommandApproval,
+  answerFileChangeApproval,
+  rejectServerRequest,
+} from "../store/actions";
 import { useAppState } from "../store/store";
 import { DiffView } from "./DiffView";
 import { IconShield } from "./icons";
@@ -81,7 +85,10 @@ function ApprovalCard({ req, threadId }: { req: ServerRequest; threadId: string 
           <button className="btn" onClick={() => answerFileChangeApproval(req, "acceptForSession")}>
             Approve for session
           </button>
-          <button className="btn btn-danger" onClick={() => answerFileChangeApproval(req, "decline")}>
+          <button
+            className="btn btn-danger"
+            onClick={() => answerFileChangeApproval(req, "decline")}
+          >
             Deny
           </button>
         </div>

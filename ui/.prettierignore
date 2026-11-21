@@ -1,0 +1,6 @@
+dist
+node_modules
+package-lock.json
+*.tsbuildinfo
+# ts-rs generated protocol bindings
+src/protocol/generated

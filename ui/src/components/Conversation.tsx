@@ -31,11 +31,16 @@ export function Conversation({ threadId }: { threadId: string }) {
   return (
     <div className="conversation" ref={scrollRef} onScroll={onScroll}>
       <div className="conversation-inner">
-        {view.load === "loading" && !view.turns.length && <div className="muted center-note">Loading thread…</div>}
+        {view.load === "loading" && !view.turns.length && (
+          <div className="muted center-note">Loading thread…</div>
+        )}
         {view.load === "error" && (
           <div className="error-card">
             Couldn't load thread: {view.loadError}{" "}
-            <button className="btn-small" onClick={() => void openThread(threadId, { force: true })}>
+            <button
+              className="btn-small"
+              onClick={() => void openThread(threadId, { force: true })}
+            >
               Retry
             </button>
           </div>

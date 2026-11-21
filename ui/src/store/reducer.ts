@@ -27,7 +27,10 @@ export function applyNotification(state: AppState, n: ServerNotification): AppSt
       return { ...state, threads: state.threads.filter((t) => t.id !== n.params.threadId) };
 
     case "thread/tokenUsage/updated":
-      return updateView(state, n.params.threadId, (v) => ({ ...v, tokenUsage: n.params.tokenUsage }));
+      return updateView(state, n.params.threadId, (v) => ({
+        ...v,
+        tokenUsage: n.params.tokenUsage,
+      }));
 
     case "turn/started": {
       const s = bumpThread(state, n.params.threadId);
@@ -38,10 +41,16 @@ export function applyNotification(state: AppState, n: ServerNotification): AppSt
       return updateView(state, n.params.threadId, (v) => upsertTurn(v, n.params.turn));
 
     case "turn/diff/updated":
-      return updateTurn(state, n.params.threadId, n.params.turnId, (t) => ({ ...t, diff: n.params.diff }));
+      return updateTurn(state, n.params.threadId, n.params.turnId, (t) => ({
+        ...t,
+        diff: n.params.diff,
+      }));
 
     case "turn/plan/updated":
-      return updateTurn(state, n.params.threadId, n.params.turnId, (t) => ({ ...t, plan: n.params.plan }));
+      return updateTurn(state, n.params.threadId, n.params.turnId, (t) => ({
+        ...t,
+        plan: n.params.plan,
+      }));
 
     case "item/started":
     case "item/completed": {
@@ -51,7 +60,8 @@ export function applyNotification(state: AppState, n: ServerNotification): AppSt
       if (item.type === "userMessage") {
         const t = s.threads.find((x) => x.id === threadId);
         const text = item.content.find((c) => c.type === "text");
-        if (t && !t.preview && text?.type === "text") s = patchThread(s, threadId, { preview: text.text });
+        if (t && !t.preview && text?.type === "text")
+          s = patchThread(s, threadId, { preview: text.text });
       }
       return updateTurn(s, threadId, turnId, (t) => upsertItem(t, item));
     }
@@ -73,34 +83,44 @@ export function applyNotification(state: AppState, n: ServerNotification): AppSt
     case "item/reasoning/summaryPartAdded": {
       const { threadId, turnId, itemId, summaryIndex } = n.params;
       return updateItem(state, threadId, turnId, itemId, (it) =>
-        it.type === "reasoning" ? { ...it, summary: setAt(it.summary, summaryIndex, (s) => s) } : it,
+        it.type === "reasoning"
+          ? { ...it, summary: setAt(it.summary, summaryIndex, (s) => s) }
+          : it,
       );
     }
 
     case "item/reasoning/summaryTextDelta": {
       const { threadId, turnId, itemId, summaryIndex, delta } = n.params;
       return updateItem(state, threadId, turnId, itemId, (it) =>
-        it.type === "reasoning" ? { ...it, summary: setAt(it.summary, summaryIndex, (s) => s + delta) } : it,
+        it.type === "reasoning"
+          ? { ...it, summary: setAt(it.summary, summaryIndex, (s) => s + delta) }
+          : it,
       );
     }
 
     case "item/reasoning/textDelta": {
       const { threadId, turnId, itemId, contentIndex, delta } = n.params;
       return updateItem(state, threadId, turnId, itemId, (it) =>
-        it.type === "reasoning" ? { ...it, content: setAt(it.content, contentIndex, (s) => s + delta) } : it,
+        it.type === "reasoning"
+          ? { ...it, content: setAt(it.content, contentIndex, (s) => s + delta) }
+          : it,
       );
     }
 
     case "item/commandExecution/outputDelta": {
       const { threadId, turnId, itemId, delta } = n.params;
       return updateItem(state, threadId, turnId, itemId, (it) =>
-        it.type === "commandExecution" ? { ...it, aggregatedOutput: (it.aggregatedOutput ?? "") + delta } : it,
+        it.type === "commandExecution"
+          ? { ...it, aggregatedOutput: (it.aggregatedOutput ?? "") + delta }
+          : it,
       );
     }
 
     case "item/fileChange/patchUpdated": {
       const { threadId, turnId, itemId, changes } = n.params;
-      return updateItem(state, threadId, turnId, itemId, (it) => (it.type === "fileChange" ? { ...it, changes } : it));
+      return updateItem(state, threadId, turnId, itemId, (it) =>
+        it.type === "fileChange" ? { ...it, changes } : it,
+      );
     }
 
     case "error": {
@@ -114,7 +134,9 @@ export function applyNotification(state: AppState, n: ServerNotification): AppSt
     case "serverRequest/resolved":
       return {
         ...state,
-        serverRequests: state.serverRequests.filter((r) => String(r.id) !== String(n.params.requestId)),
+        serverRequests: state.serverRequests.filter(
+          (r) => String(r.id) !== String(n.params.requestId),
+        ),
       };
 
     default:
@@ -125,7 +147,16 @@ export function applyNotification(state: AppState, n: ServerNotification): AppSt
 // ---- helpers ---------------------------------------------------------------
 
 export function emptyTurn(id: string): TurnView {
-  return { id, status: "inProgress", error: null, durationMs: null, items: [], errors: [], diff: null, plan: null };
+  return {
+    id,
+    status: "inProgress",
+    error: null,
+    durationMs: null,
+    items: [],
+    errors: [],
+    diff: null,
+    plan: null,
+  };
 }
 
 export function turnFromProtocol(turn: Turn): TurnView {
@@ -158,13 +189,22 @@ function upsertItem(t: TurnView, item: ThreadItem): TurnView {
   return { ...t, items: idx === -1 ? [...t.items, item] : replaceAt(t.items, idx, item) };
 }
 
-function updateView(state: AppState, threadId: string, fn: (v: ThreadView) => ThreadView): AppState {
+function updateView(
+  state: AppState,
+  threadId: string,
+  fn: (v: ThreadView) => ThreadView,
+): AppState {
   const v = state.views[threadId];
   if (!v) return state;
   return { ...state, views: { ...state.views, [threadId]: fn(v) } };
 }
 
-function updateTurn(state: AppState, threadId: string, turnId: string, fn: (t: TurnView) => TurnView): AppState {
+function updateTurn(
+  state: AppState,
+  threadId: string,
+  turnId: string,
+  fn: (t: TurnView) => TurnView,
+): AppState {
   return updateView(state, threadId, (v) => {
     const idx = v.turns.findIndex((t) => t.id === turnId);
     if (idx === -1) return { ...v, turns: [...v.turns, fn(emptyTurn(turnId))] };
@@ -208,7 +248,9 @@ function bumpThread(state: AppState, threadId: string): AppState {
 function patchThread(state: AppState, threadId: string, patch: Partial<Thread>): AppState {
   const threads = state.threads.map((t) => (t.id === threadId ? { ...t, ...patch } : t));
   const v = state.views[threadId];
-  const views = v ? { ...state.views, [threadId]: { ...v, thread: { ...v.thread, ...patch } } } : state.views;
+  const views = v
+    ? { ...state.views, [threadId]: { ...v, thread: { ...v.thread, ...patch } } }
+    : state.views;
   return { ...state, threads, views };
 }
 

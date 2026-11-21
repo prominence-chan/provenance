@@ -14,10 +14,14 @@ export function CommandCard({ item }: { item: CommandItem }) {
       <summary>
         <IconChevron size={13} />
         <IconTerminal size={14} />
-        <span className={running ? "shimmer" : ""}>{running ? "Running" : item.status === "declined" ? "Declined" : "Ran"}</span>
+        <span className={running ? "shimmer" : ""}>
+          {running ? "Running" : item.status === "declined" ? "Declined" : "Ran"}
+        </span>
         <code className="cmd-text">{label}</code>
         <span className="cmd-meta">
-          {item.exitCode != null && item.exitCode !== 0 && <span className="bad">exit {item.exitCode}</span>}
+          {item.exitCode != null && item.exitCode !== 0 && (
+            <span className="bad">exit {item.exitCode}</span>
+          )}
           {item.durationMs != null && <span>{formatDuration(item.durationMs)}</span>}
         </span>
       </summary>

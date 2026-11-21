@@ -28,7 +28,10 @@ function findChromium(): string | undefined {
   if (existsSync(chromium.executablePath())) return undefined; // Playwright's own
   const cache = path.join(homedir(), "Library/Caches/ms-playwright");
   if (!existsSync(cache)) return undefined;
-  for (const dir of readdirSync(cache).filter((d) => d.startsWith("chromium_headless_shell-")).sort().reverse()) {
+  for (const dir of readdirSync(cache)
+    .filter((d) => d.startsWith("chromium_headless_shell-"))
+    .sort()
+    .reverse()) {
     const bin = path.join(cache, dir, "chrome-headless-shell-mac-arm64/chrome-headless-shell");
     if (existsSync(bin)) return bin;
   }
@@ -60,7 +63,10 @@ try {
       (n) => {
         const all = document.querySelectorAll(".turn");
         const last = all[all.length - 1];
-        return all.length >= n && !!last?.querySelector(".turn-footer, .error-card, .turn-note:not(.warn)");
+        return (
+          all.length >= n &&
+          !!last?.querySelector(".turn-footer, .error-card, .turn-note:not(.warn)")
+        );
       },
       attempt,
       { timeout: 180_000 },
@@ -69,13 +75,18 @@ try {
     const text = (await last.locator(".agent-message").allInnerTexts()).join(" ").trim();
     log(`attempt ${attempt}: assistant text = ${JSON.stringify(text)}`);
     replied = /\bok\b/i.test(text);
-    if (!replied) log(`attempt ${attempt}: ${(await last.locator(".error-card").allInnerTexts()).join(" ") || "no ok"}`);
+    if (!replied)
+      log(
+        `attempt ${attempt}: ${(await last.locator(".error-card").allInnerTexts()).join(" ") || "no ok"}`,
+      );
   }
   if (!replied) throw new Error("no streamed reply rendered");
 
   const title = await page.locator(".thread-row.selected .thread-title").innerText();
   const header = await page.locator(".thread-header").innerText();
-  log(`sidebar selected thread: ${JSON.stringify(title)}; header: ${JSON.stringify(header.replace(/\n/g, " | "))}`);
+  log(
+    `sidebar selected thread: ${JSON.stringify(title)}; header: ${JSON.stringify(header.replace(/\n/g, " | "))}`,
+  );
   await page.screenshot({ path: shot });
   log(`screenshot: ${shot}`);
 
@@ -85,7 +96,9 @@ try {
   await page.locator(".thread-row", { hasText: prompt }).first().click();
   await page.waitForSelector(".agent-message", { timeout: 30_000 });
   const history = await page.locator(".user-bubble").count();
-  log(`after reload: resumed thread shows ${history} user message(s) and ${await page.locator(".agent-message").count()} assistant message(s)`);
+  log(
+    `after reload: resumed thread shows ${history} user message(s) and ${await page.locator(".agent-message").count()} assistant message(s)`,
+  );
   if (process.env.APPROVAL) await approvalFlow();
   log("PASS");
 } catch (e) {
@@ -103,7 +116,10 @@ async function approvalFlow(): Promise<void> {
   await page.selectOption('select[title="Model tier"]', model);
   await page.selectOption('select[title^="approval:"]', "ask");
   for (let attempt = 1; attempt <= 3; attempt++) {
-    await page.fill(".composer textarea", `Use your shell tool to run exactly this command: touch ${marker}\nThen reply "done".`);
+    await page.fill(
+      ".composer textarea",
+      `Use your shell tool to run exactly this command: touch ${marker}\nThen reply "done".`,
+    );
     await page.keyboard.press("Enter");
     log(`approval attempt ${attempt}: asked model to run touch ${marker}`);
     const appeared = await page
@@ -114,11 +130,19 @@ async function approvalFlow(): Promise<void> {
       log("  no approval card (model may not have called the tool); retrying");
       continue;
     }
-    log(`  approval card: ${JSON.stringify((await page.locator(".approval").first().innerText()).replace(/\n/g, " | "))}`);
+    log(
+      `  approval card: ${JSON.stringify((await page.locator(".approval").first().innerText()).replace(/\n/g, " | "))}`,
+    );
     await page.screenshot({ path: shot.replace(/\.png$/, "-approval.png") });
-    await page.locator(".approval").first().getByRole("button", { name: "Approve", exact: true }).click();
+    await page
+      .locator(".approval")
+      .first()
+      .getByRole("button", { name: "Approve", exact: true })
+      .click();
     await page.waitForSelector(".approval", { state: "detached", timeout: 30_000 });
-    await page.waitForFunction(() => !document.querySelector(".send-btn.stop"), null, { timeout: 180_000 });
+    await page.waitForFunction(() => !document.querySelector(".send-btn.stop"), null, {
+      timeout: 180_000,
+    });
     const cards = await page.locator(".cmd summary").allInnerTexts();
     log(`  command cards: ${JSON.stringify(cards)}; file created: ${existsSync(marker)}`);
     if (!existsSync(marker)) throw new Error("approved command did not run");

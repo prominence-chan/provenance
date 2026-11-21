@@ -22,5 +22,7 @@ if (!existsSync(bin)) {
 
 rmSync(out, { recursive: true, force: true });
 // --experimental: the UI opts into experimentalApi during initialize, so include those fields.
-execFileSync(bin, ["app-server", "generate-ts", "--experimental", "--out", out], { stdio: "inherit" });
+execFileSync(bin, ["app-server", "generate-ts", "--experimental", "--out", out], {
+  stdio: "inherit",
+});
 console.log(`wrote protocol types to ${path.relative(root, out)}`);
