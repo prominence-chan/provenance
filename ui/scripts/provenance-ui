@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Launch the Provenance web UI (dev server + app-server bridge) and open it.
+# Symlinked into ~/.local/bin/provenance-ui. New threads default to the
+# directory you run this from.
+#
+#   provenance-ui            # start (or just open, if already running)
+#   NO_OPEN=1 provenance-ui  # don't open a browser tab
+#   PORT=5180 provenance-ui
+set -euo pipefail
+
+# Resolve the real script location through the symlink.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+ui_dir="$(cd -P "$(dirname "$src")/.." && pwd)"
+port="${PORT:-5173}"
+
+if curl -fsS "http://127.0.0.1:${port}/api/info" >/dev/null 2>&1; then
+  echo "Provenance UI already running on http://localhost:${port}"
+  [ -z "${NO_OPEN:-}" ] && open "http://localhost:${port}"
+  exit 0
+fi
+
+export PROVENANCE_UI_CWD="${PROVENANCE_UI_CWD:-$PWD}"
+cd "$ui_dir"
+[ -d node_modules ] || npm install
+exec node server/main.ts --open
