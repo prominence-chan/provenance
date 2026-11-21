@@ -1,6 +1,7 @@
 import { useAppState } from "../store/store";
 import { compactNumber, shortPath } from "./format";
 import { threadTitle } from "./Sidebar";
+import { TierBadge } from "./TierBadge";
 
 /** Top bar: thread title, cwd, model, token usage. */
 export function ThreadHeader() {
@@ -11,7 +12,7 @@ export function ThreadHeader() {
       <div className="thread-header-title">{threadTitle(view.thread)}</div>
       <div className="thread-header-meta">
         {view.cwd && <span className="mono">{shortPath(view.cwd)}</span>}
-        {view.model && <span className="pill">{view.model}</span>}
+        <TierBadge model={view.model} />
         <TokenUsage threadId={view.id} />
       </div>
     </header>

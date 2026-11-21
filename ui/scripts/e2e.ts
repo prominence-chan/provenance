@@ -43,13 +43,19 @@ const browser = await chromium.launch({ headless: true, executablePath });
 const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
 page.on("pageerror", (e) => log("page error:", e.message));
 
+/** The tier picker is a custom listbox: open it, click the option. */
+async function pickTier(m: string): Promise<void> {
+  await page.click('button[title="Model tier"]');
+  await page.click(`.tier-menu [role="option"][data-model="${m}"]`);
+}
+
 try {
   await page.goto(`http://127.0.0.1:${port}/`);
   await page.waitForSelector(".conn .dot-ok", { timeout: 60_000 });
   log("UI loaded, app-server ready");
 
   await page.getByRole("button", { name: "New thread" }).click();
-  await page.selectOption('select[title="Model tier"]', model);
+  await pickTier(model);
   await page.fill('input[placeholder="working directory"]', "/tmp");
 
   let replied = false;
@@ -113,7 +119,7 @@ try {
 async function approvalFlow(): Promise<void> {
   const marker = `/tmp/provenance-ui-approval-${Date.now()}`;
   await page.getByRole("button", { name: "New thread" }).click();
-  await page.selectOption('select[title="Model tier"]', model);
+  await pickTier(model);
   await page.selectOption('select[title^="approval:"]', "ask");
   for (let attempt = 1; attempt <= 3; attempt++) {
     await page.fill(

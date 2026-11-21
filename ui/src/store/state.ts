@@ -27,6 +27,8 @@ export interface TurnView {
   /** Latest unified diff for the turn (turn/diff/updated). */
   diff: string | null;
   plan: v2.TurnPlanStep[] | null;
+  /** Model this UI started the turn with (unknown for history: use ThreadView.model). */
+  model?: string | null;
 }
 
 export interface ThreadView {

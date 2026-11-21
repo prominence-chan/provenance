@@ -6,6 +6,8 @@ import { Approvals } from "./Approvals";
 import { DiffView } from "./DiffView";
 import { formatDuration } from "./format";
 import { ItemView } from "./items/ItemView";
+import { tierOf } from "../theme/tiers";
+import { TierBadge } from "./TierBadge";
 
 /** Centered, scrolling transcript of one thread. */
 export function Conversation({ threadId }: { threadId: string }) {
@@ -46,7 +48,7 @@ export function Conversation({ threadId }: { threadId: string }) {
           </div>
         )}
         {view.turns.map((turn) => (
-          <Turn key={turn.id} turn={turn} />
+          <Turn key={turn.id} turn={turn} model={turn.model ?? view.model} />
         ))}
         <Approvals threadId={threadId} />
       </div>
@@ -54,12 +56,12 @@ export function Conversation({ threadId }: { threadId: string }) {
   );
 }
 
-function Turn({ turn }: { turn: TurnView }) {
+function Turn({ turn, model }: { turn: TurnView; model: string | null }) {
   const running = turn.status === "inProgress";
   const last = turn.items[turn.items.length - 1];
   const streamingText = running && last?.type === "agentMessage" && !last.completedAtMs;
   return (
-    <section className="turn">
+    <section className="turn" data-tier={tierOf(model)?.id}>
       {turn.items.map((item) => (
         <ItemView key={item.id} item={item} />
       ))}
@@ -74,6 +76,7 @@ function Turn({ turn }: { turn: TurnView }) {
       {turn.error && <div className="error-card">{turn.error.message}</div>}
       {running && !streamingText && (
         <div className="working">
+          <TierBadge model={model} compact />
           <span className="shimmer">Working…</span>
         </div>
       )}
@@ -85,7 +88,10 @@ function Turn({ turn }: { turn: TurnView }) {
         </details>
       )}
       {!running && turn.durationMs != null && turn.status === "completed" && (
-        <div className="turn-footer">Worked for {formatDuration(turn.durationMs)}</div>
+        <div className="turn-footer">
+          <TierBadge model={model} />
+          <span>Worked for {formatDuration(turn.durationMs)}</span>
+        </div>
       )}
     </section>
   );

@@ -236,9 +236,10 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
     setState((s) => {
       const v = s.views[tid];
       if (!v) return s;
+      const model = settings.model;
       const turns = v.turns.some((t) => t.id === res.turn.id)
-        ? v.turns
-        : [...v.turns, turnFromProtocol(res.turn)];
+        ? v.turns.map((t) => (t.id === res.turn.id ? { ...t, model } : t))
+        : [...v.turns, { ...turnFromProtocol(res.turn), model }];
       return {
         ...s,
         views: {

@@ -70,8 +70,11 @@ ui/
     │   ├── Approvals.tsx      command / file-change approval cards
     │   ├── Composer.tsx       prompt box, tier picker, permissions preset, cwd, send/stop
     │   ├── Markdown.tsx, DiffView.tsx, Notices.tsx, icons.tsx, format.ts
+    ├── components/effects/  FireFx.tsx (aura + top-edge plasma), SparkField.tsx (canvas), useFx.ts
+    ├── components/TierPicker.tsx, TierBadge.tsx, SolarMark.tsx
+    ├── theme/           tokens.css, effects.css, tiers.ts, theme.ts (see "Theme" below)
     ├── App.tsx, main.tsx
-    └── styles.css       all styling; palette is CSS variables at the top
+    └── styles.css       layout + components; only references theme tokens
 ```
 
 ## Where the protocol types come from
@@ -133,6 +136,38 @@ the state bottom-left and re-attaches to the open thread once app-server is back
 - **Tiers:** the picker lists tierlm's own models (`/v1/models` where `owned_by ==
 "tierlm"`), falling back to `nova / solstice / spark / ember` (`server/main.ts`). Default
   is `solstice`.
+
+## Theme
+
+The look is "solar prominence": warm charcoal backgrounds, soft off-white text, plasma
+accents (ember orange, crimson, a pink-magenta highlight) used sparingly.
+
+- **Tokens:** `src/theme/tokens.css` is the single place to tweak it: surfaces, text, accents
+  (`--ember`, `--crimson`, `--magenta`, `--corona`), status and diff colors, fonts
+  (`--font-ui`, `--font-mono`), sizes, radii, motion, and per-tier colors
+  (`--tier-<id>`, `--tier-<id>-grad`). `[data-theme="light"]` in the same file overrides
+  them for light mode (sun/moon toggle bottom-left, stored in localStorage
+  `provenance-ui.theme`). `styles.css` uses only these variables.
+- **Tiers:** `src/theme/tiers.ts` holds the order (ember < spark < solstice < nova), the blurbs
+  shown in the picker, and which effect each tier gets (`none` / `warm` / `plasma`). Any element
+  with `data-tier="..."` gets `--tier-color` / `--tier-grad` for its subtree. `TierBadge`
+  appears in the header, on the "Working…" line and in each turn's footer; `TierPicker` is the
+  composer dropdown.
+- **Effects** (only while a turn streams on the selected thread):
+  - solstice: a slow gold-to-crimson beam circling the composer, a soft warm breathing glow,
+    and a shimmer along the top edge of the main column;
+  - nova: twin magenta/ember beams, an ignition flash with a stronger glow, a faster plasma
+    flow along the top edge, and sparks rising off the composer (a burst at turn start, then
+    a trickle).
+    The CSS is in `src/theme/effects.css` (transform/opacity animations only, colors from the
+    `--fx-*` tokens, `--fx-glow-strength` scales or disables the glows). The markup is in
+    `src/components/effects/FireFx.tsx`, the sparks in `SparkField.tsx` (one canvas, sprites
+    rendered once, rAF only while particles are alive, stopped while the tab is hidden), and the
+    "which effect now" logic in `useFx.ts`. Every layer is `pointer-events: none`.
+    `prefers-reduced-motion` turns it all into a static glow with no particles.
+- **Preview without a turn (dev only):** open `http://localhost:5173/?fx=nova` (or
+  `solstice`), or run `__provenanceFx("nova")` / `__provenanceFx(null)` in the console.
+  Production builds strip this.
 
 ## Not done yet (v1)
 

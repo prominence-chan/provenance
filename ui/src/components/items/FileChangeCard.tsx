@@ -42,6 +42,7 @@ function FileDiff({ change }: { change: FileUpdateChange }) {
         </span>
         <span className="diffstat">
           <span className="good">+{adds}</span> <span className="bad">-{dels}</span>
+          <DiffBar adds={adds} dels={dels} />
         </span>
       </summary>
       <DiffView diff={change.diff} />
@@ -57,4 +58,18 @@ function countLines(diff: string): { adds: number; dels: number } {
     else if (l.startsWith("-") && !l.startsWith("---")) dels++;
   }
   return { adds, dels };
+}
+
+/** GitHub-style 5-block +/- ratio. */
+function DiffBar({ adds, dels }: { adds: number; dels: number }) {
+  const total = adds + dels;
+  const a = total ? Math.round((adds / total) * 5) : 0;
+  const d = total ? Math.min(5 - a, Math.round((dels / total) * 5)) : 0;
+  return (
+    <span className="diffbar" aria-hidden>
+      {Array.from({ length: 5 }, (_, i) => (
+        <span key={i} className={i < a ? "add" : i < a + d ? "del" : ""} />
+      ))}
+    </span>
+  );
 }

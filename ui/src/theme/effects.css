@@ -1,0 +1,268 @@
+/* Fire effects for the higher tiers while a turn streams.
+
+     solstice ("warm")   slow sun-gold beam around the composer, soft warm breathing glow,
+                         gold→crimson shimmer along the top edge
+     nova ("plasma")     twin magenta/ember beams, ignition flash + stronger glow, faster
+                         plasma flow along the top edge, rising sparks (SparkField canvas)
+
+   Markup: components/effects/FireFx.tsx; state: components/effects/useFx.ts.
+   Only transform and opacity are animated (compositor-only), every layer is
+   pointer-events: none, and prefers-reduced-motion freezes everything to a static glow.
+   Colors: --fx-* tokens in tokens.css; --fx-glow-strength scales all glows. */
+
+/* ---- composer aura ------------------------------------------------------- */
+.composer-shell {
+  --fx-a: var(--fx-solstice-a);
+  --fx-b: var(--fx-solstice-b);
+  --fx-c: var(--fx-solstice-c);
+}
+.composer-shell[data-effect="plasma"] {
+  --fx-a: var(--fx-nova-a);
+  --fx-b: var(--fx-nova-b);
+  --fx-c: var(--fx-nova-c);
+}
+
+.fx-glow,
+.fx-ring {
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 600ms var(--ease);
+}
+
+.fx-glow {
+  inset: -12px -8px;
+  z-index: 0;
+  border-radius: calc(var(--radius-xl) + 10px);
+  background: linear-gradient(100deg, var(--fx-a), var(--fx-b) 50%, var(--fx-c));
+  filter: blur(24px);
+}
+
+.fx-ring {
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  /* faint full ring under the moving beam */
+  background: color-mix(in srgb, var(--fx-b) 30%, var(--border-strong));
+}
+.fx-ring-spin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 120%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  background: conic-gradient(
+    from 0deg,
+    transparent 0turn 0.55turn,
+    var(--fx-c) 0.7turn,
+    var(--fx-b) 0.82turn,
+    var(--fx-a) 0.93turn,
+    transparent 1turn
+  );
+  will-change: transform;
+}
+.composer-shell[data-effect="plasma"] .fx-ring-spin {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0turn 0.2turn,
+    var(--fx-c) 0.3turn,
+    var(--fx-a) 0.42turn,
+    var(--fx-nova-core) 0.47turn,
+    transparent 0.5turn 0.7turn,
+    var(--fx-c) 0.8turn,
+    var(--fx-b) 0.92turn,
+    var(--fx-nova-core) 0.97turn,
+    transparent 1turn
+  );
+}
+
+/* Streaming: let the ring show through the composer's border. */
+.composer-shell[data-streaming]:is([data-effect="warm"], [data-effect="plasma"]) .composer {
+  border-color: transparent;
+  background-clip: padding-box;
+}
+.composer-shell[data-streaming]:is([data-effect="warm"], [data-effect="plasma"]) .fx-ring {
+  opacity: 1;
+}
+.composer-shell[data-streaming]:is([data-effect="warm"], [data-effect="plasma"]) .fx-ring-spin {
+  animation: fx-spin 7s linear infinite;
+}
+.composer-shell[data-streaming][data-effect="plasma"] .fx-ring-spin {
+  animation-duration: 3.8s;
+}
+
+/* Solstice: a softer warm pulse. */
+.composer-shell[data-streaming][data-effect="warm"] .fx-glow {
+  animation:
+    fx-ignite-warm 1.1s var(--ease-out) both,
+    fx-breathe-warm 3.6s ease-in-out 1.1s infinite;
+}
+/* Nova: an ignition flash, then a livelier breath. */
+.composer-shell[data-streaming][data-effect="plasma"] .fx-glow {
+  animation:
+    fx-ignite-nova 0.9s var(--ease-out) both,
+    fx-breathe-nova 2.4s ease-in-out 0.9s infinite;
+}
+
+@keyframes fx-spin {
+  to {
+    transform: translate(-50%, -50%) rotate(1turn);
+  }
+}
+@keyframes fx-ignite-warm {
+  0% {
+    opacity: 0;
+  }
+  45% {
+    opacity: calc(0.42 * var(--fx-glow-strength));
+  }
+  100% {
+    opacity: calc(0.24 * var(--fx-glow-strength));
+  }
+}
+@keyframes fx-breathe-warm {
+  0%,
+  100% {
+    opacity: calc(0.24 * var(--fx-glow-strength));
+  }
+  50% {
+    opacity: calc(0.12 * var(--fx-glow-strength));
+  }
+}
+@keyframes fx-ignite-nova {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  35% {
+    opacity: calc(0.7 * var(--fx-glow-strength));
+    transform: scale(1.02);
+  }
+  100% {
+    opacity: calc(0.34 * var(--fx-glow-strength));
+    transform: scale(1);
+  }
+}
+@keyframes fx-breathe-nova {
+  0%,
+  100% {
+    opacity: calc(0.34 * var(--fx-glow-strength));
+  }
+  50% {
+    opacity: calc(0.18 * var(--fx-glow-strength));
+  }
+}
+
+.spark-field {
+  position: absolute;
+  left: -24px;
+  right: -24px;
+  bottom: calc(100% - 4px);
+  height: 240px;
+  width: calc(100% + 48px);
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* ---- top-edge plasma shimmer -------------------------------------------- */
+.plasma-edge {
+  --fx-a: var(--fx-solstice-a);
+  --fx-b: var(--fx-solstice-b);
+  --fx-c: var(--fx-solstice-c);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 500ms var(--ease);
+}
+.plasma-edge[data-effect="plasma"] {
+  --fx-a: var(--fx-nova-a);
+  --fx-b: var(--fx-nova-b);
+  --fx-c: var(--fx-nova-c);
+}
+.plasma-edge[data-on] {
+  opacity: 1;
+}
+.plasma-edge-flow {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 200%;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--fx-c) 18%,
+    var(--fx-b) 40%,
+    var(--fx-a) 58%,
+    var(--fx-b) 72%,
+    transparent 100%
+  );
+  background-size: 50% 100%;
+  background-repeat: repeat-x;
+  will-change: transform;
+}
+.plasma-edge[data-on] .plasma-edge-flow {
+  animation: fx-flow 3.2s linear infinite;
+}
+.plasma-edge[data-on][data-effect="plasma"] .plasma-edge-flow {
+  animation-duration: 1.7s;
+}
+/* soft bloom under the line */
+.main::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 10%;
+  right: 10%;
+  height: 40px;
+  pointer-events: none;
+  z-index: 4;
+  background: radial-gradient(
+    50% 100% at 50% 0%,
+    color-mix(in srgb, var(--fx-solstice-b) 22%, transparent),
+    transparent
+  );
+  opacity: 0;
+  transition: opacity 600ms var(--ease);
+}
+.main:has(.plasma-edge[data-on])::after {
+  opacity: var(--fx-glow-strength);
+}
+.main:has(.plasma-edge[data-on][data-effect="plasma"])::after {
+  background: radial-gradient(
+    50% 100% at 50% 0%,
+    color-mix(in srgb, var(--fx-nova-a) 26%, transparent),
+    transparent
+  );
+}
+@keyframes fx-flow {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* ---- reduced motion: static glow, no movement ---------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .fx-ring-spin,
+  .plasma-edge-flow,
+  .composer-shell[data-streaming] .fx-glow {
+    animation: none !important;
+  }
+  .fx-ring-spin {
+    display: none;
+  }
+  .composer-shell[data-streaming]:is([data-effect="warm"], [data-effect="plasma"]) .fx-ring {
+    background: linear-gradient(100deg, var(--fx-a), var(--fx-b) 50%, var(--fx-c));
+  }
+  .composer-shell[data-streaming]:is([data-effect="warm"], [data-effect="plasma"]) .fx-glow {
+    opacity: calc(0.22 * var(--fx-glow-strength));
+  }
+}

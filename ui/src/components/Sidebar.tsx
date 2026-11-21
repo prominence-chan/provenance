@@ -4,7 +4,9 @@ import { archiveThread, newThread, openThread, refreshThreads } from "../store/a
 import { isThreadActive } from "../store/state";
 import { useAppState } from "../store/store";
 import { baseName, relativeTime } from "./format";
-import { IconArchive, IconPlus, IconRefresh } from "./icons";
+import { setTheme, useTheme } from "../theme/theme";
+import { IconArchive, IconMoon, IconPlus, IconRefresh, IconSearch, IconSun } from "./icons";
+import { SolarMark } from "./SolarMark";
 
 export function Sidebar() {
   const threads = useAppState((s) => s.threads);
@@ -23,16 +25,21 @@ export function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="sidebar-top">
-        <div className="brand">Provenance</div>
+        <div className="brand">
+          <SolarMark size={20} />
+          <span>Provenance</span>
+        </div>
         <button className="btn-new" onClick={newThread}>
           <IconPlus size={15} /> New thread
         </button>
-        <input
-          className="sidebar-search"
-          placeholder="Search threads"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <label className="sidebar-search">
+          <IconSearch size={13} />
+          <input
+            placeholder="Search threads"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </label>
       </div>
       <div className="sidebar-section">
         <span>Threads</span>
@@ -53,7 +60,10 @@ export function Sidebar() {
           <div className="muted thread-empty">{loading ? "Loading…" : "No threads yet"}</div>
         )}
       </nav>
-      <ConnectionStatus />
+      <div className="sidebar-foot">
+        <ConnectionStatus />
+        <ThemeToggle />
+      </div>
     </aside>
   );
 }
@@ -119,5 +129,15 @@ function ConnectionStatus() {
       <span className={`dot ${cls}`} />
       <span className="conn-label">{label}</span>
     </div>
+  );
+}
+
+function ThemeToggle() {
+  const mode = useTheme();
+  const next = mode === "dark" ? "light" : "dark";
+  return (
+    <button className="icon-btn" title={`Switch to ${next} theme`} onClick={() => setTheme(next)}>
+      {mode === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
+    </button>
   );
 }

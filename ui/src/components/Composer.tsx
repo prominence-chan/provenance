@@ -3,7 +3,10 @@ import type { SandboxMode } from "../protocol";
 import { interrupt, sendMessage, updateSettings } from "../store/actions";
 import type { Settings } from "../store/state";
 import { useAppState } from "../store/store";
+import { ComposerAura } from "./effects/FireFx";
+import { useFx } from "./effects/useFx";
 import { IconArrowUp, IconFolder, IconStop } from "./icons";
+import { TierPicker } from "./TierPicker";
 
 /** Bottom composer: prompt box + model / permissions / cwd controls. */
 export function Composer() {
@@ -15,6 +18,7 @@ export function Composer() {
   const [text, setText] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const fx = useFx();
 
   const running = !!view?.turns.some((t) => t.status === "inProgress");
 
@@ -52,62 +56,57 @@ export function Composer() {
 
   return (
     <div className="composer-wrap">
-      <div className="composer">
-        <textarea
-          ref={ref}
-          rows={1}
-          value={text}
-          placeholder={selected ? "Ask for follow-up changes" : "Ask Provenance anything"}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-        />
-        <div className="composer-bar">
-          <ModelPicker settings={settings} />
-          <PermissionsPicker settings={settings} />
-          <label className="cwd-input" title="Working directory">
-            <IconFolder size={13} />
-            <input
-              value={cwdDraft}
-              onChange={(e) => setCwdDraft(e.target.value)}
-              spellCheck={false}
-              placeholder="working directory"
-            />
-          </label>
-          <div className="spacer" />
-          {running ? (
-            <button
-              className="send-btn stop"
-              title="Interrupt"
-              onClick={() => selected && void interrupt(selected)}
-            >
-              <IconStop size={14} />
-            </button>
-          ) : (
-            <button className="send-btn" title="Send (Enter)" disabled={!canSend} onClick={submit}>
-              <IconArrowUp size={16} />
-            </button>
-          )}
+      <div
+        className="composer-shell"
+        data-tier={fx.tier?.id}
+        data-effect={fx.tier?.effect ?? "none"}
+        data-streaming={fx.streaming ? "" : undefined}
+      >
+        <ComposerAura fx={fx} />
+        <div className="composer">
+          <textarea
+            ref={ref}
+            rows={1}
+            value={text}
+            placeholder={selected ? "Ask for follow-up changes" : "Ask Provenance anything"}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          <div className="composer-bar">
+            <TierPicker />
+            <PermissionsPicker settings={settings} />
+            <label className="cwd-input" title="Working directory">
+              <IconFolder size={13} />
+              <input
+                value={cwdDraft}
+                onChange={(e) => setCwdDraft(e.target.value)}
+                spellCheck={false}
+                placeholder="working directory"
+              />
+            </label>
+            <div className="spacer" />
+            {running ? (
+              <button
+                className="send-btn stop"
+                title="Interrupt"
+                onClick={() => selected && void interrupt(selected)}
+              >
+                <IconStop size={14} />
+              </button>
+            ) : (
+              <button
+                className="send-btn"
+                title="Send (Enter)"
+                disabled={!canSend}
+                onClick={submit}
+              >
+                <IconArrowUp size={16} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
-  );
-}
-
-function ModelPicker({ settings }: { settings: Settings }) {
-  const tiers = useAppState((s) => s.tiers);
-  return (
-    <select
-      className="picker"
-      title="Model tier"
-      value={settings.model}
-      onChange={(e) => updateSettings({ model: e.target.value })}
-    >
-      {tiers.map((t) => (
-        <option key={t} value={t}>
-          {t}
-        </option>
-      ))}
-    </select>
   );
 }
 
