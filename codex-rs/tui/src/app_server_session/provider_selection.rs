@@ -80,7 +80,7 @@ impl AppServerSession {
             config
                 .config
                 .model_provider
-                .unwrap_or_else(|| "openai".to_string())
+                .unwrap_or_else(|| codex_model_provider_info::TIERLM_PROVIDER_ID.to_string())
         }))
     }
 }

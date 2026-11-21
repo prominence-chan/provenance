@@ -1,3 +1,68 @@
+# Provenance
+
+Provenance is a lightly rebranded fork of [OpenAI's Codex CLI](https://github.com/openai/codex)
+(Apache-2.0) that runs on [tierlm](https://github.com/prominence-chan/tierlm)'s pooled free-tier
+models instead of OpenAI's. You pick a strength tier, not a model:
+
+| Model    | Tier                                   |
+|----------|----------------------------------------|
+| `corona` | hyperfrontier                          |
+| `flare`  | frontier (default)                     |
+| `ember`  | strong mid                             |
+| `cinder` | fast / small                           |
+
+What differs from upstream Codex:
+
+- The binary is `provenance`. Its config home is `~/.provenance` (override with `PROVENANCE_HOME`), so it
+  never reads or writes your real `~/.codex` config, auth or sessions.
+- The built-in `tierlm` provider is the default: Responses API (`wire_api = "responses"`) at
+  `http://127.0.0.1:4141/v1`. No ChatGPT login or `OPENAI_API_KEY` is needed.
+- Tier names, and any other non-OpenAI model, use conservative fallback metadata: a 128k context window,
+  no reasoning-summary parameter, standard JSON-schema function tools.
+- The startup update check is off by default, since it would point at upstream Codex releases.
+
+Everything else is upstream Codex. The patch is kept small so it rebases cleanly onto new upstream tags.
+
+## Build
+
+You need a Rust toolchain. `codex-rs/rust-toolchain.toml` pins the version, and rustup installs it on first use.
+
+```shell
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+cd codex-rs
+cargo build --release -p codex-cli --bin provenance -j 4
+install -m 755 target/release/provenance ~/.local/bin/provenance
+```
+
+## Run
+
+Start tierlm (it listens on `127.0.0.1:4141` and serves `/v1/responses`), then:
+
+```shell
+provenance                          # interactive TUI
+provenance exec "<task>"            # non-interactive
+provenance -m corona exec "<task>"  # choose a tier
+```
+
+## Configure
+
+| Setting                 | How to set it                                                   |
+|-------------------------|-----------------------------------------------------------------|
+| tierlm base URL         | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
+| tierlm bearer token     | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)   |
+| config home             | `PROVENANCE_HOME` (default `~/.provenance`)                     |
+| default tier            | `model = "ember"` in `~/.provenance/config.toml`, or `-m ember` |
+
+Any upstream Codex setting works in `~/.provenance/config.toml`. To use another provider, set
+`model_provider = "openai"` or define your own under `[model_providers.<id>]`.
+Upstream has removed `wire_api = "chat"`, so providers must speak the Responses API.
+
+License: Apache-2.0, the same as upstream (see `LICENSE` and `NOTICE`). Not affiliated with OpenAI.
+
+---
+
+*The upstream Codex README follows.*
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />

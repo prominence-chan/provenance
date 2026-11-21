@@ -554,7 +554,7 @@ impl ConfigManager {
                     .as_deref()
                     .or(saved_provider)
                     .or(config.model_provider.as_deref())
-                    .unwrap_or("openai");
+                    .unwrap_or(codex_model_provider_info::TIERLM_PROVIDER_ID);
                 // Validate the saved route even when a client sends a provider override.
                 for provider in [
                     saved_provider.unwrap_or(requested_provider),

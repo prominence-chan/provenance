@@ -106,6 +106,8 @@ use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::TIERLM_DEFAULT_MODEL;
+use codex_model_provider_info::TIERLM_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -4146,7 +4148,7 @@ impl Config {
         let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
             .or(model_provider)
             .or(cfg.model_provider)
-            .unwrap_or_else(|| "openai".to_string());
+            .unwrap_or_else(|| TIERLM_PROVIDER_ID.to_string());
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -4296,7 +4298,9 @@ impl Config {
 
         let forced_login_method = cfg.forced_login_method;
 
-        let model = model.or(cfg.model);
+        let model = model.or(cfg.model).or_else(|| {
+            (model_provider_id == TIERLM_PROVIDER_ID).then(|| TIERLM_DEFAULT_MODEL.to_string())
+        });
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
@@ -4441,8 +4445,11 @@ impl Config {
         let compact_prompt = compact_prompt.or(file_compact_prompt);
         let review_model = override_review_model.or(cfg.review_model);
 
-        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
-        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
+        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(false);
+        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?.or_else(|| {
+            (model_provider_id == TIERLM_PROVIDER_ID)
+                .then(codex_models_manager::tierlm_models_response)
+        });
 
         let log_dir = cfg
             .log_dir

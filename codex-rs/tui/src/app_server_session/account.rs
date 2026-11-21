@@ -3,7 +3,7 @@
 use super::*;
 use crate::config_update::EffectiveConfig;
 use codex_app_server_protocol::ConfigReadParams;
-use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::TIERLM_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 
 #[derive(Default)]
@@ -93,7 +93,7 @@ impl AppServerSession {
         let provider = config
             .model_provider
             .as_deref()
-            .unwrap_or(OPENAI_PROVIDER_ID);
+            .unwrap_or(TIERLM_PROVIDER_ID);
         // The default can change between the two reads. Only apply compatible capabilities.
         let auth_mismatch = built_in_model_providers(/*openai_base_url*/ None)
             .get(provider)

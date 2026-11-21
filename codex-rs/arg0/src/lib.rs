@@ -59,6 +59,7 @@ impl Arg0PathEntryGuard {
 }
 
 pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+    codex_utils_home_dir::init_provenance_home_env();
     #[cfg(target_os = "linux")]
     codex_utils_pty::init_spawn_helper(std::env::args_os());
     // Determine if we were invoked via the special alias.

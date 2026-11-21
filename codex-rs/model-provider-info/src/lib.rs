@@ -753,6 +753,23 @@ pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
+
+/// Provenance: the tierlm proxy (pooled free-tier models grouped by strength).
+pub const TIERLM_PROVIDER_ID: &str = "tierlm";
+pub const TIERLM_DEFAULT_BASE_URL: &str = "http://127.0.0.1:4141/v1";
+pub const TIERLM_DEFAULT_MODEL: &str = "flare";
+
+/// Built-in tierlm provider. `TIERLM_BASE_URL` overrides the base URL and the
+/// optional `TIERLM_TOKEN` is sent as a bearer token. No OpenAI login needed.
+pub fn create_tierlm_provider() -> ModelProviderInfo {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let base_url = env("TIERLM_BASE_URL").unwrap_or_else(|| TIERLM_DEFAULT_BASE_URL.to_string());
+    ModelProviderInfo {
+        name: "tierlm".into(),
+        experimental_bearer_token: env("TIERLM_TOKEN").map(Into::into),
+        ..create_oss_provider_with_base_url(&base_url, WireApi::Responses)
+    }
+}
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 
 /// Built-in default provider list.
@@ -769,6 +786,7 @@ pub fn built_in_model_providers(
     // Bundle OpenAI, supported cloud-hosted OpenAI backends, and local OSS providers.
     // Other compatible providers can be added through `model_providers` in config.toml.
     [
+        (TIERLM_PROVIDER_ID, create_tierlm_provider()),
         (OPENAI_PROVIDER_ID, openai_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (GCP_PROVIDER_ID, gcp_provider),

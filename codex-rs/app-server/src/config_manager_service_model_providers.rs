@@ -127,7 +127,7 @@ impl ConfigManager {
         let default_id = layers
             .required_model_provider()
             .or_else(|| effective.get("model_provider").and_then(TomlValue::as_str))
-            .unwrap_or(OPENAI_PROVIDER_ID);
+            .unwrap_or(codex_model_provider_info::TIERLM_PROVIDER_ID);
         let selection_layer = layers
             .layers_high_to_low()
             .find(|layer| layer.config.get("model_provider").is_some());
