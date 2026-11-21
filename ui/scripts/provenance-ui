@@ -24,6 +24,12 @@ if curl -fsS "http://127.0.0.1:${port}/api/info" >/dev/null 2>&1; then
   exit 0
 fi
 
+# If the ChatGPT-web provider is on in provenance-core, say so when its login is missing or expired
+# (silent otherwise; never blocks the launch).
+if command -v provenance-core >/dev/null 2>&1; then
+  provenance-core webstatus --boot 2>/dev/null || true
+fi
+
 export PROVENANCE_UI_CWD="${PROVENANCE_UI_CWD:-$PWD}"
 cd "$ui_dir"
 [ -d node_modules ] || npm install
