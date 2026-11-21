@@ -1,7 +1,7 @@
 # Provenance
 
 Provenance is a lightly rebranded fork of [OpenAI's Codex CLI](https://github.com/openai/codex)
-(Apache-2.0) that runs on [tierlm](https://github.com/prominence-chan/tierlm)'s pooled free-tier
+(Apache-2.0) that runs on [provenance-core](https://github.com/prominence-chan/provenance-core)'s pooled free-tier
 models instead of OpenAI's. You pick a strength tier, not a model:
 
 | Model    | Tier                                   |
@@ -15,7 +15,7 @@ What differs from upstream Codex:
 
 - The binary is `provenance`. Its config home is `~/.provenance` (override with `PROVENANCE_HOME`), so it
   never reads or writes your real `~/.codex` config, auth or sessions.
-- The built-in `tierlm` provider is the default: Responses API (`wire_api = "responses"`) at
+- The built-in provider (id `tierlm`, pointing at provenance-core) is the default: Responses API (`wire_api = "responses"`) at
   `http://127.0.0.1:4141/v1`. No ChatGPT login or `OPENAI_API_KEY` is needed.
 - Tier names, and any other non-OpenAI model, use conservative fallback metadata: a 128k context window,
   no reasoning-summary parameter, standard JSON-schema function tools.
@@ -36,7 +36,7 @@ install -m 755 target/release/provenance ~/.local/bin/provenance
 
 ## Run
 
-Start tierlm (it listens on `127.0.0.1:4141` and serves `/v1/responses`), then:
+Start provenance-core (it listens on `127.0.0.1:4141` and serves `/v1/responses`), then:
 
 ```shell
 provenance                          # interactive TUI
@@ -44,12 +44,17 @@ provenance exec "<task>"            # non-interactive
 provenance -m nova exec "<task>"  # choose a tier
 ```
 
+
+## Web UI
+
+`ui/` is a local web frontend in the style of the Codex desktop app, driving `provenance app-server`. Run `provenance-ui` (or `cd ui && npm run dev`) and open http://localhost:5173. See `ui/README.md` for how it's put together.
+
 ## Configure
 
 | Setting                 | How to set it                                                   |
 |-------------------------|-----------------------------------------------------------------|
-| tierlm base URL         | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
-| tierlm bearer token     | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)   |
+| provenance-core URL        | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
+| provenance-core token    | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)   |
 | config home             | `PROVENANCE_HOME` (default `~/.provenance`)                     |
 | default tier            | `model = "spark"` in `~/.provenance/config.toml`, or `-m spark` |
 
