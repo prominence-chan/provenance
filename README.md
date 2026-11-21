@@ -1,34 +1,42 @@
+<div align="center">
+
 # Provenance
 
-Provenance is a lightly rebranded fork of [OpenAI's Codex CLI](https://github.com/openai/codex)
-(Apache-2.0) that runs on [provenance-core](https://github.com/prominence-chan/provenance-core)'s pooled free-tier
-models instead of OpenAI's. You pick a strength tier, not a model:
+**A coding agent in your terminal, running on pooled free-tier models.**
 
-| Model    | Tier                                   |
-|----------|----------------------------------------|
-| `nova` | hyperfrontier                          |
-| `solstice`  | frontier (default)                     |
-| `spark`  | strong mid                             |
-| `ember` | fast / small                           |
+A rebranded fork of [OpenAI Codex CLI](https://github.com/openai/codex), powered by
+[provenance-core](https://github.com/prominence-chan/provenance-core). Pick a strength, not a model.
 
-What differs from upstream Codex:
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![Rust](https://img.shields.io/badge/Rust-CLI-000000?logo=rust&logoColor=white)
+![React](https://img.shields.io/badge/web%20UI-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)
+![Backend](https://img.shields.io/badge/backend-provenance--core-F97316)
+[![Upstream](https://img.shields.io/badge/upstream-openai%2Fcodex-412991?logo=openai&logoColor=white)](https://github.com/openai/codex)
 
-- The binary is `provenance`. Its config home is `~/.provenance` (override with `PROVENANCE_HOME`), so it
-  never reads or writes your real `~/.codex` config, auth or sessions.
-- The built-in provider (id `tierlm`, pointing at provenance-core) is the default: Responses API (`wire_api = "responses"`) at
-  `http://127.0.0.1:4141/v1`. No ChatGPT login or `OPENAI_API_KEY` is needed.
-- Tier names, and any other non-OpenAI model, use conservative fallback metadata: a 128k context window,
-  no reasoning-summary parameter, standard JSON-schema function tools.
-- The startup update check is off by default, since it would point at upstream Codex releases.
+<img src=".github/provenance-ui.png" alt="Provenance web UI" width="88%" />
 
-Everything else is upstream Codex. The patch is kept small so it rebases cleanly onto new upstream tags.
+</div>
+
+## Why
+
+Codex is a great agent harness, but it wants an OpenAI account. Provenance keeps the harness and swaps the brain:
+requests go to a local [provenance-core](https://github.com/prominence-chan/provenance-core), which pools the free
+tiers of a dozen LLM providers and sorts them into four tiers.
+
+| Tier       | Strength                    |
+| ---------- | --------------------------- |
+| `nova`     | hyperfrontier               |
+| `solstice` | frontier (default)          |
+| `spark`    | strong mid-size             |
+| `ember`    | fast / small                |
+
+No ChatGPT login, no `OPENAI_API_KEY`.
 
 ## Build
 
-You need a Rust toolchain. `codex-rs/rust-toolchain.toml` pins the version, and rustup installs it on first use.
+Needs a Rust toolchain (`codex-rs/rust-toolchain.toml` pins the version; rustup installs it on first use).
 
 ```shell
-curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 cd codex-rs
 cargo build --release -p codex-cli --bin provenance -j 4
 install -m 755 target/release/provenance ~/.local/bin/provenance
@@ -36,37 +44,61 @@ install -m 755 target/release/provenance ~/.local/bin/provenance
 
 ## Run
 
-Start provenance-core (it listens on `127.0.0.1:4141` and serves `/v1/responses`), then:
+Start provenance-core (it serves `http://127.0.0.1:4141/v1`), then:
 
 ```shell
 provenance                          # interactive TUI
 provenance exec "<task>"            # non-interactive
-provenance -m nova exec "<task>"  # choose a tier
+provenance -m nova exec "<task>"    # choose a tier
 ```
 
+**Web UI.** `ui/` is a local, Codex-desktop-style frontend driving `provenance app-server`:
 
-## Web UI
+```shell
+cd ui && npm install && npm run dev  # http://localhost:5173
+```
 
-`ui/` is a local web frontend in the style of the Codex desktop app, driving `provenance app-server`. Run `provenance-ui` (or `cd ui && npm run dev`) and open http://localhost:5173. See `ui/README.md` for how it's put together.
+See [`ui/README.md`](ui/README.md) for how it fits together.
 
 ## Configure
 
-| Setting                 | How to set it                                                   |
-|-------------------------|-----------------------------------------------------------------|
-| provenance-core URL        | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
-| provenance-core token    | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)   |
-| config home             | `PROVENANCE_HOME` (default `~/.provenance`)                     |
-| default tier            | `model = "spark"` in `~/.provenance/config.toml`, or `-m spark` |
+| Setting               | How to set it                                                   |
+| --------------------- | --------------------------------------------------------------- |
+| provenance-core URL   | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
+| provenance-core token | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)  |
+| config home           | `PROVENANCE_HOME` (default `~/.provenance`)                     |
+| default tier          | `model = "spark"` in `~/.provenance/config.toml`, or `-m spark` |
 
 Any upstream Codex setting works in `~/.provenance/config.toml`. To use another provider, set
-`model_provider = "openai"` or define your own under `[model_providers.<id>]`.
-Upstream has removed `wire_api = "chat"`, so providers must speak the Responses API.
+`model_provider = "openai"` or define your own under `[model_providers.<id>]` (Responses API only; upstream removed
+`wire_api = "chat"`).
 
-License: Apache-2.0, the same as upstream (see `LICENSE` and `NOTICE`). Not affiliated with OpenAI.
+<details>
+<summary><b>What differs from upstream Codex</b></summary>
+
+- The binary is `provenance`. Its config home is `~/.provenance` (override with `PROVENANCE_HOME`), so it never
+  reads or writes your real `~/.codex` config, auth or sessions.
+- The built-in provider (id `tierlm`, pointing at provenance-core) is the default: Responses API
+  (`wire_api = "responses"`) at `http://127.0.0.1:4141/v1`.
+- Tier names, and any other non-OpenAI model, use conservative fallback metadata: a 128k context window, no
+  reasoning-summary parameter, standard JSON-schema function tools.
+- The startup update check is off by default, since it would point at upstream Codex releases.
+
+Everything else is upstream Codex. The patch is kept small so it rebases cleanly onto new upstream tags.
+
+</details>
+
+## Credits and license
+
+Provenance is built on [OpenAI Codex CLI](https://github.com/openai/codex) and keeps its license:
+Apache-2.0 (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). All credit for the agent itself goes to the Codex
+team. Not affiliated with or endorsed by OpenAI.
 
 ---
 
-*The upstream Codex README follows.*
+<p align="center"><sub><b>Upstream README</b>: everything below is the original OpenAI Codex CLI README, kept as is.<br/>Commands there say <code>codex</code>; in this fork the binary is <code>provenance</code>.</sub></p>
+
+---
 
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
