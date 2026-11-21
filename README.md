@@ -6,8 +6,8 @@ models instead of OpenAI's. You pick a strength tier, not a model:
 
 | Model    | Tier                                   |
 |----------|----------------------------------------|
-| `corona` | hyperfrontier                          |
-| `flare`  | frontier (default)                     |
+| `supernova` | hyperfrontier                          |
+| `blaze`  | frontier (default)                     |
 | `ember`  | strong mid                             |
 | `cinder` | fast / small                           |
 
@@ -41,7 +41,7 @@ Start tierlm (it listens on `127.0.0.1:4141` and serves `/v1/responses`), then:
 ```shell
 provenance                          # interactive TUI
 provenance exec "<task>"            # non-interactive
-provenance -m corona exec "<task>"  # choose a tier
+provenance -m supernova exec "<task>"  # choose a tier
 ```
 
 ## Configure
