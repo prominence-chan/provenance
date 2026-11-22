@@ -52,3 +52,21 @@
     var(--composer-shadow),
     0 0 calc(26px * var(--fx-glow-strength)) color-mix(in srgb, var(--fx-mid) 26%, transparent);
 }
+
+/* Nova's charge heats the composer itself: border and inner edge glow from dull orange to
+   white-hot (FlameFx sets --fx-heat 0..1 and --fx-heat-color only while it heats). The glow
+   stays at the edge, under the padding, never over the text. */
+.main[data-fx="gl"] .composer.fx-heating {
+  transition: none;
+  border-color: color-mix(
+    in srgb,
+    var(--fx-heat-color) calc(var(--fx-heat) * 100%),
+    var(--border-strong)
+  );
+  box-shadow:
+    var(--composer-shadow),
+    inset 0 0 calc(1px + var(--fx-heat) * 10px)
+      color-mix(in srgb, var(--fx-heat-color) calc(var(--fx-heat) * 55%), transparent),
+    0 0 calc(var(--fx-heat) * 14px)
+      color-mix(in srgb, var(--fx-heat-color) calc(var(--fx-heat) * 40%), transparent);
+}

@@ -1,9 +1,12 @@
 // The new-thread hero: a live sun with prominences and flares, one small WebGL2 canvas.
 //
-// The disc has limb darkening and slowly churning granulation; a corona with faint streamers;
-// a fringe of spicules licking off the limb; and a few prominence loops that each live their
-// own cycle (rise, hang, drift, sometimes erupt and fade) at random spots round the limb, so
-// the picture never repeats. Now and then a flare jet bursts off the limb and falls back.
+// The disc is a turning sphere (spherical mapping, so features foreshorten at the limb), with
+// limb darkening, granulation at three scales and speeds, faculae and a dark filament; a
+// corona with two streamer layers turning at different rates and a soft bloom; a red
+// chromosphere with two layers of spicules; and a few prominence loops (braided threads in a
+// soft sheath, lit from below, plasma draining down the legs) that each live their own cycle
+// (rise, hang, drift, sometimes erupt and fade) at random spots round the limb, so the picture
+// never repeats. Now and then a flare jet bursts off the limb and falls back.
 //
 // Cheap: ~200 CSS px square, DPR capped at 2, 30 fps, paused when the tab is hidden or the
 // window is unfocused for a few seconds. Under prefers-reduced-motion it draws one still
@@ -40,6 +43,15 @@ float fbm(vec2 p) {
   return v;
 }
 float wrapA(float a) { return mod(a + 3.14159265, 6.2831853) - 3.14159265; }
+// Noise round the limb with no seam where atan wraps (at -x): just above -pi the value is
+// blended into the one from just below +pi.
+float seamW(float a) { return 1.0 - smoothstep(-3.14159265, -2.3, a); }
+float noiseA(float a, float k, float y) {
+  return mix(noise(vec2(a * k, y)), noise(vec2((a + 6.2831853) * k, y)), seamW(a));
+}
+float fbmA(float a, float k, float y) {
+  return mix(fbm(vec2(a * k, y)), fbm(vec2((a + 6.2831853) * k, y)), seamW(a));
+}
 
 // heat 0..1 -> colour: crimson -> ember -> corona -> glint
 vec3 ramp(float h) {
@@ -50,38 +62,62 @@ vec3 ramp(float h) {
 
 void main() {
   vec2 p = vUv;
-  float R = 0.38;
+  float R = 0.36;
   float r = length(p);
   float a = atan(p.y, p.x);
   float t = uT;
   vec3 col = vec3(0.0);
   float alpha = 0.0;
 
-  // ---- disc ----
+  // ---- disc: a turning sphere ----
   if (r < R) {
-    float mu = sqrt(1.0 - (r / R) * (r / R));
-    // granulation drifts slowly as the sun turns
     vec2 q = p / R;
-    vec2 g = q / (0.35 + 0.65 * mu) * 9.0 + vec2(t * 0.05, 0.0);
-    float gran = fbm(g + fbm(g * 0.6 + t * 0.06) * 1.4);
-    float fac = smoothstep(0.6, 0.8, fbm(g * 0.35 - t * 0.02 + 7.0)) * (1.0 - mu);
-    float heat = 0.16 + 0.66 * pow(mu, 0.8) + (gran - 0.5) * 0.24 + fac * 0.22;
+    float mu = sqrt(max(1.0 - dot(q, q), 0.0));      // cos of the view angle
+    // Spherical coordinates, so features foreshorten towards the limb and drift faster at
+    // the centre than at the edge as the sun turns (the main depth cue); the equator turns
+    // a little faster than the poles.
+    float lat = asin(clamp(q.y, -1.0, 1.0));
+    float lon = asin(clamp(q.x / max(cos(lat), 1e-3), -1.0, 1.0));
+    float rot = t * 0.03 * (1.0 - 0.3 * q.y * q.y);
+    vec2 s = vec2(lon + rot, lat);
+    // Three scales at three speeds: supergranulation (big, slow), granulation (fine,
+    // boiling), and active regions with faculae that show up bright near the limb.
+    float sg = fbm(s * 2.4 + vec2(0.0, t * 0.003) + 3.0);
+    vec2 g = s * 17.0;
+    float gw = fbm(g * 0.45 + vec2(t * 0.07, -t * 0.05));
+    float gran = noise(g + gw * 1.8) * 0.6 + noise(g * 2.2 - gw * 1.3 + t * 0.09) * 0.4;
+    gran = smoothstep(0.2, 0.85, gran);
+    float act = smoothstep(0.6, 0.78, fbm(s * 1.5 + 11.0));
+    // Limb darkening (Eddington-ish) and a redder, cooler limb.
+    float limb = 0.2 + 0.8 * pow(mu, 0.85);
+    float heat = limb * (0.74 + (sg - 0.5) * 0.24 + (gran - 0.5) * 0.3 * (0.35 + 0.65 * mu))
+               + act * pow(1.0 - mu, 1.5) * 0.3;
+    // A dark filament: a prominence seen from above, lying on the disc and turning with it.
+    float fl = abs(fbm(s * vec2(2.4, 5.0) + 21.0) - 0.5);
+    heat -= smoothstep(0.035, 0.0, fl) * smoothstep(0.55, 0.68, fbm(s * 1.1 + 5.0)) * 0.16 * mu;
     col = ramp(clamp(heat, 0.0, 1.0));
-    alpha = smoothstep(R, R - 0.006, r);
+    col *= 0.42 + 0.66 * pow(mu, 0.45);
+    col += uGlint * pow(mu, 8.0) * 0.08;               // a soft hot core
+    alpha = smoothstep(R, R - 0.004, r);
   }
 
   float h = r - R;          // height above the limb
   if (h > -0.01) {
     float hh = max(h, 0.0);
-    // ---- corona with faint streamers ----
-    float streamer = 0.6 + 0.8 * pow(noise(vec2(a * 3.0 + 10.0, t * 0.05)), 2.0);
-    float corona = exp(-hh / 0.05) * 0.55 + exp(-hh / (0.2 * streamer)) * 0.38;
-    // ---- spicules: a fringe of small flames licking off the limb ----
-    float fringeH = 0.018 + 0.03 * fbm(vec2(a * 4.0, t * 0.12));
-    float sp = fbm(vec2(a * 38.0, hh * 30.0 - t * 0.9));
-    float spic = smoothstep(1.0, 0.2, hh / fringeH + (0.5 - sp) * 1.2) * smoothstep(-0.01, 0.002, h);
-    float heat = corona * 0.42 + spic * 0.42;
-    float glow = corona * 0.75 + spic * 0.55;
+    // ---- corona: two streamer layers turning at different rates (parallax) ----
+    float st1 = 0.55 + 0.9 * pow(noiseA(a + t * 0.005, 2.6, 1.0), 2.0);
+    float st2 = pow(noiseA(a - t * 0.004, 8.0, 4.0 + hh * 3.0), 3.0);
+    float corona = exp(-hh / 0.032) * 0.5 + exp(-hh / (0.11 * st1)) * 0.3 + exp(-hh / 0.07) * st2 * 0.35;
+    float bloom = exp(-hh / 0.2) * 0.14;
+    // ---- chromosphere: a thin red rim with two layers of spicules licking off it ----
+    float fringeH = 0.012 + 0.022 * fbmA(a, 4.0, t * 0.1);
+    float sp = fbmA(a, 40.0, hh * 34.0 - t * 0.8);
+    float sp2 = noiseA(a, 95.0, hh * 70.0 - t * 1.5);
+    float spic = smoothstep(1.0, 0.15, hh / fringeH + (0.5 - sp) * 1.1 + (0.5 - sp2) * 0.45)
+               * smoothstep(-0.01, 0.0015, h);
+    float chrom = exp(-abs(h - 0.002) / 0.004);
+    float heat = corona * 0.4 + spic * 0.42 + chrom * 0.25;
+    float glow = corona * 0.7 + spic * 0.55 + chrom * 0.4 + bloom;
 
     // ---- prominences: a few loops, each on its own life cycle ----
     for (int i = 0; i < 4; i++) {
@@ -104,17 +140,28 @@ void main() {
       if (abs(x) < 1.15) {
         float yc = H * sqrt(max(1.0 - x * x, 0.0)) + lift * 0.04;
         float wob = (fbm(vec2(x * 3.0 + seed, t * 0.25)) - 0.5) * 0.03;
-        float d = abs(hh - yc - wob);
-        float w = 0.011 + 0.008 * (1.0 - abs(x)) + lift * 0.012;
-        float strand = exp(-d / w);
-        // a faint curtain of plasma hanging under the arch
-        float curtain = smoothstep(yc + 0.01, 0.0, hh) * smoothstep(1.0, 0.6, abs(x))
-                      * fbm(vec2(x * 7.0 + seed, hh * 40.0 - t * 0.4)) * 0.35;
-        // plasma flows along the loop: knots travel from one foot to the other
-        float knots = 0.55 + 0.45 * fbm(vec2(x * 5.0 - t * 0.6, seed));
+        float sd = hh - yc - wob;                    // signed: < 0 under the arch
+        float w = 0.012 + 0.009 * (1.0 - abs(x)) + lift * 0.012;
+        // A rope of braided threads inside a soft sheath, not one flat stroke: three
+        // strands wander across the rope's width at their own rates.
+        float threads = 0.0;
+        for (int j = 0; j < 3; j++) {
+          float fj = float(j);
+          float off = (fj - 1.0) * w * 0.6
+                    + (noise(vec2(x * 4.0 + fj * 7.3 + seed, t * (0.25 + 0.1 * fj))) - 0.5) * w * 1.1;
+          threads += exp(-abs(sd - off) / (w * 0.22)) * (0.7 + 0.3 * fj / 2.0);
+        }
+        float sheath = exp(-sd * sd / (w * w * 2.4));
+        // Lit from the disc: the underside of the rope is brighter (rim light), the top cooler.
+        float lit = 0.75 + 0.45 * smoothstep(w, -w, sd);
+        // a faint curtain of plasma hanging under the arch, in fine vertical threads
+        float curtain = smoothstep(yc + 0.01, 0.0, hh) * smoothstep(1.0, 0.55, abs(x))
+                      * fbm(vec2(x * 9.0 + seed, hh * 30.0 - t * 0.35)) * 0.3;
+        // plasma drains down both legs: knots travel from the top to the feet
+        float knots = 0.55 + 0.6 * smoothstep(0.35, 0.85, noise(vec2(abs(x) * 6.0 - t * 0.5, seed)));
         float feet = smoothstep(1.15, 0.85, abs(x));
-        float body = exp(-d / (w * 3.5)) * 0.5;       // a soft sheath round the strand
-        float pv = (strand * knots + body + curtain) * feet * life * (1.0 - lift * 0.6);
+        float pv = ((threads * 0.4 + sheath * 0.85) * knots * lit * 1.2 + curtain) * feet * life
+                 * (1.0 - lift * 0.6);
         heat += pv * 0.75;
         glow += pv;
       }
@@ -140,8 +187,9 @@ void main() {
     }
 
     vec3 c = ramp(clamp(heat, 0.0, 1.0)) * glow;
-    // a touch of magenta in the outer corona
+    // a touch of magenta in the outer corona and the cooler prominence plasma
     c = mix(c, uMagenta * glow, smoothstep(0.02, 0.2, hh) * 0.35);
+    c = mix(c, uCrimson * glow, chrom * smoothstep(0.003, 0.0, hh) * 0.4);
     float ga = clamp(glow, 0.0, 1.0);
     col = col * alpha + c * (1.0 - alpha);
     alpha = max(alpha, ga * mix(0.75, 1.0, uLight));

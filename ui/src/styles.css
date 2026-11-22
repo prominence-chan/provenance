@@ -599,61 +599,20 @@ select {
   }
 }
 
-/* Logo: the glow breathes, plasma flows along the arch, the inner loop rises and settles
-   (incommensurate periods, so it never looks looped). */
-.solar-mark .sm-halo {
-  transform-origin: 20px 26px;
-  animation: sm-breathe 7.3s var(--ease) infinite alternate;
-}
-.solar-mark .sm-flow {
-  animation: sm-flow 5.3s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
-}
-.solar-mark .sm-loop2 {
-  transform-origin: 20.5px 26px;
-  animation: sm-rise 11.9s ease-in-out infinite;
+/* Logo: a slow, faint glow breathe around the disc. Nothing else moves. */
+.solar-mark {
+  animation: sm-breathe 6.4s ease-in-out infinite alternate;
 }
 @keyframes sm-breathe {
   from {
-    opacity: 0.5;
-    transform: scale(0.92);
+    filter: drop-shadow(0 0 0 transparent);
   }
   to {
-    opacity: 1;
-    transform: scale(1.05);
-  }
-}
-@keyframes sm-flow {
-  from {
-    stroke-dashoffset: 16;
-    stroke-opacity: 0;
-  }
-  15% {
-    stroke-opacity: 0.85;
-  }
-  85% {
-    stroke-opacity: 0.85;
-  }
-  to {
-    stroke-dashoffset: -100;
-    stroke-opacity: 0;
-  }
-}
-@keyframes sm-rise {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.82);
-  }
-  45% {
-    opacity: 1;
-    transform: scale(1.04);
-  }
-  70% {
-    opacity: 0.7;
-    transform: scale(0.96);
+    filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--ember) 45%, transparent));
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .solar-mark,
   .solar-mark * {
     animation: none !important;
   }

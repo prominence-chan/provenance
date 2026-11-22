@@ -170,17 +170,25 @@ a 40 px header, 13.5 px body text, tool calls as one-line rows that open on clic
   - spark: electric (blue arc, ice-white, white-gold cores); tiny sparks fizzle in and out at
     random spots just outside the edge, drift and crackle; on switch a scatter of them with
     short arcs jumping between neighbours; idle is a lone spark every few seconds;
-  - ember: heat cracks; branching, jagged hairline cracks spread out from the edge, hot at the
-    growing tip, then cool to a faint glow that stays in the cracks; while active, heat pulses
-    run out along them;
+  - ember: craquelure; a Voronoi network of craggy cracks (big plates split by finer cracks,
+    irregular cells, jagged edges) opens outward from the edge behind a ragged front, white-hot
+    at the front, then each crack cools to a faint glow that stays in the network; while
+    active, heat pulses run out along it;
   - solstice: sunset; on switch the sun's glare appears on the top edge, flames and dusk
     clouds (`--fx-solstice-dusk`) rise and run out sideways under slowly turning rays, then
-    it settles; idle is a low, faint flame with sparse cinders drifting up;
-  - nova: plasma; on switch a short charge (motes gather, the rim tightens), then an eruption
-    from the whole composer: core flash, chromatic shockwaves, debris with physics, plasma
-    smoke cooling through violet and cyan (`--fx-nova-off1/2`), a lingering afterglow; idle
-    is a calm shimmering plasma rim, active adds a corona, flames, embers and the header
-    filament.
+    it settles; idle is a low, faint flame with sparse cinders drifting up; every solstice
+    layer (flames, glare, rays, clouds, the header filament) fades out inside the composer's
+    width;
+  - nova: plasma; on switch a ~1.3 s charge: the composer heats like metal, its edge (and its
+    own border, via `--fx-heat` on `.composer`, `effects.css`) going dull orange, yellow, then
+    white-hot with a bloom and heat shimmer; then an eruption from the whole composer: core
+    flash, lopsided noise-warped shock fronts torn into arcs of uneven thickness with radial
+    filaments, debris with physics, plasma smoke, and a supernova remnant (wispy pink
+    filaments over violet / teal gas, `--fx-nova-off1/2`, two layers drifting at different
+    rates) that fades over ~10 s; idle is a calm shimmering plasma rim, active adds a corona,
+    flames, embers and the header filament.
+  - Flames (solstice, nova) have depth: a slower, taller, dimmer back layer behind the front
+    tongues, and hot filaments streaming up inside each tongue.
 
   Motion is organic by construction: smooth attacks into two-rate decays (no kink at the
   peak), per-flare timing jitter, idle brightness wandering on slow noise, layers fading at
@@ -192,11 +200,14 @@ a 40 px header, 13.5 px body text, tool calls as one-line rows that open on clic
   `prefers-reduced-motion`, or without WebGL2, nothing animates: `src/theme/effects.css`
   draws a static tier tint on the composer border instead.
 
-- **Logo and hero:** `src/components/SolarMark.tsx` is the mark (a sun's limb with an
-  erupting prominence arch; gently animated in CSS, `.solar-mark` in `styles.css`; the
-  favicon in `index.html` is a static copy). The new-thread page shows a live sun,
-  `src/components/effects/HeroSun.tsx`: a small WebGL2 canvas with granulation, corona,
-  spicules, prominence loops on their own random life cycles and the odd flare jet; 30 fps,
+- **Logo and hero:** `src/components/SolarMark.tsx` is the mark (a solid sun disc with a
+  prominence arch and a horizon line cut out of it, on a 32 px grid so it stays crisp at
+  16 px; a slow glow breathe in CSS, `.solar-mark` in `styles.css`; the favicon in
+  `index.html` is a static copy). The new-thread page shows a live sun,
+  `src/components/effects/HeroSun.tsx`: a small WebGL2 canvas with a turning, limb-darkened
+  sphere (granulation at three scales and speeds, faculae, a dark filament), a red
+  chromosphere with spicules, a two-layer corona with bloom, prominence loops of braided
+  threads lit from below on their own random life cycles, and the odd flare jet; 30 fps,
   paused when hidden or unfocused, one still frame under reduced motion, the static mark
   without WebGL2.
 - **Preview without a turn (dev only):** `http://localhost:5173/?fx=nova` (active),
