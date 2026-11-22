@@ -5,6 +5,7 @@
 //   - GET /api/sources -> each tier's sources and usage left (provenance-core /v1/sources)
 //   - GET /api/health  -> is the provenance binary there, is provenance-core up
 //   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage)
+//   - /api/web/*       -> provenance-core's sign-in API (/web/*: accounts, sign-in window, browser)
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
 //
 // Used by server/main.ts (the `npm run dev` / `npm start` CLI) and by the desktop
@@ -87,6 +88,80 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     res.end(JSON.stringify(body));
   }
 
+  /**
+   * /api/web/<route> -> provenance-core's /web/<route>: the sign-in API behind "Models &
+   * accounts" (accounts, one sign-in window, the bundled browser). Only these routes pass,
+   * with the router's status and body as-is (a 409's {detail} included). Router down:
+   * 502 {detail, down: true}. Writes must come from our own page (a JSON body and our
+   * Origin), since they open windows and change accounts.
+   */
+  const WEB_ROUTES: { method: string; path: RegExp }[] = [
+    { method: "GET", path: /^\/web\/accounts$/ },
+    { method: "POST", path: /^\/web\/accounts$/ },
+    { method: "DELETE", path: /^\/web\/accounts\/[A-Za-z0-9_.-]+$/ },
+    { method: "GET", path: /^\/web\/login$/ },
+    { method: "POST", path: /^\/web\/login$/ },
+    { method: "POST", path: /^\/web\/login\/cancel$/ },
+    { method: "POST", path: /^\/web\/browser\/prepare$/ },
+  ];
+
+  async function proxyWeb(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const method = req.method ?? "GET";
+    const routerPath = url.pathname.slice("/api".length);
+    const reply = (status: number, body: unknown) => {
+      res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    if (!WEB_ROUTES.some((r) => r.method === method && r.path.test(routerPath))) {
+      reply(404, { detail: "Not Found" });
+      return;
+    }
+    let body: string | undefined;
+    if (method !== "GET") {
+      if (!sameOrigin(req) || !req.headers.origin) {
+        reply(403, { detail: "Forbidden" });
+        return;
+      }
+      if (method === "POST") {
+        if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) {
+          reply(415, { detail: "Send JSON" });
+          return;
+        }
+        let raw = "";
+        for await (const chunk of req) {
+          raw += chunk;
+          if (raw.length > 16_384) {
+            reply(413, { detail: "Too large" });
+            return;
+          }
+        }
+        body = raw || "{}";
+      }
+    }
+    try {
+      const r = await fetch(`${tierlmUrl}${routerPath}${url.search}`, {
+        method,
+        body,
+        headers: body ? { "content-type": "application/json" } : undefined,
+        signal: AbortSignal.timeout(method === "GET" ? 3000 : 15_000),
+      });
+      const text = await r.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { detail: text.slice(0, 300) || r.statusText };
+      }
+      reply(r.status, parsed);
+    } catch {
+      reply(502, { detail: "provenance-core isn't answering.", down: true });
+    }
+  }
+
   async function handleApi(req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/api/info") {
@@ -118,6 +193,10 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         // fall through
       }
       sendJson(res, { tiers: [], source: "fallback" });
+      return true;
+    }
+    if (url.pathname.startsWith("/api/web/")) {
+      await proxyWeb(req, res, url);
       return true;
     }
     if (url.pathname === "/api/health") {
