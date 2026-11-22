@@ -62,7 +62,7 @@ export function TokenUsage({ threadId }: { threadId: string }) {
   const r = 5.5;
   const c = 2 * Math.PI * r;
   return (
-    <span className="token-usage" title={title}>
+    <span className="token-usage meta" title={title}>
       {pct !== null && (
         <svg width="14" height="14" viewBox="0 0 14 14" className="ctx-ring" aria-hidden>
           <circle cx="7" cy="7" r={r} className="ctx-ring-track" />
@@ -76,7 +76,7 @@ export function TokenUsage({ threadId }: { threadId: string }) {
         </svg>
       )}
       {compactNumber(total.totalTokens)}
-      {pct !== null && <span className="token-pct">{pct}%</span>}
+      {pct !== null && <span>{pct}%</span>}
     </span>
   );
 }

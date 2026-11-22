@@ -66,6 +66,19 @@ select {
 .spacer {
   flex: 1;
 }
+/* Small secondary text around the composer, tier picker and header (tier blurbs, effort,
+   source usage, context use): one size, weight, colour and casing, written in sentence case.
+   Use this class instead of styling such text per component. */
+.meta {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---- tier color plumbing: data-tier sets --tier-color for descendants ---- */
 [data-tier="ember"] {
@@ -481,13 +494,6 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: var(--muted);
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.token-pct {
-  color: var(--faint);
 }
 .ctx-ring {
   transform: rotate(-90deg);
@@ -533,6 +539,11 @@ select {
 .tier-badge .tier-glyph {
   color: var(--tier-color);
   flex-shrink: 0;
+}
+/* The pinned source after the tier name ("solstice · GPT-6 Luna"), in the badge and the picker. */
+.tier-source {
+  font-weight: 400;
+  color: var(--muted);
 }
 [data-tier="nova"] .tier-glyph,
 .tier-badge[data-tier="nova"] .tier-glyph {
@@ -1560,12 +1571,6 @@ button.turn-models-list:hover .turn-models-more {
     transform: translateY(4px) scale(0.97);
   }
 }
-.tier-menu-head {
-  padding: 6px 10px 4px;
-  font-size: var(--fs-xs);
-  color: var(--faint);
-  letter-spacing: 0.3px;
-}
 .tier-option {
   display: flex;
   align-items: center;
@@ -1607,39 +1612,74 @@ button.turn-models-list:hover .turn-models-more {
   background-clip: text;
   color: transparent;
 }
-.tier-option-blurb {
-  font-size: var(--fs-xs);
-  color: var(--muted);
-}
 .tier-option-check {
   width: 14px;
+  flex-shrink: 0;
   color: var(--tier-color);
   display: inline-flex;
 }
-.rank-pips {
+/* Chevron: this tier has a source submenu. */
+.tier-option-more {
+  width: 10px;
+  margin-left: -4px;
+  flex-shrink: 0;
   display: inline-flex;
-  gap: 2px;
-  align-items: flex-end;
+  color: var(--faint);
 }
-.rank-pips > span {
-  width: 3px;
-  border-radius: 1px;
-  background: var(--panel-3);
+.tier-option.active .tier-option-more {
+  color: var(--muted);
 }
-.rank-pips > span:nth-child(1) {
-  height: 5px;
+.tier-picker-btn .tier-source {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.rank-pips > span:nth-child(2) {
-  height: 7px;
+
+/* Source submenu: beside the hovered tier row (TierPicker places it). */
+.tier-sub {
+  position: absolute;
+  left: calc(100% + 4px);
+  top: 0;
+  width: max-content;
+  min-width: 200px;
+  max-width: 300px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--overlay-shadow);
 }
-.rank-pips > span:nth-child(3) {
-  height: 9px;
+.tier-sub-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 6px 0 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
 }
-.rank-pips > span:nth-child(4) {
-  height: 11px;
+.tier-sub-option.active {
+  background: var(--hover);
 }
-.rank-pips > span.on {
-  background: var(--tier-color);
+.tier-sub-option[aria-disabled="true"] {
+  cursor: default;
+}
+.tier-sub-label {
+  flex: 1;
+  min-width: 0;
+  padding-right: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+.tier-sub-option[aria-disabled="true"] .tier-sub-label {
+  color: var(--faint);
+}
+.tier-sub-option .tier-option-check {
+  width: 13px;
 }
 
 /* ---- notices ----------------------------------------------------------- */

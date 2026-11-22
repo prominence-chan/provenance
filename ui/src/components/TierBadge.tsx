@@ -1,4 +1,5 @@
-import { tierOf, type TierId } from "../theme/tiers";
+import { useAppState } from "../store/store";
+import { splitModel, tierOf, type TierId } from "../theme/tiers";
 
 /**
  * Per-tier glyph, brighter as the tier rises: a small spark, a glowing coal (ember),
@@ -57,14 +58,37 @@ export function TierGlyph({ tier, size = 12 }: { tier: TierId | null; size?: num
   }
 }
 
-/** Small pill: glyph + model name, tinted by tier. Unknown models render neutral. */
+/**
+ * The pinned source's label for a model like "luna/solstice" ("GPT-6 Luna", or "luna" until
+ * the router has listed its sources); null for a plain tier.
+ */
+export function useSourceLabel(model: string | null | undefined): string | null {
+  return useAppState((s) => {
+    if (!model) return null;
+    const { tier, source } = splitModel(model);
+    if (!source) return null;
+    return s.sources[tier]?.find((x) => x.model === model)?.label ?? source;
+  });
+}
+
+/** Small pill: glyph + tier name (+ pinned source), tinted by tier. Unknown models render neutral. */
 export function TierBadge({ model, compact }: { model: string | null; compact?: boolean }) {
+  const source = useSourceLabel(model);
   if (!model) return null;
   const tier = tierOf(model);
   return (
-    <span className={`tier-badge ${compact ? "compact" : ""}`} data-tier={tier?.id} title={model}>
+    <span
+      className={`tier-badge ${compact ? "compact" : ""}`}
+      data-tier={tier?.id}
+      title={source ? `${tier?.id ?? model} via ${source}` : model}
+    >
       <TierGlyph tier={tier?.id ?? null} size={compact ? 10 : 11} />
-      {!compact && <span className="tier-name">{model}</span>}
+      {!compact && (
+        <span className="tier-name">
+          {source ? splitModel(model).tier : model}
+          {source && <span className="tier-source"> · {source}</span>}
+        </span>
+      )}
     </span>
   );
 }
