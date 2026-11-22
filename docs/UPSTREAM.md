@@ -55,6 +55,7 @@ disagree with the tree.
 | `codex-rs/tui/src/app_server_session/provider_selection.rs` | 1 | default provider in provider selection | same |
 | `codex-rs/{app-server,arg0,core,exec,model-provider-info,models-manager,tui,utils/home-dir}/Cargo.toml` | 1 each | `[dependencies.codex-provenance]`, placed just before `[dependencies]` so upstream's alphabetical dependency edits never touch it | Cargo needs the dependency per crate |
 | `README.md` | 1 | marks where the fork's section ends and upstream's README begins | GitHub shows README.md |
+| `codex-rs/Cargo.toml` | 1 | workspace `version = "0.171.0"` (upstream main: `0.0.0`) | Cargo reads the version here |
 
 Hook shapes, so a hook re-applied after a conflict looks like the others:
 
@@ -68,10 +69,9 @@ Hook shapes, so a hook re-applied after a conflict looks like the others:
 - **Fully qualified paths** (`codex_provenance::...`), never new `use` lines: import blocks are where upstream
   edits most.
 
-Not hooked on purpose: the workspace version. `codex-rs/Cargo.toml` says `version = "0.171.0"` because the fork
-started from the `rust-v0.171.0` release commit; upstream `main` keeps `0.0.0` there and never edits the line, so
-it does not conflict and `provenance --version` keeps saying 0.171.0. Change it there if you want a different
-version string.
+The workspace version is a hook too: `codex-rs/Cargo.toml` keeps `version = "0.171.0"`, the release the fork
+started from (`rust-v0.171.0`), while upstream `main` says `0.0.0` there and never edits the line. It sets
+`provenance --version` and the user agent; change it there if you want a different version string.
 
 ## Changing the harness
 
@@ -181,5 +181,18 @@ If the app-server protocol changed, regenerate the UI's types: `cd ui && npm run
 `scripts/provenance-smoke.py <binary> [--turn spark]` drives a built binary's `app-server` with a throwaway
 `PROVENANCE_HOME`; `--turn` runs one real turn against the router (spends quota).
 
-Upstream's own tests that assert upstream defaults (provider `openai`, 272k fallback context, the `OpenAI Codex`
-header in TUI snapshots, `.codex` home) fail on the fork by design.
+Upstream's own tests that assert the defaults the fork changes are expected to fail on the fork, e.g.
+`codex-models-manager` `authoritative_catalog_preserves_hidden_models_and_matches_exact_ids` (expects
+upstream's 272k fallback context, the fork's is 128k). Expect the same in the core / tui / app-server suites
+wherever a test asserts provider `openai` by default or a snapshot shows the `OpenAI Codex` header (those suites
+were not run for the first sync). `codex-utils-home-dir`'s home test is hooked and passes.
+
+## Sync log
+
+| Date | Upstream | Commits | Conflicted files | Needed a person | Time |
+| --- | --- | --- | --- | --- | --- |
+| 2026-11-22 | `cf3ff153` (main) | 211 since `1b841662` | 5 | 1 (`exec` banner, upstream reshaped the next line) | merge + resolution 19 s; Cargo.lock refresh, build, tests, smoke 17 min |
+
+The first sync also cleared the release-branch residue: the fork started from the `rust-v0.171.0` tag, which is
+off `main` (a cherry-pick of #62387 plus the version bump). Four TUI files conflicted between that cherry-pick
+and `main`'s later edits and were taken from upstream; from now on the merge base is a `main` commit.

@@ -225,4 +225,5 @@ app-server model/list smoke.
 EOF
 rm -f "$STATE"
 say "committed $(git log -1 --format=%h): sync took $(( $(now) - T0 ))s in this run"
-say "install: install -m 755 \"\${CARGO_TARGET_DIR:-codex-rs/target}/debug/provenance\" ~/.local/bin/provenance (or build --release first; docs/UPSTREAM.md)"
+say "install: (cd codex-rs && cargo build --release -p codex-cli --bin provenance -j 4) && install -m 755 codex-rs/target/release/provenance ~/.local/bin/provenance"
+say "then, if the protocol changed: (cd ui && npm run gen:protocol)"
