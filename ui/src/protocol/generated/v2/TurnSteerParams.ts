@@ -22,7 +22,10 @@ responsesapiClientMetadata?: { [key in string]?: string } | null,
  */
 responsesapiClientMetadataPatch?: { [key in string]?: string } | null,
 /**
- * Optional client-provided context fragments keyed by an opaque source identifier.
+ * Client-provided context fragments keyed by an opaque source identifier.
+ * Omit this field or pass `null` to keep the current set. Pass a map to
+ * replace the set when the input is delivered, or `{}` to clear it.
+ * Clearing the set leaves previously recorded messages in the conversation history.
  */
 additionalContext?: { [key in string]?: AdditionalContextEntry } | null,
 /**
