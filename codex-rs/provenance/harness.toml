@@ -1,0 +1,83 @@
+# Provenance harness settings: the fork's names, provider, tiers and model metadata.
+#
+# This file is compiled into the binary (codex-rs/provenance/src/lib.rs reads it with
+# include_str!), so rebuild after editing it. `cargo test -p codex-provenance` checks it
+# parses and that every hook into upstream code still uses it. See docs/UPSTREAM.md.
+#
+# Runtime overrides that need no rebuild live in ~/.provenance/config.toml as usual
+# (`model`, `model_provider`, `[model_providers.<id>]`, `model_catalog_json`,
+# `model_instructions_file`, ...) and in the env vars named under [provider].
+
+[branding]
+# Shown in the TUI header, the `exec` banner and the CLI's --help.
+product_name = "Provenance"
+# The command name in --help, usage and shell completions. It must match the
+# `[[bin]] name` in codex-rs/cli/Cargo.toml (a hook test checks this).
+bin_name = "provenance"
+cli_about = "Provenance: a Codex CLI fork that runs on tierlm's pooled model tiers"
+# Config home: $HOME/<home_dir_name>, overridden by the <home_env> env var. It is exported
+# as CODEX_HOME at startup, so the real ~/.codex is never read or written.
+home_dir_name = ".provenance"
+home_env = "PROVENANCE_HOME"
+
+[provider]
+# The built-in provider the fork uses when config.toml names none.
+id = "tierlm"
+name = "tierlm"
+# Responses API endpoint of the local router (provenance-core / tierlm).
+base_url = "http://127.0.0.1:4141/v1"
+# Env var that overrides base_url, and the optional bearer-token env var.
+base_url_env = "TIERLM_BASE_URL"
+token_env = "TIERLM_TOKEN"
+# The default tier when neither config.toml nor -m picks a model.
+default_model = "solstice"
+
+[defaults]
+# Upstream checks for new Codex releases at startup; that would point at upstream.
+check_for_update_on_startup = false
+
+# Model metadata layered over upstream's fallback metadata (`model_info_from_slug` in
+# codex-rs/models-manager/src/model_info.rs) for every model the catalog does not
+# describe: the tiers below, pinned `<source>/<tier>` names and any unknown slug.
+# Keys are ModelInfo fields (codex-rs/protocol/src/openai_models.rs) in their JSON
+# spelling; nested tables merge into nested objects. One extra key:
+#   instructions_file = "<file in codex-rs/provenance/prompts/>"
+# replaces the base instructions (model_messages.instructions_template) with that file.
+[model_defaults]
+context_window = 128000
+max_context_window = 128000
+supports_reasoning_summary_parameter = false
+default_reasoning_summary = "none"
+
+# The tiers, strongest first. The order sets `priority` (1 = first in the picker).
+# `slug` is the model name sent to the router; every other key is a ModelInfo field
+# (or instructions_file), layered over [model_defaults].
+[[tiers]]
+slug = "nova"
+display_name = "Nova"
+description = "Hyperfrontier: strongest pooled models"
+
+[[tiers]]
+slug = "solstice"
+display_name = "Solstice"
+description = "Frontier: default for everyday coding"
+
+[[tiers]]
+slug = "ember"
+display_name = "Ember"
+description = "Strong mid tier: capable, plentiful"
+
+[[tiers]]
+slug = "spark"
+display_name = "Spark"
+description = "Fast: small models for quick tasks"
+
+# Pinned sources. A model named `<source>/<tier>` (e.g. `luna/solstice`) is passed to the
+# router unchanged and, by default, gets that tier's metadata. To give one source its own
+# metadata (say a smaller context window), add a table here; its keys are layered over
+# the tier's for every `<source>/<tier>`:
+#
+# [sources.luna]
+# context_window = 64000
+# max_context_window = 64000
+[sources]

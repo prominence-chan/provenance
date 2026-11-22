@@ -1,0 +1,36 @@
+# Provenance: the fork's own crate. Everything the fork changes about Codex is
+# configured in harness.toml next to this file and reached from here; upstream
+# crates only call into it through one-line `PROVENANCE-HOOK` hooks. See
+# docs/UPSTREAM.md at the repository root.
+[package]
+name = "codex-provenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+dirs = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# The hook tests drive the real upstream crates (tests/hooks.rs). These form a
+# dev-dependency cycle with the crates that depend on codex-provenance, which
+# Cargo allows for integration tests.
+[dev-dependencies]
+codex-config = { path = "../config" }
+codex-core = { path = "../core" }
+codex-model-provider-info = { path = "../model-provider-info" }
+codex-models-manager = { path = "../models-manager" }
+codex-protocol = { path = "../protocol" }
+codex-utils-home-dir = { path = "../utils/home-dir" }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
