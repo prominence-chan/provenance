@@ -30,8 +30,11 @@ Other scripts:
 | `npm run gen:protocol`        | Regenerate protocol types from the installed binary                                           |
 | `npm run smoke`               | Headless check through the bridge (no browser): new thread, "reply with just ok", resume      |
 | `npm run e2e`                 | Headless Chromium (Playwright) drives the real UI; `APPROVAL=1` also tests a command approval |
+| `npm run e2e:setup`           | Headless walk through Models & accounts against the mock router (needs `npm run build`)       |
+| `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's sign-in API (`/web/*`)    |
 
-Both checks expect the server to already be running. `MODEL=ember` picks a different tier.
+`smoke` and `e2e` expect the server to already be running; `e2e:setup` starts its own UI
+server and mock router and needs neither app-server nor model quota. `MODEL=ember` picks a different tier.
 The free upstream models sometimes return 503; both checks retry.
 
 Requires Node >= 23.6: the server and scripts are `.ts` files run directly by Node
@@ -52,7 +55,7 @@ localStorage, i.e. tier, theme and collapsed projects, survives relaunches; if t
 it falls back to a random one).
 
 ```sh
-npm run app:build     # dist/ + build-electron/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
+npm run app:build     # dist/ + build-electron/ + vendor/browser/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
 npm run app:install   # copy it to /Applications/Provenance.app (quits a running copy first)
 npm run app:e2e       # Playwright drives the installed app: window, health, a real "reply with just ok" turn
 npm run app:dev       # run Electron from the checkout with Vite + HMR (DevTools in the View menu)
@@ -70,7 +73,7 @@ What the shell adds:
   header when the sidebar is hidden), both header strips drag the window; min 720 x 480;
   bounds remembered (`window-state.json`). Closing the window keeps the app (and running turns)
   alive; the Dock icon reopens it.
-- **Menu:** About, Preferences… (`⌘,`), File → New Thread (`⌘N`) / Open Folder… (`⌘O`), the
+- **Menu:** About, Preferences… (`⌘,`), Models & Accounts…, File → New Thread (`⌘N`) / Open Folder… (`⌘O`), the
   standard Edit menu (copy/paste), View (reload, zoom, full screen; DevTools only when not
   packaged), Window, Help (GitHub, logs, settings file).
 - **Folder picker:** the folder icon in the composer's working-directory field opens the
@@ -107,6 +110,18 @@ and `.dmg`; `scripts/adhoc-sign.cjs` ad-hoc signs the app before the DMG is made
 won't run unsigned arm64 code). No Developer ID, no notarization: a downloaded DMG needs
 right-click → Open the first time. The icon is `design/icon/Provenance.icns`.
 
+**Bundled browser:** the app carries the Chrome for Testing build provenance-core drives for the
+chat sites, unmodified, at `Contents/Resources/browser/Google Chrome for Testing.app`
+(`extraResources` from `vendor/browser/`, git-ignored). provenance-core looks there first and
+makes its own background-only copy on first use, so nothing is downloaded before the first
+sign-in. `scripts/fetch-browser.ts` (run by `app:build`, or `npm run browser:fetch`) fills
+`vendor/browser/` with the pinned version (`VERSION` in the script, 157.0.8103.78): copied
+from `~/.tierlm/browser/<v>/plain/` when provenance-core already has it, else downloaded from
+Google's bucket (~197 MB, md5-checked; `BROWSER_SOURCE=download` forces that). It adds ~400 MB
+to the app (~175 MB to the DMG). The browser keeps its own (linker) signature and the app's
+ad-hoc pass still passes `codesign --verify --deep --strict`. Bump `VERSION` when the installed
+Chrome's major version passes it: provenance-core only uses a build at least that new.
+
 The web UI only knows it's in the app through `window.provenanceApp` (`src/app-shell.ts`,
 from the preload), which sets `html[data-shell="darwin"]` for the window-chrome styles.
 
@@ -116,7 +131,7 @@ from the preload), which sets `html[data-shell="darwin"]` for the window-chrome 
 ui/
 ├── server/
 │   ├── app.ts         startUiServer(): Vite middleware (dev) or dist/ (prod), /api/info, /api/tiers,
-│   │                  /api/sources, /api/health, /api/usage, WS /rpc (same-origin only)
+│   │                  /api/sources, /api/health, /api/usage, /api/web/*, WS /rpc (same-origin only)
 │   ├── main.ts        CLI for `npm run dev` / `npm start`
 │   └── bridge.ts      AppServerBridge: spawns `provenance app-server`, relays JSON-RPC
 ├── electron/
@@ -124,8 +139,9 @@ ui/
 │   └── preload.ts     window.provenanceApp (folder picker, start router, preferences, menu events)
 ├── scripts/
 │   ├── gen-protocol.ts  runs `provenance app-server generate-ts --experimental`
-│   ├── smoke.ts / e2e.ts / app-e2e.ts
-│   ├── build-electron.mjs, adhoc-sign.cjs, install-app.mjs   app packaging
+│   ├── smoke.ts / e2e.ts / app-e2e.ts / setup-e2e.ts, chromium.ts (which Chromium they run)
+│   ├── mock-router.ts   stand-in for provenance-core's /web/* sign-in API (dev + setup-e2e)
+│   ├── build-electron.mjs, fetch-browser.ts, adhoc-sign.cjs, install-app.mjs   app packaging
 │   └── provenance-ui    launcher (symlinked into ~/.local/bin)
 └── src/
     ├── protocol/
@@ -137,6 +153,8 @@ ui/
     │   ├── state.ts     AppState / ThreadView / TurnView shapes, settings persistence
     │   ├── reducer.ts   applyNotification(): app-server notifications -> state (pure)
     │   └── actions.ts   everything that sends requests (threads, turns, approvals, interrupt)
+    ├── setup/           Models & accounts: SetupDialog.tsx (the four steps), SetupArt.tsx (step
+    │                    pictures), web.ts (the /api/web client), open.ts (open state, first run)
     ├── components/
     │   ├── Sidebar.tsx        threads grouped by project (cwd), search, new thread, archive, status
     │   ├── ThreadHeader.tsx   slim bar: sidebar toggle (when hidden), title, cwd, tier, context ring
@@ -201,6 +219,37 @@ notifications go to everyone, and unanswered approvals are replayed to newly ope
 A page reload therefore doesn't kill a running turn. If the binary disappears (e.g. while
 a rebuild replaces it) or app-server exits, the bridge retries with backoff. The UI shows
 the state bottom-left and re-attaches to the open thread once app-server is back.
+
+## Models & accounts
+
+Signing in to the chat sites provenance-core drives (ChatGPT, Qwen, Gemini) happens in the app,
+in one dialog (`src/setup/`): **Site → Account → Sign in → Ready**, on a step rail that never
+moves. Ways in: the people icon in the sidebar foot, the tier picker's last row, the app menu,
+and once on first run when no site is signed in on any account (closing it is remembered,
+localStorage `provenance-ui.setup-dismissed`).
+
+- **Site:** each site with the models it gives and the tier they land in, and one status
+  line (Ready, Ready on N accounts, Signing in…, Blocked, Not signed in).
+- **Account:** per account (one browser profile, shared by every site), signed in or not, when
+  last checked, requests today against the cap, a block reason; one primary Sign in; add another
+  account (next free letter id), remove one (from all sites). A model limited to some accounts
+  says which ("only on Account B").
+- **Sign in:** provenance-core opens one visible browser window beside the app on the site's
+  sign-in page; the dialog says so and polls `GET /web/login` once a second through
+  preparing (the browser still downloading) → open → verifying → signed_in, or failed with
+  the router's reason and Try again. The router closes the window itself. Cancel, Back or
+  closing the dialog mid sign-in cancels it. A 409 (another sign-in open) shows its detail under
+  the account.
+- **Ready:** the models now in the tier picker (sources are re-read), Done.
+- Browser not ready: a strip with Download and its progress (`POST /web/browser/prepare`).
+  Router down: a page state with Start it (app) / Try again. A router without `/web/*`: a page
+  state asking to update it.
+
+The UI server proxies `/api/web/<route>` to provenance-core's `/web/<route>` (only the seven
+routes the dialog uses; writes need our own Origin and a JSON body) with the router's status
+and body as-is. `scripts/mock-router.ts` implements the same API with its state transitions
+(`MOCK_SCENARIO=fresh|signed|nobrowser`, `MOCK_AUTO=1` finishes a sign-in by itself after 4 s):
+`npm run mock:router`, then `TIERLM_URL=http://127.0.0.1:4199 npm run dev`.
 
 ## Tool runs and model attribution
 
