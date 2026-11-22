@@ -70,6 +70,18 @@ export function threadBrief(v: ThreadView): string {
   if (commands.length) parts.push("Last commands run: " + commands.join(", "));
   if (last && last.type === "agentMessage")
     parts.push("Where the agent left off:\n" + clip(last.text.trim(), LAST_CHARS));
-  parts.push("Check the files' current state before relying on this summary.");
-  return clip(parts.join("\n\n"), TOTAL_CHARS);
+  // The closing line always stays: it marks where the brief ends (splitBrief).
+  return `${clip(parts.join("\n\n"), TOTAL_CHARS - BRIEF_END.length - 2)}\n\n${BRIEF_END}`;
+}
+
+const BRIEF_START = "[Continued from the Provenance thread ";
+const BRIEF_END = "Check the files' current state before relying on this summary.";
+
+/** A message that starts with a brief: the brief, and what the user wrote after it. */
+export function splitBrief(text: string): { brief: string; rest: string } | null {
+  if (!text.startsWith(BRIEF_START)) return null;
+  const end = text.indexOf(BRIEF_END);
+  if (end < 0) return null;
+  const cut = end + BRIEF_END.length;
+  return { brief: text.slice(0, cut), rest: text.slice(cut).trim() };
 }

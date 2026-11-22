@@ -34,6 +34,8 @@ Other scripts:
 | `npm run e2e:setup`           | Headless walk through Models & accounts against the mock router (needs `npm run build`)       |
 | `npm run e2e:router`          | The same against a **real** provenance-core on its mock chat page, plus a real turn (below)   |
 | `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's setup API                 |
+| `npm run check:fallback`      | Claude Code / Codex fallbacks, server side, against stand-in CLIs (no browser)                |
+| `npm run e2e:welcome`         | Welcome, fallbacks, picker, "too large" suggestion, headless (needs `npm run build`)          |
 
 `smoke` and `e2e` expect the server to already be running; `e2e:setup` starts its own UI
 server and mock router and needs neither app-server nor model quota. `MODEL=ember` picks a different tier.
@@ -324,8 +326,7 @@ the state bottom-left and re-attaches to the open thread once app-server is back
 Signing in to the chat sites provenance-core drives (ChatGPT, Qwen, Gemini) happens in the app,
 in one dialog (`src/setup/`): **Site → Account → Sign in → Ready**, on a step rail that never
 moves. Ways in: the people icon in the sidebar foot, the tier picker's last row, the app menu,
-and once on first run when no site is signed in on any account (closing it is remembered,
-localStorage `provenance-ui.setup-dismissed`).
+and the welcome (below), whose rows open it on a site and return to the welcome when it closes.
 
 - **Site:** each site with the models it gives and the tier they land in, and one status
   line (Ready, Ready on N accounts, Signing in…, Paused, Off, Not signed in); sites without
@@ -364,6 +365,72 @@ routes in `ROUTER_ROUTES`; writes need our own Origin and a JSON body; bodies ar
 with the router's status and body as-is. `scripts/mock-router.ts` implements the same API with
 its state transitions (`MOCK_SCENARIO=fresh|signed|nobrowser`, `MOCK_AUTO=1` finishes a sign-in
 by itself after 4 s): `npm run mock:router`, then `TIERLM_URL=http://127.0.0.1:4199 npm run dev`.
+
+## Welcome and fallbacks
+
+**Welcome** (`src/fallback/WelcomeDialog.tsx`): Welcome → Models → Fallbacks → Done, on the same
+rail and panel as Models & accounts. It opens by itself once, when nothing is set up: no site
+signed in, no API key in the token pool, no fallback on (`setup/open.ts` `maybeOpenWelcome`;
+closing or finishing it is remembered, localStorage `provenance-ui.welcome-done`). Provenance >
+Welcome… opens it again. Models lists the sites and the token pool with their status; each row
+opens Models & accounts there. Fallbacks is the page below. Done sums up what is ready.
+
+**Fallbacks** (Models & accounts > Fallbacks, the welcome, `src/fallback/FallbacksStep.tsx`):
+Claude Code and Codex for threads the free models can't carry. Each row checks the CLI (found on
+PATH or in the usual install folders, `--version`, `claude auth status --json` / `codex login
+status`; nothing spends usage, no e-mail is passed on) and shows Ready, Not installed (with the
+one-line install command) or Not signed in (with the command to run), and a switch. Codex has
+two modes:
+
+- **Run Codex through Provenance:** the provenance binary runs the turn, as any thread here
+  (approvals, live edits, interrupt), but on OpenAI with your Codex ChatGPT sign-in instead of
+  provenance-core. A second `provenance app-server` (`-c model_provider="openai"`) on its own home
+  (`<data>/codex-home`) whose `auth.json` and `auth.lock` are symlinks to Codex's
+  (`$CODEX_HOME` or `~/.codex`): the fork's credential store reads through the link and writes a
+  refresh to its target, and both lock the same file, so the two share one login and no token is
+  copied or read by the app (`server/fallback/codex-home.ts`). No Rust change. Its models are the
+  binary's own catalog for that provider. Note: provenance-core's pruning and compaction don't
+  apply on this path (its requests don't go through the router); Codex's own compaction does.
+- **Codex in the background:** the stock `codex` CLI runs each turn (`codex exec --json`, then
+  `codex exec resume <id>`), like Claude Code below.
+
+Claude Code and Codex-in-the-background threads are run by `server/fallback/backend.ts`: one CLI
+process per turn in the thread's folder, prompt on stdin (`claude -p --output-format stream-json
+--verbose --include-partial-messages [--model m] [--resume <session>]`), its output turned into
+app-server's own items (messages streaming, commands, edits with a diff, tool calls, thinking:
+`claude-stream.ts`, `codex-stream.ts`) and served on WebSocket `/rpc/fallback` with app-server's
+methods and notifications, so the thread view renders them unchanged. Permissions follow the
+composer: Read only → `--permission-mode dontAsk` / `-s read-only`; Auto → `acceptEdits` /
+`workspace-write`; Full access → `--dangerously-skip-permissions` / `danger-full-access`;
+"Ask every time" runs as read only (the CLIs can't ask the page; what they would ask about is
+declined and shows as a failed row). Threads are JSON files in `<data>/fallback/threads`
+(`<data>` = the app's Application Support folder, or `~/.provenance-ui` / `PROVENANCE_UI_DATA`
+for `npm run dev`).
+
+**Model picker:** a Fallbacks section below the tiers. A ready fallback opens a side list of
+the models its CLI offers on hover (Claude Code: Default plus the aliases its `--help` names and
+`server/fallback/known-models.ts`, the one hand-kept list; Codex: `codex debug models`, or the
+provenance binary's catalog through Provenance), and for Codex the two modes. Off or not ready:
+a muted row that opens the Fallbacks page. The model key says where a thread runs:
+`solstice` / `luna/solstice` (tiers, `/rpc`), `claude:<m>` and `codex:<m>` (`/rpc/fallback`),
+`codex-pv:<m>` (`/rpc/codex`); the store keeps all three backends' threads in one list. A thread
+stays on its backend: opening one points the picker at its model; sending with another backend
+picked starts a new thread there, its first message a brief of the old one (`fallback/brief.ts`,
+folded in the bubble), named "… (continued)".
+
+**"Too large" suggestion** (`fallback/strain.ts`, `StrainNote.tsx`): under a tier thread, when
+its history has outgrown the free models. Per finished turn: provenance-core's context flags
+(`/api/usage` → `context`: `over` 3, `trimmed` 2, `restarted` 2; `compacted` alone is normal and
+counts 0), a context-window error 3, app-server compacting twice in the turn 2 (once 1), the same
+command with the same result 3+ times 2. Shown when the last three turns add to 4+ with the latest
+at 2+, or one of the last two at 3. One line, a button per ready fallback (a new thread there
+with a brief), or "Set up Codex or Claude Code…"; dismissed, it comes back for that thread only
+when the score rises by 4.
+
+Checks: `npm run check:fallback` (server side against stand-in CLIs), `npm run e2e:welcome` (the
+page end to end, stand-in claude / codex / provenance; needs `npm run build`),
+`node scripts/fallback-real-check.ts` (one tiny real turn each through the real CLIs and your
+Codex sign-in; spends a little usage).
 
 ## Tool runs and model attribution
 
