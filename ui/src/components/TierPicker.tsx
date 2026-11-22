@@ -7,7 +7,10 @@ import { sortTiers, splitModel, tierOf } from "../theme/tiers";
 import { IconCheck, IconChevron, IconChevronDown } from "./icons";
 import { TierGlyph, useSourceLabel } from "./TierBadge";
 
-/** One row of a tier's source submenu: Auto (the plain tier) or a pinnable source. */
+/**
+ * One row of a tier's source submenu: Auto (the plain tier), a pinnable source, or a source
+ * that needs something first (API keys, a sign-in), which opens Models & accounts there.
+ */
 interface SubItem {
   key: string;
   /** What gets sent as the model: "solstice" (Auto) or "luna/solstice". */
@@ -15,10 +18,14 @@ interface SubItem {
   label: string;
   meta: string | null;
   disabled: boolean;
+  /** Set up what it needs instead of choosing it. */
+  setup?: "keys" | "signin";
 }
 
 /** "79% left · 1 busy": usage left today, and live requests only when there are some. */
 function usageText(s: Source): string | null {
+  if (s.needs === "keys") return "Add API keys…";
+  if (s.needs === "signin") return "Sign in…";
   if (!s.available) return "Unavailable";
   const parts: string[] = [];
   if (s.remaining !== null) parts.push(`${Math.round(s.remaining * 100)}% left`);
@@ -27,13 +34,15 @@ function usageText(s: Source): string | null {
 }
 
 /**
- * Auto first, then each source the router lets us pin, best first. Sources that can't be
- * pinned are left out (Auto may still use them). Empty when the router lists no sources for
- * the tier: then there is no submenu at all.
+ * Auto first, then each source the router lets us pin, best first, then the ones that need
+ * keys or a sign-in. Other sources that can't be pinned are left out (Auto may still use
+ * them). Empty when the router lists no sources for the tier: then there is no submenu.
  */
 function subItemsFor(tier: string, sources: Record<string, Source[]>): SubItem[] {
-  const pins = (sources[tier] ?? []).filter((s) => s.pinnable);
-  if (!pins.length) return [];
+  const list = sources[tier] ?? [];
+  const pins = list.filter((s) => s.pinnable);
+  const needs = list.filter((s) => !s.pinnable && s.needs);
+  if (!pins.length && !needs.length) return [];
   return [
     { key: "auto", model: tier, label: "Auto", meta: null, disabled: false },
     ...pins.map((s) => ({
@@ -42,6 +51,14 @@ function subItemsFor(tier: string, sources: Record<string, Source[]>): SubItem[]
       label: s.label,
       meta: usageText(s),
       disabled: !s.available,
+    })),
+    ...needs.map((s) => ({
+      key: s.id,
+      model: s.model,
+      label: s.label,
+      meta: usageText(s),
+      disabled: false,
+      setup: s.needs ?? undefined,
     })),
   ];
 }
@@ -115,6 +132,12 @@ export function TierPicker() {
     setOpen(false);
     btnRef.current?.focus();
   };
+  const pick = (it: SubItem) => {
+    if (it.disabled) return;
+    if (!it.setup) return choose(it.model);
+    setOpen(false);
+    openSetup(null, it.setup === "keys" ? "keys" : undefined);
+  };
 
   /** Pointer on a tier row: switch at once, or after a beat when another submenu is open. */
   const hoverRow = (i: number) => {
@@ -154,7 +177,7 @@ export function TierPicker() {
       else if (e.key === "ArrowUp") setSubActive((j) => stepSub(j, -1));
       else if (e.key === "Enter" || e.key === " ") {
         const it = subItems[subActive];
-        if (it && !it.disabled) choose(it.model);
+        if (it) pick(it);
       }
       return;
     }
@@ -269,17 +292,18 @@ export function TierPicker() {
                   key={it.key}
                   id={`tier-src-${j}`}
                   role="option"
-                  aria-selected={it.model === model}
+                  aria-selected={!it.setup && it.model === model}
                   aria-disabled={it.disabled || undefined}
                   data-source-model={it.model}
-                  className={`tier-sub-option ${j === subActive ? "active" : ""}`}
+                  data-setup={it.setup}
+                  className={`tier-sub-option ${j === subActive ? "active" : ""} ${it.setup ? "needs" : ""}`}
                   onPointerEnter={() => setSubActive(it.disabled ? null : j)}
-                  onClick={() => !it.disabled && choose(it.model)}
+                  onClick={() => pick(it)}
                 >
                   <span className="tier-sub-label">{it.label}</span>
                   {it.meta && <span className="meta">{it.meta}</span>}
                   <span className="tier-option-check">
-                    {it.model === model && <IconCheck size={13} />}
+                    {!it.setup && it.model === model && <IconCheck size={13} />}
                   </span>
                 </div>
               ))}

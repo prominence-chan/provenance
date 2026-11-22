@@ -1,52 +1,30 @@
-// Client for provenance-core's sign-in API, through the UI server's /api/web/* proxy
-// (server/app.ts). Shapes follow the router's contract; anything missing or malformed
-// is normalised here so the screen never has to guess.
+// Client for provenance-core's setup API (sign-ins, per-site settings, API keys), through the
+// UI server's /api/web/* and /api/pool/* proxy (server/app.ts). The shapes are the router's
+// own (shared/router-api.ts); this module checks them and fills what an older router leaves
+// out, so the screen never has to guess.
 
-export type LoginState = "idle" | "preparing" | "open" | "verifying" | "signed_in" | "failed";
+import type {
+  KeysPut,
+  LoginState,
+  ProviderPatch,
+  WindowBounds,
+  WireAccount,
+  WireBrowser,
+  WireError,
+  WireLogin,
+  WirePoolProvider,
+  WireProvider,
+  WireWebModel,
+} from "../../shared/router-api";
 
-export interface Login {
-  state: LoginState;
-  reason: string | null;
-}
+export type { LoginState } from "../../shared/router-api";
 
-export interface WebAccount {
-  id: string;
-  /** true / false, or null when the router has never checked. */
-  signedIn: boolean | null;
-  /** Unix seconds of the last check, null = never. */
-  checkedAt: number | null;
-  blocked: boolean;
-  reason: string | null;
-  today: number;
-  dailyCap: number | null;
-  login: Login;
-}
-
-export interface WebModel {
-  id: string;
-  label: string;
-  tier: string;
-  /** null = usable on every account; otherwise only on these account ids. */
-  accounts: string[] | null;
-}
-
-export interface WebProvider {
-  id: string;
-  name: string;
-  url: string;
-  models: WebModel[];
-  accounts: WebAccount[];
-}
-
-export interface BrowserStatus {
-  mode: string;
-  ready: boolean;
-  version: string | null;
-  preparing: boolean;
-  error: string | null;
-  /** 0-1 while preparing, when the router reports it (not in the contract yet). */
-  progress: number | null;
-}
+export type Login = Pick<WireLogin, "state" | "reason"> & { shown?: boolean };
+export type WebAccount = Required<WireAccount>;
+export type WebModel = WireWebModel;
+export type WebProvider = Required<Omit<WireProvider, "accounts">> & { accounts: WebAccount[] };
+export type BrowserStatus = Required<WireBrowser>;
+export type PoolProvider = WirePoolProvider;
 
 export interface WebAccounts {
   browser: BrowserStatus;
@@ -62,7 +40,7 @@ export type Result<T> =
 async function call<T>(method: string, path: string, body?: unknown): Promise<Result<T>> {
   let res: Response;
   try {
-    res = await fetch(`/api/web${path}`, {
+    res = await fetch(`/api${path}`, {
       method,
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -77,11 +55,11 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<Re
     // leave null
   }
   if (res.ok) return { ok: true, value: json as T };
-  const j = (json ?? {}) as { detail?: unknown; down?: unknown };
+  const j = (json ?? {}) as WireError;
   return {
     ok: false,
     status: res.status,
-    detail: detailText(j.detail) ?? (res.statusText || `HTTP ${res.status}`),
+    detail: detailText(j.detail) ?? j.reason ?? (res.statusText || `HTTP ${res.status}`),
     down: j.down === true || res.status === 502,
   };
 }
@@ -96,64 +74,90 @@ function detailText(d: unknown): string | null {
   return null;
 }
 
+type Obj = Record<string, unknown>;
 const str = (v: unknown, dflt = ""): string => (typeof v === "string" ? v : dflt);
+const strOrNull = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 const num = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
+const objs = (v: unknown): Obj[] =>
+  Array.isArray(v) ? (v as Obj[]).filter((x) => typeof x?.id === "string") : [];
+
+const STATES: LoginState[] = ["idle", "preparing", "open", "verifying", "signed_in", "failed"];
 
 function parseLogin(v: unknown): Login {
-  const o = (v ?? {}) as Record<string, unknown>;
-  const states: LoginState[] = ["idle", "preparing", "open", "verifying", "signed_in", "failed"];
-  const state = states.includes(o.state as LoginState) ? (o.state as LoginState) : "idle";
-  return { state, reason: typeof o.reason === "string" && o.reason ? o.reason : null };
+  const o = (v ?? {}) as Obj;
+  const state = STATES.includes(o.state as LoginState) ? (o.state as LoginState) : "idle";
+  return {
+    state,
+    reason: strOrNull(o.reason),
+    ...(typeof o.shown === "boolean" ? { shown: o.shown } : {}),
+  };
+}
+
+function parseAccount(a: Obj): WebAccount {
+  return {
+    id: a.id as string,
+    signed_in: typeof a.signed_in === "boolean" ? a.signed_in : null,
+    checked_at: num(a.checked_at),
+    email: strOrNull(a.email),
+    blocked: a.blocked === true,
+    reason: strOrNull(a.reason),
+    blocked_for_s: num(a.blocked_for_s) ?? 0,
+    today: num(a.today) ?? 0,
+    daily_cap: num(a.daily_cap) ?? 0,
+    signing_in: a.signing_in === true,
+    window_open: a.window_open === true,
+    login: parseLogin(a.login),
+  };
+}
+
+export function parseProvider(p: Obj): WebProvider {
+  const models = objs(p.models).map((m) => ({
+    id: m.id as string,
+    label: str(m.label, m.id as string),
+    tier: str(m.tier),
+    model: str(m.model),
+    accounts: Array.isArray(m.accounts) ? m.accounts.map(String) : null,
+  }));
+  const accounts = objs(p.accounts).map(parseAccount);
+  const by = p.enabled_by;
+  return {
+    id: p.id as string,
+    name: str(p.name, p.id as string),
+    url: str(p.url),
+    enabled: p.enabled !== false,
+    enabled_by:
+      by === "app" || by === "env" || by === "catalog" || by === "env-off" ? by : "catalog",
+    daily_cap: num(p.daily_cap) ?? accounts[0]?.daily_cap ?? 0,
+    shares_browser_with: strOrNull(p.shares_browser_with),
+    models,
+    accounts,
+  };
 }
 
 export function parseAccounts(v: unknown): WebAccounts | null {
-  const o = (v ?? {}) as Record<string, unknown>;
+  const o = (v ?? {}) as Obj;
   if (!Array.isArray(o.providers)) return null;
-  const b = (o.browser ?? {}) as Record<string, unknown>;
+  const b = (o.browser ?? {}) as Obj;
   const progress = num(b.progress);
   return {
     browser: {
       mode: str(b.mode, "bundled"),
+      source: str(b.source, "cft"),
       ready: b.ready !== false,
-      version: typeof b.version === "string" ? b.version : null,
+      version: strOrNull(b.version),
       preparing: b.preparing === true,
-      error: typeof b.error === "string" && b.error ? b.error : null,
+      stage: strOrNull(b.stage),
+      error: strOrNull(b.error),
       progress: progress === null ? null : Math.max(0, Math.min(1, progress)),
     },
-    providers: (o.providers as Record<string, unknown>[])
-      .filter((p) => typeof p?.id === "string")
-      .map((p) => ({
-        id: p.id as string,
-        name: str(p.name, p.id as string),
-        url: str(p.url),
-        models: (Array.isArray(p.models) ? (p.models as Record<string, unknown>[]) : [])
-          .filter((m) => typeof m?.id === "string")
-          .map((m) => ({
-            id: m.id as string,
-            label: str(m.label, m.id as string),
-            tier: str(m.tier),
-            accounts: Array.isArray(m.accounts) ? m.accounts.map(String) : null,
-          })),
-        accounts: (Array.isArray(p.accounts) ? (p.accounts as Record<string, unknown>[]) : [])
-          .filter((a) => typeof a?.id === "string")
-          .map((a) => ({
-            id: a.id as string,
-            signedIn: typeof a.signed_in === "boolean" ? a.signed_in : null,
-            checkedAt: num(a.checked_at),
-            blocked: a.blocked === true,
-            reason: typeof a.reason === "string" && a.reason ? a.reason : null,
-            today: num(a.today) ?? 0,
-            dailyCap: num(a.daily_cap),
-            login: parseLogin(a.login),
-          })),
-      })),
+    providers: objs(o.providers).map(parseProvider),
   };
 }
 
 export async function getAccounts(): Promise<
   { ok: true; value: WebAccounts } | { ok: false; why: Unavailable }
 > {
-  const r = await call<unknown>("GET", "/accounts");
+  const r = await call<unknown>("GET", "/web/accounts");
   if (r.ok) {
     const value = parseAccounts(r.value);
     return value ? { ok: true, value } : { ok: false, why: "unsupported" };
@@ -161,31 +165,65 @@ export async function getAccounts(): Promise<
   return { ok: false, why: r.down ? "down" : "unsupported" };
 }
 
-export async function startLogin(provider: string, account: string): Promise<Result<Login>> {
-  const r = await call<unknown>("POST", "/login", { provider, account });
+export async function startLogin(
+  provider: string,
+  account: string,
+  bounds?: WindowBounds,
+): Promise<Result<Login>> {
+  const r = await call<unknown>("POST", "/web/login", { provider, account, bounds });
   return r.ok ? { ok: true, value: parseLogin(r.value) } : r;
 }
 
 export async function getLogin(provider: string, account: string): Promise<Result<Login>> {
   const q = new URLSearchParams({ provider, account });
-  const r = await call<unknown>("GET", `/login?${q}`);
+  const r = await call<unknown>("GET", `/web/login?${q}`);
   return r.ok ? { ok: true, value: parseLogin(r.value) } : r;
 }
 
 export function cancelLogin(provider: string, account: string): Promise<Result<unknown>> {
-  return call("POST", "/login/cancel", { provider, account });
+  return call("POST", "/web/login/cancel", { provider, account });
+}
+
+/** Bring the open sign-in window back to the front. */
+export async function showLogin(provider: string, account: string): Promise<Result<Login>> {
+  const r = await call<unknown>("POST", "/web/login/show", { provider, account });
+  return r.ok ? { ok: true, value: parseLogin(r.value) } : r;
 }
 
 export function addAccount(account: string): Promise<Result<unknown>> {
-  return call("POST", "/accounts", { account });
+  return call("POST", "/web/accounts", { account });
 }
 
 export function removeAccount(account: string): Promise<Result<unknown>> {
-  return call("DELETE", `/accounts/${encodeURIComponent(account)}`);
+  return call("DELETE", `/web/accounts/${encodeURIComponent(account)}`);
 }
 
 export function prepareBrowser(): Promise<Result<unknown>> {
-  return call("POST", "/browser/prepare", {});
+  return call("POST", "/web/browser/prepare", {});
+}
+
+/** Turn a site on or off, change its daily cap: kept by the router, answered with the site. */
+export async function updateProvider(
+  provider: string,
+  patch: ProviderPatch,
+): Promise<Result<WebProvider>> {
+  const r = await call<unknown>("PATCH", `/web/providers/${encodeURIComponent(provider)}`, patch);
+  return r.ok ? { ok: true, value: parseProvider((r.value ?? {}) as Obj) } : r;
+}
+
+export async function getPoolKeys(): Promise<Result<PoolProvider[]>> {
+  const r = await call<{ providers?: unknown }>("GET", "/pool/keys");
+  if (!r.ok) return r;
+  return { ok: true, value: objs(r.value?.providers) as unknown as PoolProvider[] };
+}
+
+export function setPoolKeys(provider: string, values: Record<string, string>) {
+  const body: KeysPut = { values };
+  return call<PoolProvider>("PUT", `/pool/keys/${encodeURIComponent(provider)}`, body);
+}
+
+export function clearPoolKeys(provider: string) {
+  return call<PoolProvider>("DELETE", `/pool/keys/${encodeURIComponent(provider)}`);
 }
 
 // ---- small helpers the screen shares -----------------------------------------------
@@ -210,8 +248,8 @@ export function checkedText(at: number | null): string {
   if (at === null) return "never checked";
   const s = Date.now() / 1000 - at;
   if (s < 90) return "checked just now";
-  if (s < 3600) return `checked ${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `checked ${Math.round(s / 3600)} h ago`;
+  if (s < 3600) return `checked ${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `checked ${Math.round(s / 3600)} h ago`;
   if (s < 2 * 86400) return "checked yesterday";
   return `checked ${new Date(at * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
 }
@@ -235,7 +273,37 @@ export function loginActive(s: LoginState): boolean {
   return s === "preparing" || s === "open" || s === "verifying";
 }
 
-/** Any account on any site signed in (and not blocked)? Decides the first-run prompt. */
+/** Any account on any site signed in? Decides the first-run prompt. */
 export function anySignedIn(a: WebAccounts): boolean {
-  return a.providers.some((p) => p.accounts.some((x) => x.signedIn === true));
+  return a.providers.some((p) => p.accounts.some((x) => x.signed_in === true));
+}
+
+/** Sites worth showing: those with at least one model (a site without any has nothing to sign in for). */
+export function shownProviders(a: WebAccounts): WebProvider[] {
+  return a.providers.filter((p) => p.models.length > 0);
+}
+
+/**
+ * Where the sign-in window should open: beside the app's window, on the side with room, else
+ * over the app's right half; never off the screen. In screen points, as the router wants them.
+ */
+export function besideThisWindow(): WindowBounds {
+  const s = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const ax = s.availLeft ?? 0;
+  const ay = s.availTop ?? 0;
+  const aw = s.availWidth;
+  const ah = s.availHeight;
+  const width = Math.max(480, Math.min(1000, aw - 40));
+  const height = Math.max(480, Math.min(820, ah - 40));
+  const gap = 12;
+  let left = window.screenX + window.outerWidth + gap;
+  if (left + width > ax + aw) left = window.screenX - width - gap;
+  if (left < ax) left = ax + aw - width - 20;
+  const top = Math.min(Math.max(window.screenY + 30, ay + 10), ay + ah - height - 10);
+  return {
+    left: Math.round(Math.max(ax, left)),
+    top: Math.round(Math.max(ay, top)),
+    width,
+    height,
+  };
 }

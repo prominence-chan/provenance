@@ -134,6 +134,7 @@ function parseSources(tiers: unknown): Record<string, Source[]> {
         busy: typeof x.busy === "number" ? x.busy : 0,
         available: x.available !== false,
         pinnable: x.pinnable === true,
+        needs: x.needs === "keys" || x.needs === "signin" ? x.needs : null,
       }));
   }
   return out;

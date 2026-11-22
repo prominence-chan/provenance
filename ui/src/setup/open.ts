@@ -11,6 +11,8 @@ export interface SetupOpen {
   provider: string | null;
   /** Opened by itself on first run (the site list says why). */
   firstRun: boolean;
+  /** Start on the token pool's API keys instead. */
+  view?: "keys";
 }
 
 const DISMISSED_KEY = "provenance-ui.setup-dismissed";
@@ -23,8 +25,8 @@ function set(next: SetupOpen): void {
   for (const l of listeners) l();
 }
 
-export function openSetup(provider: string | null = null): void {
-  set({ open: true, provider, firstRun: false });
+export function openSetup(provider: string | null = null, view?: "keys"): void {
+  set({ open: true, provider, firstRun: false, view });
 }
 
 export function closeSetup(): void {

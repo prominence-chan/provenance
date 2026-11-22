@@ -1678,6 +1678,9 @@ button.turn-models-list:hover .turn-models-more {
 .tier-sub-option[aria-disabled="true"] .tier-sub-label {
   color: var(--faint);
 }
+.tier-sub-option.needs .tier-sub-label {
+  color: var(--text-2);
+}
 .tier-sub-option .tier-option-check {
   width: 13px;
 }
@@ -1914,6 +1917,9 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .setup-rail[data-hidden] {
   visibility: hidden;
 }
+.setup-rail[data-gone] {
+  display: none;
+}
 .setup-rail li {
   display: inline-flex;
   align-items: center;
@@ -2107,11 +2113,10 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   font-size: var(--fs-lg);
   font-weight: 500;
 }
+/* Section labels: .meta text (the one small-text style), set apart only by their spacing. */
 .setup-label {
+  display: block;
   margin: 18px 0 6px;
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  color: var(--muted);
 }
 .setup-models li {
   display: flex;
@@ -2167,6 +2172,142 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .setup-accounts li:hover .setup-remove,
 .setup-remove:focus-visible {
   opacity: 1;
+}
+.setup-email {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.setup-pool .setup-mono {
+  color: var(--text-2);
+}
+.setup-router {
+  margin: 16px 0 0;
+  white-space: normal;
+}
+/* A site's own switches: use it at all, its daily limit. */
+.setup-settings {
+  margin-top: 14px;
+  padding: 4px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+}
+.setup-switch-row,
+.setup-cap-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  margin: 0;
+}
+.setup-switch-row {
+  cursor: pointer;
+}
+.setup-cap-row {
+  border-top: 1px solid var(--border);
+}
+.setup-switch-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-md);
+}
+.setup-switch-text .meta {
+  white-space: normal;
+}
+.setup-cap-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.setup-input {
+  height: 26px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-size: var(--fs-md);
+}
+.setup-input:focus-visible {
+  border-color: transparent;
+}
+.setup-input-num {
+  width: 72px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+}
+.setup-input-num::-webkit-inner-spin-button,
+.setup-input-num::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+/* role="switch" checkbox, drawn from theme tokens only */
+.switch {
+  appearance: none;
+  flex-shrink: 0;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-2);
+  transition:
+    transform var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+.switch:checked {
+  background: var(--accent-grad);
+  border-color: transparent;
+}
+.switch:checked::after {
+  transform: translateX(12px);
+  background: var(--accent-fg);
+}
+.switch:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.setup-keys-lead {
+  margin-top: 10px;
+  font-size: var(--fs-sm);
+}
+.setup-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: -2px 0 12px;
+}
+.setup-key-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.setup-key-field .setup-input {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.setup-key-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 .setup-row-msg {
   margin: -4px 0 10px;
@@ -2366,11 +2507,22 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   .setup-remove {
     opacity: 1;
   }
+  .setup-cap-row {
+    flex-wrap: wrap;
+  }
+  .setup-cap-field {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .setup-dialog[open],
   .setup-dialog[open]::backdrop,
   .art-checking {
     animation: none;
+  }
+  .switch,
+  .switch::after {
+    transition: none;
   }
 }

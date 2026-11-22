@@ -1,6 +1,7 @@
 // Shape of the whole UI state. Protocol objects (Thread, ThreadItem, ...) are
 // stored as-is from app-server; the "View" types only add what the UI needs on top.
 
+import type { SourceNeeds, WireSource } from "../../shared/router-api";
 import type {
   AskForApproval,
   BridgeStatus,
@@ -65,22 +66,18 @@ export interface ThreadView {
 }
 
 /**
- * One way provenance-core can serve a tier (GET /v1/sources): the token pool or a web
- * model. Lists come best-first, the order the router uses when nothing is pinned.
+ * One way provenance-core can serve a tier (GET /v1/sources, shared/router-api.ts): the token
+ * pool or a web model. Lists come best-first, the order the router uses when nothing is pinned.
  */
-export interface Source {
-  id: string;
-  label: string;
-  kind: string;
-  /** Send this as the model to pin the source, e.g. "luna/solstice". */
-  model: string;
+export type Source = Pick<
+  WireSource,
+  "id" | "label" | "kind" | "model" | "busy" | "available" | "pinnable"
+> & {
   /** Share (0-1) of today's usage left; null when the router doesn't say. */
   remaining: number | null;
-  /** Requests it is serving now. */
-  busy: number;
-  available: boolean;
-  pinnable: boolean;
-}
+  /** Why it can't serve now: no API keys, or no account signed in. */
+  needs: SourceNeeds | null;
+};
 
 export interface Settings {
   model: string;
