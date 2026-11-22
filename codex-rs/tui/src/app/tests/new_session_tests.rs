@@ -559,7 +559,7 @@ async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> R
         /*initial_user_message*/ None,
     );
     app.replace_chat_widget(ChatWidget::new_with_app_event(init));
-    app.chat_widget.set_skills_from_response(&skills);
+    app.chat_widget.set_skills_from_response(skills.clone());
     app.chat_widget.insert_str("$status");
     app.chat_widget.handle_key_event(KeyCode::Enter.into());
 
@@ -569,7 +569,7 @@ async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> R
         /*initial_user_message*/ None,
     );
     app.replace_chat_widget(ChatWidget::new_with_app_event(init));
-    app.chat_widget.set_skills_from_response(&skills);
+    app.chat_widget.set_skills_from_response(skills);
     app.chat_widget.insert_str("$stat");
     insta::assert_snapshot!(normalize_snapshot_paths(render_bottom_popup(
         &app.chat_widget,
@@ -1283,11 +1283,16 @@ async fn resumed_backend_handoff_detaches_through_the_source_connection() -> Res
         cwd: Some(resumed.session.cwd.to_path_buf()),
         history_mode: None,
     };
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    app.local_settings.transcript_mode = tui.transcript_mode();
+    app.config.features.enable(Feature::TuiWorkspace)?;
+    app.open_agents_overview(&source);
+    assert!(app.workspace_center_owns_input());
     let mut backends = BackendSessions::from_initial(source, vec![destination]);
     backends
         .settings
         .insert(destination_id, app.backend_settings());
-    let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut stale_input = app.chat_widget.capture_thread_input_state().unwrap();
     stale_input.provider_error = Some(
         codex_app_server_protocol::ModelProviderError::ModelProviderNotConfigured {
@@ -1304,6 +1309,8 @@ async fn resumed_backend_handoff_detaches_through_the_source_connection() -> Res
     app.resume_backend_session(&mut tui, &mut backends, target)
         .await?;
 
+    assert!(app.agents_overview.workspace.is_open());
+    assert!(!app.workspace_center_owns_input());
     assert_eq!(backends.displayed_owner(), destination_id);
     assert_eq!(app.chat_widget.thread_id(), Some(resumed_id));
     assert!(!app.chat_widget.has_provider_error());
