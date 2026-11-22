@@ -11,6 +11,7 @@
 // the token pool's API keys; browser not ready -> set up; sign-in while the browser is being
 // prepared; router down and back; a router without the API; phone width and light theme.
 
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,7 @@ import {
   kit,
   layoutProblems,
   pickSite,
+  skipWelcome,
   waitTitle,
 } from "./e2e-kit.ts";
 import { startMockRouter } from "./mock-router.ts";
@@ -43,6 +45,9 @@ const ui = await startUiServer({
   bin: "/nonexistent/provenance", // no app-server: this check never sends a turn
   router: { url: mock.url },
   cwd: () => ({ defaultCwd: tmpdir(), fromLauncher: false }),
+  // fallback threads and the Codex home in a scratch folder; no Codex login to link
+  dataDir: mkdtempSync(path.join(tmpdir(), "provenance-setup-e2e-data-")),
+  codexLoginHome: path.join(tmpdir(), "provenance-setup-e2e-no-codex"),
 });
 log(`mock router ${mock.url}, UI ${ui.url}, screenshots in ${shots}`);
 
@@ -80,6 +85,7 @@ try {
   log("first run");
   await control("reset", { scenario: "fresh" });
   await page.goto(ui.url);
+  await skipWelcome(page); // nothing is set up: the welcome comes first
   await page.waitForSelector(`${dialog} .setup-sites`, { timeout: 15_000 });
   check(
     /Nothing is signed in yet/.test(await page.locator(`${dialog} .setup-lead`).innerText()),

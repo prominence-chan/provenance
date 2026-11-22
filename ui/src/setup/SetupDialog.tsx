@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { appShell } from "../app-shell";
+import { FallbacksStep } from "../fallback/FallbacksStep";
 import { refreshSources } from "../store/actions";
 import { KeysStep } from "./KeysStep";
 import { closeSetup, useSetupOpen } from "./open";
@@ -38,10 +39,11 @@ type View =
   | { step: "site"; provider: string }
   | { step: "signin"; provider: string; account: string }
   | { step: "ready"; provider: string; account: string }
-  | { step: "keys" };
+  | { step: "keys" }
+  | { step: "fallbacks" };
 
 const STEPS = ["Site", "Account", "Sign in", "Ready"] as const;
-const STEP_INDEX: Record<Exclude<View["step"], "keys">, number> = {
+const STEP_INDEX: Record<Exclude<View["step"], "keys" | "fallbacks">, number> = {
   sites: 0,
   site: 1,
   signin: 2,
@@ -83,9 +85,11 @@ export function SetupDialog() {
       setView(
         startView === "keys"
           ? { step: "keys" }
-          : startProvider
-            ? { step: "site", provider: startProvider }
-            : { step: "sites" },
+          : startView === "fallbacks"
+            ? { step: "fallbacks" }
+            : startProvider
+              ? { step: "site", provider: startProvider }
+              : { step: "sites" },
       );
       setLogin(null);
       setRowMsg(null);
@@ -151,7 +155,7 @@ export function SetupDialog() {
   }, [open, view, reload]);
 
   const provider =
-    view.step === "sites" || view.step === "keys"
+    view.step === "sites" || view.step === "keys" || view.step === "fallbacks"
       ? null
       : (data?.providers.find((p) => p.id === view.provider) ?? null);
 
@@ -188,7 +192,8 @@ export function SetupDialog() {
   };
 
   const back = () => {
-    if (view.step === "site" || view.step === "keys") setView({ step: "sites" });
+    if (view.step === "site" || view.step === "keys" || view.step === "fallbacks")
+      setView({ step: "sites" });
     else if (view.step === "signin") {
       if (login && loginActive(login.state))
         void cancel(view.provider, view.account, { step: "site", provider: view.provider });
@@ -209,7 +214,9 @@ export function SetupDialog() {
   const prepare = () => void prepareBrowser().then(() => reload());
 
   let body: React.ReactNode;
-  if (unavailable === "down") {
+  if (view.step === "fallbacks") {
+    body = <FallbacksStep />; // the CLIs on this Mac: no router needed
+  } else if (unavailable === "down") {
     body = (
       <PageState
         title="The model router isn't answering"
@@ -247,6 +254,7 @@ export function SetupDialog() {
           setView({ step: "site", provider: id });
         }}
         onKeys={() => setView({ step: "keys" })}
+        onFallbacks={() => setView({ step: "fallbacks" })}
         onPrepare={prepare}
       />
     );
@@ -326,8 +334,9 @@ export function SetupDialog() {
     );
   }
 
-  const pageState = unavailable !== null;
-  const stepIndex = view.step === "keys" ? -1 : STEP_INDEX[view.step];
+  const pageState = unavailable !== null && view.step !== "fallbacks";
+  const aside = view.step === "keys" || view.step === "fallbacks";
+  const stepIndex = aside ? -1 : STEP_INDEX[view.step];
   return (
     <dialog
       ref={ref}
@@ -353,12 +362,12 @@ export function SetupDialog() {
             <IconClose />
           </button>
         </header>
-        {/* The keys page is beside the four steps, not one of them: no rail there. */}
+        {/* The keys and fallbacks pages are beside the four steps, not of them: no rail there. */}
         <ol
           className="setup-rail"
           aria-label="Steps"
           data-hidden={pageState || undefined}
-          data-gone={(view.step === "keys" && !pageState) || undefined}
+          data-gone={(aside && !pageState) || undefined}
         >
           {STEPS.map((s, i) => (
             <li

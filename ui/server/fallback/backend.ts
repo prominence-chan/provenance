@@ -4,7 +4,7 @@
 // handle them unchanged.
 //
 //   requests:      initialize, thread/list, thread/start, thread/resume, thread/turns/list,
-//                  thread/archive, turn/start, turn/interrupt
+//                  thread/archive, thread/name/set, turn/start, turn/interrupt
 //   notifications: thread/started, thread/status/changed, thread/archived, turn/started,
 //                  item/started, item/agentMessage/delta, item/completed, error, turn/completed
 //
@@ -174,6 +174,13 @@ export class FallbackBackend {
         t.archived = true;
         this.save(t);
         this.broadcast("thread/archived", { threadId: t.thread.id });
+        return {};
+      }
+      case "thread/name/set": {
+        const t = this.get(p.threadId);
+        t.thread.name = typeof p.name === "string" && p.name.trim() ? p.name.trim() : null;
+        this.save(t);
+        this.broadcast("thread/name/updated", { threadId: t.thread.id, threadName: t.thread.name });
         return {};
       }
       case "turn/start":

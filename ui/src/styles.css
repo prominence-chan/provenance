@@ -1862,7 +1862,8 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 /* ---- models & accounts (src/setup/) ---------------------------------------
    One dialog, four steps on a rail that never moves: Site -> Account -> Sign in -> Ready.
    The panel keeps one height across steps so nothing jumps; the body scrolls. */
-.setup-dialog {
+.setup-dialog,
+.welcome-dialog {
   padding: 0;
   border: none;
   background: none;
@@ -1873,11 +1874,14 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   margin-top: min(12vh, 96px);
   overflow: visible;
 }
-.setup-dialog::backdrop {
+.setup-dialog::backdrop,
+.welcome-dialog::backdrop {
   background: rgba(0, 0, 0, 0.5);
 }
 .setup-dialog[open],
-.setup-dialog[open]::backdrop {
+.setup-dialog[open]::backdrop,
+.welcome-dialog[open],
+.welcome-dialog[open]::backdrop {
   animation: usage-in var(--dur) var(--ease-out);
 }
 .setup-panel {
@@ -2518,6 +2522,8 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 @media (prefers-reduced-motion: reduce) {
   .setup-dialog[open],
   .setup-dialog[open]::backdrop,
+  .welcome-dialog[open],
+  .welcome-dialog[open]::backdrop,
   .art-checking {
     animation: none;
   }
@@ -2525,4 +2531,138 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   .switch::after {
     transition: none;
   }
+}
+
+/* ---- fallbacks: Claude Code, Codex (src/fallback/) --------------------------
+   In the model picker below the tiers, on their own Models & accounts page and in the welcome,
+   and as one line under a thread that has outgrown the free models. Same parts as the tiers
+   and the setup steps; no colour of their own (they are not tiers). */
+.tier-section {
+  margin: 4px -4px 2px;
+  padding: 7px 10px 3px;
+  border-top: 1px solid var(--border);
+}
+.fallback-option .tier-option-glyph {
+  color: var(--text-2);
+}
+.fallback-option.muted .tier-option-name,
+.fallback-option.muted .tier-option-glyph {
+  color: var(--faint);
+}
+.fallback-option.muted .tier-option-glyph {
+  box-shadow: inset 0 0 0 1px var(--border);
+  background: none;
+}
+.tier-sub-option.group {
+  margin-top: 4px;
+  position: relative;
+}
+.tier-sub-option.group::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  top: -3px;
+  border-top: 1px solid var(--border);
+}
+.tier-picker-btn[data-fallback] > svg:first-child {
+  color: var(--text-2);
+}
+
+.fallback-row .setup-switch-row {
+  padding: 10px 0;
+}
+.fallback-row .setup-switch-text {
+  gap: 1px;
+}
+.fallback-fix {
+  margin: -4px 0 10px 40px;
+  white-space: normal;
+}
+.fallback-fix code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  user-select: all;
+}
+.fallback-modes {
+  display: flex;
+  flex-direction: column;
+  margin: -2px 0 10px 40px;
+  padding: 2px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+}
+.fallback-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 0;
+  cursor: pointer;
+}
+.fallback-mode + .fallback-mode {
+  border-top: 1px solid var(--border);
+}
+.fallback-mode input {
+  margin: 2px 0 0;
+  accent-color: var(--accent, currentColor);
+}
+.fallback-mode[aria-disabled] {
+  cursor: default;
+  color: var(--faint);
+}
+
+.strain-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 8px 8px 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  animation: rise var(--dur-slow) var(--ease-out) both;
+}
+.strain-text {
+  flex: 1;
+  min-width: 220px;
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+.strain-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.welcome-intro .hero-sun,
+.welcome-intro canvas {
+  margin-top: 4px;
+}
+.welcome-actions {
+  justify-content: flex-end;
+}
+.welcome-loading {
+  min-height: 120px;
+}
+.welcome-inline {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}
+.welcome-summary {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 6px 14px;
+  margin: 10px 0 0;
+  text-align: left;
+  font-size: var(--fs-md);
+}
+.welcome-summary dt {
+  align-self: center;
+}
+.welcome-summary dd {
+  margin: 0;
 }

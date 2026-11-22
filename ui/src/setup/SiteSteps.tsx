@@ -3,6 +3,8 @@
 
 import { useEffect, useState } from "react";
 import { TierGlyph } from "../components/TierBadge";
+import { fallbacks } from "../fallback/available";
+import { useAppState } from "../store/store";
 import { tierOf } from "../theme/tiers";
 import {
   AccountStatus,
@@ -42,6 +44,7 @@ export function SitesStep({
   firstRun,
   onPick,
   onKeys,
+  onFallbacks,
   onPrepare,
 }: {
   data: WebAccounts;
@@ -50,13 +53,14 @@ export function SitesStep({
   firstRun: boolean;
   onPick: (id: string) => void;
   onKeys: () => void;
+  onFallbacks: () => void;
   onPrepare: () => void;
 }) {
   const sites = shownProviders(data);
   return (
     <div className="setup-step">
       <p className="setup-lead">
-        {firstRun
+        {firstRun || !data.providers.some((p) => p.accounts.some((a) => a.signed_in === true))
           ? "Nothing is signed in yet. Sign in to a chat site, and its models serve your threads."
           : "Sign in to a chat site to use its models in Provenance."}
       </p>
@@ -96,12 +100,36 @@ export function SitesStep({
           </button>
         </>
       )}
+      <h4 className="meta setup-label">For threads that outgrow them</h4>
+      <button
+        className="setup-site setup-fallbacks"
+        onClick={onFallbacks}
+        data-provider="fallbacks"
+      >
+        <Monogram name="F" />
+        <span className="setup-site-text">
+          <span className="setup-site-name">Fallbacks</span>
+          <span className="meta">Claude Code and Codex</span>
+        </span>
+        <FallbackStatus />
+        <IconNext />
+      </button>
       <RouterNote />
     </div>
   );
 }
 
-function PoolStatus({ pool }: { pool: PoolProvider[] }) {
+function FallbackStatus() {
+  const prefs = useAppState((s) => s.settings.fallbacks);
+  const info = useAppState((s) => s.fallbackInfo);
+  const list = fallbacks(prefs, info);
+  const ready = list.filter((f) => f.ready).map((f) => f.name);
+  if (ready.length) return <Status cls="dot-ok" text={ready.join(", ")} />;
+  if (list.some((f) => f.on)) return <Status cls="dot-warn" text="Needs a look" />;
+  return <Status cls="dot-off" text="Off" />;
+}
+
+export function PoolStatus({ pool }: { pool: PoolProvider[] }) {
   const keyed = pool.filter((p) => p.usable && !p.anonymous).length;
   const open = pool.filter((p) => p.usable && p.anonymous).length;
   if (keyed) return <Status cls="dot-ok" text={`${keyed} with keys`} />;

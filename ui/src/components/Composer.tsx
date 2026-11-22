@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { appShell } from "../app-shell";
 import type { SandboxMode } from "../protocol";
-import { interrupt, sendMessage, updateSettings } from "../store/actions";
+import { backendOfModel, MODE_NAME } from "../fallback/model";
+import { parseFallbackModel } from "../../shared/fallback-api";
+import { backendOf, interrupt, sendMessage, updateSettings } from "../store/actions";
 import type { Settings } from "../store/state";
 import { useAppState } from "../store/store";
 import { useFx } from "./effects/useFx";
@@ -15,7 +17,23 @@ export function Composer() {
   const view = useAppState((s) => (s.selectedThreadId ? s.views[s.selectedThreadId] : undefined));
   const settings = useAppState((s) => s.settings);
   const sending = useAppState((s) => s.sending);
-  const ready = useAppState((s) => s.socketOpen && s.bridge?.state === "ready");
+  const target = backendOfModel(settings.model);
+  // The codex backend starts on first use (sendMessage waits for it).
+  const ready = useAppState((s) =>
+    target === "main"
+      ? s.socketOpen && s.bridge?.state === "ready"
+      : target === "fallback"
+        ? s.backendReady.fallback
+        : true,
+  );
+  // The open thread runs elsewhere than the picker says: sending starts a new thread there.
+  const handoff = !!selected && backendOf(selected) !== target;
+  const fb = parseFallbackModel(settings.model);
+  const placeholder = !selected
+    ? "Ask Provenance anything"
+    : handoff
+      ? `Continue in a new ${fb ? MODE_NAME[fb.mode] : settings.model} thread`
+      : "Ask for follow-up changes";
   const [text, setText] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -76,7 +94,7 @@ export function Composer() {
             ref={ref}
             rows={1}
             value={text}
-            placeholder={selected ? "Ask for follow-up changes" : "Ask Provenance anything"}
+            placeholder={placeholder}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
           />

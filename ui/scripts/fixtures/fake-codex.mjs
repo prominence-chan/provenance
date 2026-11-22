@@ -20,25 +20,74 @@ if (argv[0] === "login" && argv[1] === "status") {
   process.exit(0);
 }
 if (argv[0] === "debug" && argv[1] === "models") {
-  console.log(JSON.stringify({ models: [
-    { slug: "fake-big", display_name: "Fake Big", visibility: "list", priority: 1 },
-    { slug: "fake-hidden", display_name: "Hidden", visibility: "hide", priority: 2 },
-    { slug: "fake-small", display_name: "Fake Small", visibility: "list", priority: 3 },
-  ] }));
+  console.log(
+    JSON.stringify({
+      models: [
+        { slug: "fake-big", display_name: "Fake Big", visibility: "list", priority: 1 },
+        { slug: "fake-hidden", display_name: "Hidden", visibility: "hide", priority: 2 },
+        { slug: "fake-small", display_name: "Fake Small", visibility: "list", priority: 3 },
+      ],
+    }),
+  );
   process.exit(0);
 }
 let stdin = "";
 process.stdin.on("data", (d) => (stdin += d));
 process.stdin.on("end", () => {
-  if (process.env.FAKE_CLI_LOG) appendFileSync(process.env.FAKE_CLI_LOG, JSON.stringify({ cli: "codex", argv, stdin, cwd: process.cwd() }) + "\n");
+  if (process.env.FAKE_CLI_LOG)
+    appendFileSync(
+      process.env.FAKE_CLI_LOG,
+      JSON.stringify({ cli: "codex", argv, stdin, cwd: process.cwd() }) + "\n",
+    );
   const resume = argv[1] === "resume";
   const id = resume ? argv[argv.length - 2] : randomUUID();
   out({ type: "thread.started", thread_id: id });
   out({ type: "turn.started" });
-  out({ type: "item.completed", item: { id: "item_0", type: "reasoning", text: "**Checking** the folder" } });
-  out({ type: "item.started", item: { id: "item_1", type: "command_execution", command: "/bin/zsh -lc 'ls'", aggregated_output: "", exit_code: null, status: "in_progress" } });
-  out({ type: "item.completed", item: { id: "item_1", type: "command_execution", command: "/bin/zsh -lc 'ls'", aggregated_output: "a.txt\n", exit_code: 0, status: "completed" } });
-  out({ type: "item.completed", item: { id: "item_2", type: "file_change", changes: [{ path: "a.txt", kind: "update" }], status: "completed" } });
-  out({ type: "item.completed", item: { id: "item_3", type: "agent_message", text: `Done (${resume ? "resumed" : "new"} session).` } });
-  out({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 } });
+  out({
+    type: "item.completed",
+    item: { id: "item_0", type: "reasoning", text: "**Checking** the folder" },
+  });
+  out({
+    type: "item.started",
+    item: {
+      id: "item_1",
+      type: "command_execution",
+      command: "/bin/zsh -lc 'ls'",
+      aggregated_output: "",
+      exit_code: null,
+      status: "in_progress",
+    },
+  });
+  out({
+    type: "item.completed",
+    item: {
+      id: "item_1",
+      type: "command_execution",
+      command: "/bin/zsh -lc 'ls'",
+      aggregated_output: "a.txt\n",
+      exit_code: 0,
+      status: "completed",
+    },
+  });
+  out({
+    type: "item.completed",
+    item: {
+      id: "item_2",
+      type: "file_change",
+      changes: [{ path: "a.txt", kind: "update" }],
+      status: "completed",
+    },
+  });
+  out({
+    type: "item.completed",
+    item: {
+      id: "item_3",
+      type: "agent_message",
+      text: `Done (${resume ? "resumed" : "new"} session).`,
+    },
+  });
+  out({
+    type: "turn.completed",
+    usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 },
+  });
 });

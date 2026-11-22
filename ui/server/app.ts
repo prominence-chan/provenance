@@ -426,6 +426,8 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       bridge.stop();
       codexBridge?.stop();
       fallback.stop();
+      // ws 8 leaves open sockets alone on close(); upgraded sockets would keep server.close() waiting.
+      for (const c of wss.clients) c.terminate();
       wss.close();
       await closeVite?.();
       const closed = new Promise<void>((r) => server.close(() => r()));

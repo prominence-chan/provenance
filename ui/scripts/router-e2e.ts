@@ -29,7 +29,15 @@ import { chromium } from "playwright";
 import type { WirePoolKeys, WireSources, WireWebAccounts } from "../shared/router-api.ts";
 import { startUiServer } from "../server/app.ts";
 import { findChromium } from "./chromium.ts";
-import { account, dialog, kit, layoutProblems, pickSite, waitTitle } from "./e2e-kit.ts";
+import {
+  account,
+  dialog,
+  kit,
+  layoutProblems,
+  pickSite,
+  waitTitle,
+  skipWelcome,
+} from "./e2e-kit.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { log, shot, check, shots } = kit(
@@ -89,6 +97,9 @@ const ui = await startUiServer({
   // app-server's own state in the scratch folder, never ~/.provenance
   appServerEnv: { PROVENANCE_HOME: path.join(scratch, "provenance-home") },
   cwd: () => ({ defaultCwd: scratch, fromLauncher: true }),
+  // fallback threads and the Codex home in the scratch folder too; no Codex login to link
+  dataDir: path.join(scratch, "ui-data"),
+  codexLoginHome: path.join(scratch, "no-codex"),
 });
 log(`router ${R} (pid ${info.pid}), mock page ${info.mock}, UI ${ui.url}, shots in ${shots}`);
 
@@ -116,6 +127,7 @@ try {
   // ---- 1. first run on a fresh home --------------------------------------------------
   log("first run");
   await page.goto(ui.url);
+  await skipWelcome(page); // nothing is set up: the welcome comes first
   await page.waitForSelector(`${dialog} .setup-sites`, { timeout: 20_000 });
   check(true, "the dialog opens by itself: nothing is signed in");
   const statuses = await page.locator(`${dialog} .setup-sites .setup-status`).allInnerTexts();

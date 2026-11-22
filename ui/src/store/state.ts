@@ -1,7 +1,9 @@
 // Shape of the whole UI state. Protocol objects (Thread, ThreadItem, ...) are
 // stored as-is from app-server; the "View" types only add what the UI needs on top.
 
+import type { FallbacksInfo } from "../../shared/fallback-api";
 import type { SourceNeeds, WireSource } from "../../shared/router-api";
+import type { BackendId } from "../fallback/model";
 import type {
   AskForApproval,
   BridgeStatus,
@@ -50,6 +52,12 @@ export interface TurnUsage {
   input_tokens: number;
   output_tokens: number;
   models: ModelUsage[];
+  /**
+   * What fitting the turn's history into its models took, per flag (provenance-core's
+   * context_signal.py: compacted, trimmed, summarised, shortened, restarted, over). Absent from
+   * an older router.
+   */
+  context?: Record<string, number>;
 }
 
 export interface ThreadView {
@@ -79,11 +87,19 @@ export type Source = Pick<
   needs: SourceNeeds | null;
 };
 
+/** Which fallbacks the user turned on (Models & accounts -> Fallbacks, or the welcome). */
+export interface FallbackPrefs {
+  claude: boolean;
+  /** off; background: the codex CLI runs turns; provenance: Provenance runs them on your Codex login. */
+  codex: "off" | "background" | "provenance";
+}
+
 export interface Settings {
   model: string;
   cwd: string;
   approvalPolicy: Extract<AskForApproval, string>;
   sandbox: SandboxMode;
+  fallbacks: FallbackPrefs;
 }
 
 export interface Notice {
@@ -112,6 +128,12 @@ export interface AppState {
   notices: Notice[];
   /** Per turn id: which models served it (absent = not fetched yet). */
   usage: Record<string, TurnUsage>;
+  /** Claude Code / Codex health and models (GET /api/fallbacks); null until checked. */
+  fallbackInfo: FallbacksInfo | null;
+  /** Which backend each known thread lives on (fallback/model.ts). */
+  threadBackend: Record<string, BackendId>;
+  /** Per backend: connected and ready. The main one is `bridge` / `socketOpen`. */
+  backendReady: Record<BackendId, boolean>;
 }
 
 const SETTINGS_KEY = "provenance-ui.settings";
@@ -144,11 +166,15 @@ export function initialState(): AppState {
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
       ...loadSettings(),
+      fallbacks: { claude: false, codex: "off", ...loadSettings().fallbacks },
     },
     tiers: ["nova", "solstice", "ember", "spark"],
     sources: {},
     notices: [],
     usage: {},
+    fallbackInfo: null,
+    threadBackend: {},
+    backendReady: { main: false, codex: false, fallback: false },
   };
 }
 

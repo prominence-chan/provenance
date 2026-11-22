@@ -16,6 +16,7 @@
 //                       finishes (or gives up on) signing in inside the window
 //   POST /mock/down     {"down": true}   every other route then drops the connection
 //   POST /mock/legacy   {"legacy": true} /web/* 404s, like a router from before the API
+//   POST /mock/usage    {"turn", "context": {"trimmed": 2}}  what /v1/pcore/usage says of a turn
 //   GET  /mock/state    the whole state, for assertions
 //
 // The router API it mirrors (provenance-core's server.py; shapes in shared/router-api.ts):
@@ -27,7 +28,7 @@
 //   POST /web/login/show {provider, account}   -> {state, shown}
 //   POST /web/browser/prepare
 //   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}
-//   GET  /health, /v1/models, /v1/sources
+//   GET  /health, /v1/models, /v1/sources, /v1/pcore/usage
 // Everything a real router has that matters to the screen; what a real one does beyond it
 // (the window, the cookie, the check) is in provenance-core's own tests and router-e2e.ts.
 
@@ -254,6 +255,8 @@ function scenario(name: string): State {
 }
 
 let state = scenario(process.env.MOCK_SCENARIO ?? "fresh");
+/** Per turn id: the "context" flags /v1/pcore/usage reports (POST /mock/usage). */
+const usage: Record<string, Record<string, number>> = {};
 /** Bumped on every reset so timers from an earlier scenario do nothing. */
 let epoch = 0;
 let prepareProgress = 0;
@@ -479,6 +482,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       const ok = finish(provider, account, body.ok !== false, body.reason as string | undefined);
       return send(res, ok ? 200 : 409, { ok });
     }
+    if (p === "/mock/usage") {
+      // what /v1/pcore/usage says about one turn's context (provenance-core context_signal.py)
+      usage[String(body.turn)] = (body.context ?? {}) as Record<string, number>;
+      return send(res, 200, { ok: true });
+    }
     if (p === "/mock/state") return send(res, 200, state);
     return send(res, 404, { detail: "Not Found" });
   }
@@ -497,6 +505,19 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     });
   }
   if (p === "/v1/sources" && m === "GET") return send(res, 200, sourcesBody());
+  if (p === "/v1/pcore/usage" && m === "GET") {
+    const turn = url.searchParams.get("turn") ?? "";
+    const one = { model: "luna", tier: "solstice", requests: 1, input_tokens: 9, output_tokens: 3 };
+    return send(res, 200, {
+      key: url.searchParams.get("key"),
+      turn,
+      requests: 1,
+      input_tokens: 9,
+      output_tokens: 3,
+      models: [one],
+      context: usage[turn] ?? {},
+    });
+  }
 
   if (p === "/web/accounts" && m === "GET") return send(res, 200, accountsBody());
   if (p === "/web/accounts" && m === "POST") {

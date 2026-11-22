@@ -12,6 +12,7 @@ import { IconChevron, IconDiff } from "./icons";
 import { tierOf } from "../theme/tiers";
 import { TierBadge } from "./TierBadge";
 import { TurnModels } from "./TurnModels";
+import { StrainNote } from "../fallback/StrainNote";
 
 /** Centered, scrolling transcript of one thread. */
 export function Conversation({ threadId }: { threadId: string }) {
@@ -66,6 +67,7 @@ export function Conversation({ threadId }: { threadId: string }) {
             waiting={pending > 0}
           />
         ))}
+        <StrainNote threadId={threadId} />
         <Approvals threadId={threadId} />
       </div>
     </div>

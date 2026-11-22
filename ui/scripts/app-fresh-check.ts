@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import type { UiHealth } from "../shared/router-api.ts";
 import { findChromium } from "./chromium.ts";
+import { skipWelcome } from "./e2e-kit.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const app = path.resolve(process.env.APP ?? path.join(root, "release/mac-arm64/Provenance.app"));
@@ -270,6 +271,7 @@ try {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.goto(ready.ui);
+    await skipWelcome(page); // nothing is set up: the welcome comes first
     await page.waitForSelector(".setup-dialog[open] .setup-sites", { timeout: 30_000 });
     const sites = await page
       .locator(".setup-dialog[open] .setup-site")

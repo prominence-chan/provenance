@@ -1,3 +1,4 @@
+import { fallbackLabel } from "../fallback/model";
 import { useAppState } from "../store/store";
 import { splitModel, tierOf, type TierId } from "../theme/tiers";
 
@@ -74,7 +75,21 @@ export function useSourceLabel(model: string | null | undefined): string | null 
 /** Small pill: glyph + tier name (+ pinned source), tinted by tier. Unknown models render neutral. */
 export function TierBadge({ model, compact }: { model: string | null; compact?: boolean }) {
   const source = useSourceLabel(model);
+  const info = useAppState((s) => s.fallbackInfo);
   if (!model) return null;
+  const fb = fallbackLabel(model, info);
+  if (fb)
+    return (
+      <span className={`tier-badge ${compact ? "compact" : ""}`} title={`${fb.name} · ${fb.model}`}>
+        <TierGlyph tier={null} size={compact ? 10 : 11} />
+        {!compact && (
+          <span className="tier-name">
+            {fb.name}
+            <span className="tier-source"> · {fb.model}</span>
+          </span>
+        )}
+      </span>
+    );
   const tier = tierOf(model);
   return (
     <span

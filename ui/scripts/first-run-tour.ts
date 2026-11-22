@@ -16,7 +16,7 @@ import { chromium } from "playwright";
 import { RouterSupervisor } from "../electron/router.ts";
 import { startUiServer } from "../server/app.ts";
 import { findChromium } from "./chromium.ts";
-import { dialog, kit } from "./e2e-kit.ts";
+import { dialog, kit, skipWelcome } from "./e2e-kit.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { log, shot } = kit(
@@ -41,6 +41,8 @@ const ui = await startUiServer({
   router: () => router.connection(),
   routerStatus: () => router.status(),
   cwd: () => ({ defaultCwd: scratch, fromLauncher: false }),
+  dataDir: path.join(scratch, "ui-data"),
+  codexLoginHome: path.join(scratch, "no-codex"),
 });
 const browser = await chromium.launch({ headless: true, executablePath: findChromium() });
 const tour = async (name: string, width: number, height: number, theme: "dark" | "light") => {
@@ -54,6 +56,9 @@ try {
   await page.goto(ui.url);
   await page.waitForTimeout(400);
   await shot(page, "starting");
+  await page.waitForSelector(".welcome-dialog[open]", { timeout: 60_000 });
+  await shot(page, "welcome");
+  await skipWelcome(page);
   await page.waitForSelector(`${dialog} .setup-sites`, { timeout: 60_000 });
   await shot(page, "first-run-dialog");
   await page
@@ -92,6 +97,7 @@ try {
   ] as const) {
     const t = await tour(`${w}-${theme}`, w, h, theme);
     await t.page.goto(ui.url);
+    await skipWelcome(t.page);
     await t.page.waitForSelector(`${dialog} .setup-sites`, { timeout: 30_000 });
     await shot(t.page, `sites-${w}-${theme}`);
     await t.page.click(`${dialog} .setup-site[data-provider="gemini-web"]`);

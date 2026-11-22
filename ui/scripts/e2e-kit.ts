@@ -7,6 +7,7 @@ import path from "node:path";
 import type { Page } from "playwright";
 
 export const dialog = ".setup-dialog[open]";
+export const welcomeDialog = ".welcome-dialog[open]";
 
 export function kit(name: string, shots: string) {
   mkdirSync(shots, { recursive: true });
@@ -52,13 +53,25 @@ export function account(page: Page, id: string) {
   return page.locator(`${dialog} .setup-accounts li[data-account="${id}"]`);
 }
 
+/**
+ * A first launch with nothing set up opens the welcome (src/fallback/WelcomeDialog.tsx): skip it
+ * and open Models & accounts from the sidebar, where checks written before the welcome start.
+ */
+export async function skipWelcome(page: Page, timeout = 30_000): Promise<void> {
+  await page.waitForSelector(welcomeDialog, { timeout });
+  await page.locator(welcomeDialog).getByRole("button", { name: "Close" }).click();
+  await page.waitForSelector(welcomeDialog, { state: "detached" });
+  await page.click('button[title="Models & accounts"]');
+}
+
 /** No sideways scroll inside the panel, and no button label wrapping to two lines. */
 export async function layoutProblems(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const out: string[] = [];
-    const body = document.querySelector(".setup-dialog[open] .setup-body");
+    const sel = ":is(.setup-dialog, .welcome-dialog)[open]";
+    const body = document.querySelector(`${sel} .setup-body`);
     if (body && body.scrollWidth > body.clientWidth + 1) out.push("body scrolls sideways");
-    for (const b of document.querySelectorAll<HTMLElement>(".setup-dialog[open] button")) {
+    for (const b of document.querySelectorAll<HTMLElement>(`${sel} button`)) {
       const lh = parseFloat(getComputedStyle(b).lineHeight) || 16;
       if (
         b.offsetParent &&

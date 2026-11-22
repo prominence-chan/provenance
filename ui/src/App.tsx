@@ -7,6 +7,7 @@ import { useFx } from "./components/effects/useFx";
 import { Notices } from "./components/Notices";
 import { Sidebar } from "./components/Sidebar";
 import { ThreadHeader } from "./components/ThreadHeader";
+import { WelcomeDialog } from "./fallback/WelcomeDialog";
 import { SetupDialog } from "./setup/SetupDialog";
 import { useAppState } from "./store/store";
 import { useSidebar } from "./theme/ui";
@@ -31,6 +32,7 @@ export function App() {
       </main>
       <Notices />
       <SetupDialog />
+      <WelcomeDialog />
     </div>
   );
 }
