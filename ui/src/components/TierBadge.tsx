@@ -1,8 +1,8 @@
 import { tierOf, type TierId } from "../theme/tiers";
 
 /**
- * Per-tier glyph, brighter as the tier rises: a coal (ember), a spark, a sun
- * (solstice), a starburst (nova). Colored via `color: var(--tier-<id>)`.
+ * Per-tier glyph, brighter as the tier rises: a small spark, a glowing coal (ember),
+ * a sun (solstice), a starburst (nova). Colored via `color: var(--tier-<id>)`.
  */
 export function TierGlyph({ tier, size = 12 }: { tier: TierId | null; size?: number }) {
   const common = {
@@ -13,17 +13,20 @@ export function TierGlyph({ tier, size = 12 }: { tier: TierId | null; size?: num
     "aria-hidden": true,
   };
   switch (tier) {
+    case "spark":
+      return (
+        <svg {...common}>
+          <path
+            d="M8 3l1.1 3.9 3.9 1.1-3.9 1.1-1.1 3.9-1.1-3.9-3.9-1.1 3.9-1.1z"
+            fill="currentColor"
+          />
+        </svg>
+      );
     case "ember":
       return (
         <svg {...common}>
           <circle cx="8" cy="8" r="4" fill="currentColor" opacity="0.9" />
           <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" opacity="0.25" />
-        </svg>
-      );
-    case "spark":
-      return (
-        <svg {...common}>
-          <path d="M8 1.5l1.5 5 5 1.5-5 1.5-1.5 5-1.5-5-5-1.5 5-1.5z" fill="currentColor" />
         </svg>
       );
     case "solstice":

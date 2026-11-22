@@ -1,27 +1,35 @@
 // Tier effects: one WebGL2 canvas behind the main column, always on for the selected tier.
 //
-// Three states, eased into each other:
-//   flare    when the tier changes (and on first load): a short ignition in the tier's style
+// Three states, eased into each other (critically damped, so nothing snaps):
+//   flare    when the tier changes (and on first load): the tier's ignition, the peak
 //   idle     after the flare: an almost-still ambient animation, drawn at a low frame rate
-//   active   while a turn streams: livelier than idle, well below the flare's peak
+//   active   while a turn streams: a little above idle, well below the flare
 //
-// Each tier has its own look (fragment shader branch + its own particles):
-//   ember     a warm glow breathing round the composer; on switch (and now and then while
-//             active) hairline heat cracks spread out from its edge and cool
-//   spark     electric crackle: bright heads skip along the composer's edge trailing a
-//             jagged arc and shedding falling sparks; idle is a rare tiny flick
-//   solstice  warm flame licking off the top edge; on switch a sunrise (a golden bloom and
-//             rays rising from the edge); idle is a low, slow corona lick
-//   nova      a shimmering plasma rim all round; on switch a stellar ignition (flash,
-//             shockwave ring, ember burst, the header filament lighting outward); while
-//             active a breathing plasma corona with flames and embers
+// Intensity climbs with the tier (spark subtlest, nova strongest). Each tier has its own look:
+//   spark     electric: tiny sparks fizzle in and out at random spots just outside the edge,
+//             drift a little and crackle; on switch a scatter of them with short arcs jumping
+//             between neighbours
+//   ember     heat cracks: branching hairline cracks spread out from the composer's edge,
+//             glowing hot at the growing tip, then cool to a faint glow that lives in the
+//             cracks; while active, heat pulses run out along them
+//   solstice  sunset: on switch the sun's glare appears on the top edge, flames and dusk
+//             clouds rise and run out sideways under slowly turning rays, then it settles to
+//             a low, faint flame with sparse cinders drifting up
+//   nova      plasma: a short charge (motes gather, the rim tightens), then an eruption from
+//             the whole composer: core flash, chromatic shockwaves, debris with physics,
+//             plasma smoke cooling through violet and cyan, a lingering afterglow; idle is a
+//             calm shimmering plasma rim
 //
-// Cheap by construction: DPR capped at 1.5, the shader runs only in a band around the
-// composer (plus a strip under the header and, for nova's ignition, the shockwave's box),
-// idle draws at 20 fps, background windows at 30 fps (idle stops after a few seconds
-// unfocused), nothing runs while the tab is hidden. pointer-events: none. Under
-// prefers-reduced-motion, or without WebGL2, nothing runs and effects.css draws a static
-// tier tint instead.
+// Organic by construction: every envelope is a smooth attack into a two-rate decay (no
+// kinks at the peak), timings vary per flare, idle brightness wanders on slow noise, and
+// layers within a flare fade at different rates.
+//
+// Cheap: DPR capped at 1.5, the shader runs only in a band around the composer (plus a strip
+// under the header and, during nova's eruption, the shockwave's box), every band fades out
+// before its edge, idle draws at 20 fps, background windows at 30 fps (idle stops after a few
+// seconds unfocused), nothing runs while the tab is hidden. pointer-events: none. Under
+// prefers-reduced-motion, or without WebGL2, nothing runs and effects.css draws a static tier
+// tint instead.
 import { useEffect, useRef } from "react";
 import { useTheme } from "../../theme/theme";
 import type { TierId } from "../../theme/tiers";
@@ -72,15 +80,24 @@ export function FlameFx({ fx }: { fx: FxState }) {
 
 type Engine = NonNullable<ReturnType<typeof createEngine>>;
 
-const TIER_INDEX: Record<TierId, number> = { ember: 0, spark: 1, solstice: 2, nova: 3 };
-const TIER_IDS: TierId[] = ["ember", "spark", "solstice", "nova"];
+const TIER_INDEX: Record<TierId, number> = { spark: 0, ember: 1, solstice: 2, nova: 3 };
+const TIER_IDS: TierId[] = ["spark", "ember", "solstice", "nova"];
+/** Point palette slot for nova's off-palette debris (violet / cyan). */
+const OFF = 4;
 
-/** Flare envelope per tier: rise time (s), decay rate (1/s), total length (s). */
-const FLARE: Record<TierId, { rise: number; decay: number; len: number }> = {
-  ember: { rise: 0.3, decay: 1.9, len: 2.6 },
-  spark: { rise: 0.05, decay: 2.2, len: 2.0 },
-  solstice: { rise: 0.6, decay: 1.25, len: 3.8 },
-  nova: { rise: 0.05, decay: 1.15, len: 4.0 },
+/**
+ * Flare envelope per tier, in seconds: an optional charge (`pre`) before the peak, a smooth
+ * attack (`rise`), then a two-rate decay (fast `k1` for share `m`, slow `k2` for the rest),
+ * gone by `len`. Each flare stretches all of it by a random 0.88..1.14.
+ */
+const FLARE: Record<
+  TierId,
+  { pre: number; rise: number; k1: number; k2: number; m: number; len: number }
+> = {
+  spark: { pre: 0, rise: 0.45, k1: 2.0, k2: 0.8, m: 0.6, len: 3.0 },
+  ember: { pre: 0, rise: 0.7, k1: 1.3, k2: 0.55, m: 0.55, len: 4.2 },
+  solstice: { pre: 0, rise: 0.9, k1: 0.8, k2: 0.38, m: 0.5, len: 6.5 },
+  nova: { pre: 0.55, rise: 0.1, k1: 1.5, k2: 0.42, m: 0.6, len: 6.5 },
 };
 
 const QUAD_VS = `#version 300 es
@@ -99,26 +116,26 @@ in vec2 vPos;
 out vec4 outColor;
 uniform float uTime;    // per-layer phase: runs slow when idle, faster when active
 uniform float uClock;   // wall clock, s
-uniform float uFT;      // seconds since the flare started
+uniform float uFT;      // flare time, s (scaled per flare); < 0 during nova's charge
 uniform float uFl;      // flare envelope 0..1
+uniform float uPre;     // nova charge 0..1
 uniform float uAct;     // active 0..1 (eased)
 uniform float uFade;    // layer opacity (cross-fade when the tier changes)
+uniform float uBreath;  // slow idle wander, ~0.6..1.15
+uniform float uSeed;    // per-flare random, 0..100
 uniform float uAlphaK, uGain, uHaze, uRadius, uTopY;
 uniform vec2 uRes;
-uniform int uMode;      // 0 = composer band, 1 = header filament, 2 = nova shockwave
-uniform int uTier;      // 0 ember, 1 spark, 2 solstice, 3 nova
+uniform int uMode;      // 0 = composer band, 1 = header filament, 2 = nova eruption
+uniform int uTier;      // 0 spark, 1 ember, 2 solstice, 3 nova
 uniform vec4 uRect;     // composer x, y, w, h (CSS px)
-uniform vec3 uC0, uC1, uC2, uC3;
-uniform vec4 uHeads[4]; // spark heads: x, y, brightness, -
+uniform vec4 uBand;     // the quad being drawn, x0 y0 x1 y1: everything fades out before it
+uniform vec3 uC0, uC1, uC2, uC3, uOff1, uOff2, uDusk;
+uniform vec4 uSparks[8]; // spark: x, y, brightness, size
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
   return fract(p.x * p.y);
-}
-vec2 hash2(vec2 p) {
-  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-  return fract(sin(p) * 43758.5453);
 }
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
@@ -138,22 +155,20 @@ float fbm3(vec2 p) {
   for (int i = 0; i < 3; i++) { v += a * noise(p); p = m * p; a *= 0.5; }
   return v / 0.875;
 }
-// Voronoi border distance (F2 - F1): ~0 on the cell borders -> a network of cracks.
-float cracks(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  float d1 = 8.0, d2 = 8.0;
-  for (int y = -1; y <= 1; y++)
-    for (int x = -1; x <= 1; x++) {
-      vec2 g = vec2(x, y);
-      vec2 r = g + hash2(i + g) - f;
-      float d = dot(r, r);
-      if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
-    }
-  return sqrt(d2) - sqrt(d1);
-}
 float sdRound(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
   return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+// Smooth ramp-in over a, then exp decay at rate k with no kink at the peak.
+float sp(float x) { return x > 4.0 ? x : log(1.0 + exp(4.0 * x)) * 0.25; }
+float pulse(float t, float a, float k) {
+  if (t <= 0.0) return 0.0;
+  return smoothstep(0.0, a, t) * exp(-k * sp(t - a));
+}
+float bandWin(vec2 p) {
+  float m = 16.0;
+  return smoothstep(uBand.x, uBand.x + m, p.x) * smoothstep(uBand.z, uBand.z - m, p.x)
+       * smoothstep(uBand.y, uBand.y + m, p.y) * smoothstep(uBand.w, uBand.w - m, p.y);
 }
 // heat 0..1 -> premultiplied colour: transparent -> deep -> tier -> hot -> core
 vec4 ramp(float h) {
@@ -166,16 +181,16 @@ vec4 ramp(float h) {
 }
 
 // Fire off the composer's top edge (solstice and nova). H0 = tongue height in px.
-float flames(vec2 pos, float d, float up, float H0, float nova, float fl, float t,
+float flames(vec2 pos, float d, float up, float H0, float nova, float fl, float t, float ft,
              inout float add) {
   float topBand = smoothstep(uRect.y + uRadius + 2.0, uRect.y + 1.0, pos.y);
-  vec2 q = pos / vec2(34.0, 52.0);
+  vec2 q = pos / vec2(34.0, 52.0) + uSeed * 0.07;
   q.y += t * (1.2 + 0.5 * nova);
   vec2 w = vec2(fbm(q + vec2(0.0, t * 0.15)), fbm(q + vec2(5.2, 1.3 - t * 0.1)));
   float n = fbm(q * vec2(1.5, 0.75) + 1.8 * w);
   float along = clamp((pos.x - uRect.x) / uRect.z, 0.0, 1.0);
-  float shape = smoothstep(0.0, 0.14, along) * smoothstep(1.0, 0.86, along);
-  float tall = pow(fbm(vec2(pos.x / 70.0, t * 0.22)), 2.0) * 2.4;
+  float shape = smoothstep(0.0, 0.16, along) * smoothstep(1.0, 0.84, along);
+  float tall = pow(fbm(vec2(pos.x / 70.0 + uSeed, t * 0.22)), 2.0) * 2.4;
   float H = H0 * (0.25 + tall) * shape;
   float f = max(up, 0.0) / max(H, 1.0);
   float flame = smoothstep(0.95, 0.05, f + (n - 0.5) * 1.7);
@@ -189,16 +204,17 @@ float flames(vec2 pos, float d, float up, float H0, float nova, float fl, float 
   heat = max(heat, rim * 0.85);
   float glowUp = exp(-max(up, 0.0) / (12.0 + 8.0 * nova)) * smoothstep(-1.0, 2.0, up)
                * smoothstep(48.0, 10.0, up) * topBand * shape;
-  heat += glowUp * (0.12 + 0.08 * nova) * (0.8 + 0.2 * sin(t * (1.3 + 0.7 * nova))) * uHaze
+  heat += glowUp * (0.12 + 0.08 * nova) * (0.75 + 0.35 * noise(vec2(t * 0.6, uSeed))) * uHaze
         * min(1.0, H0 / 14.0);
   // Heat haze: faint wisps off the tongues (dark theme only).
   float wisp = fbm(q * vec2(0.9, 0.5) + 2.4 * w - vec2(0.0, t * 0.2));
   heat += smoothstep(0.55, 0.85, wisp) * smoothstep(4.0, 22.0, up) * exp(-up / 34.0) * shape
         * 0.12 * uHaze * min(1.0, H0 / 20.0);
-  // Flare: a sheet of flame leaps off the whole edge and falls back.
-  float sheetH = 14.0 + 46.0 * (1.0 - exp(-uFT * 7.0));
+  // Flare: a sheet of flame leaps off the edge and falls back, unevenly along it.
+  float sheetH = 14.0 + 46.0 * smoothstep(0.0, 1.2, ft);
+  float uneven = smoothstep(0.2, 0.8, noise(vec2(pos.x / 90.0 + uSeed, ft * 0.4)));
   float sheet = exp(-max(up, 0.0) / sheetH) * smoothstep(-1.0, 1.0, up) * topBand * shape
-              * smoothstep(0.25, 0.75, n) * fl;
+              * smoothstep(0.25, 0.75, n) * fl * (0.4 + 0.6 * uneven);
   heat += sheet * (0.3 + 0.4 * nova);
   add += rim * fl * (0.3 + 0.6 * nova);
   return heat;
@@ -207,47 +223,82 @@ float flames(vec2 pos, float d, float up, float H0, float nova, float fl, float 
 void main() {
   float t = uTime, ft = uFT, fl = uFl, act = uAct;
   float heat = 0.0;
-  float add = 0.0;   // extra additive light (flash, ring, spark cores)
+  float add = 0.0;          // extra additive light (flash, ring, spark cores)
+  vec3 tint = vec3(0.0);    // direct premultiplied colour (off-palette bits), dark theme
+  float tintA = 0.0;
+  float win = bandWin(vPos);
+  if (win <= 0.0) { outColor = vec4(0.0); return; }
+
+  vec2 c = uRect.xy + uRect.zw * 0.5;
+  float d = sdRound(vPos - c, uRect.zw * 0.5, uRadius);    // > 0 outside the composer
 
   if (uMode == 2) {
-    // Nova ignition: a flash at the composer's top centre and a shockwave ring.
-    vec2 v = vPos - vec2(uRect.x + uRect.z * 0.5, uRect.y);
-    float r = length(v);
-    float R = 24.0 + 720.0 * (1.0 - exp(-ft * 1.8));
-    float wob = (noise(normalize(v + 0.001) * 3.0 + vec2(ft * 3.0, 0.0)) - 0.5) * (4.0 + R * 0.03);
-    float width = 1.5 + R * 0.018;
-    float life = exp(-ft * 2.1);
-    float ring = exp(-abs(r - R + wob) / width) * life;
-    float wake = exp(-abs(r - R * 0.86) / (width * 3.0)) * life * 0.25;
-    float flash = exp(-r / (18.0 + 160.0 * ft)) * exp(-ft * 4.5);
-    heat = ring * 0.5 + wake * 0.4 + flash * 0.8;
-    add = ring * 0.35 + flash * 0.7;
+    // NOVA ERUPTION, out of the whole composer: SDF distance makes every front a rounded
+    // rectangle that grows from the box itself.
+    if (d < -1.5) { outColor = vec4(0.0); return; }
+    float dd = max(d, 0.0);
+    vec2 inner = clamp(vPos, uRect.xy + uRadius, uRect.xy + uRect.zw - uRadius);
+    vec2 nrm = normalize(vPos - inner + 0.001);
+    float edgeN = fbm3(nrm * 2.2 + vec2(uSeed, ft * 1.3));
+    // Shockwave 1: thin, fast, white with chromatic fringes (red outside, blue inside).
+    float R1 = 6.0 + 600.0 * (1.0 - exp(-ft * 1.7));
+    float wob = (edgeN - 0.5) * (6.0 + R1 * 0.06);
+    float w1 = 1.4 + R1 * 0.011;
+    float L1 = smoothstep(0.0, 0.06, ft) * exp(-ft * 1.5)
+             * (0.55 + 0.45 * smoothstep(0.3, 0.7, fbm3(nrm * 4.0 + vec2(dd / 90.0, uSeed))));
+    float x1 = dd - R1 + wob;
+    float cs = 2.0 + R1 * 0.012;
+    vec3 shock = vec3(exp(-abs(x1 - cs) / w1), exp(-abs(x1) / w1), exp(-abs(x1 + cs) / w1)) * L1;
+    // Shockwave 2: slower, thicker, in the tier colour, with a soft wake behind it.
+    float R2 = 3.0 + 380.0 * (1.0 - exp(-ft * 1.2));
+    float w2 = 5.0 + R2 * 0.045;
+    float L2 = pulse(ft, 0.2, 1.2);
+    // Torn, not a clean outline: the front breaks up and thins as it travels.
+    float tear = smoothstep(0.25, 0.75, fbm(nrm * 3.0 + vec2(dd / 60.0, ft * 0.7 + uSeed)));
+    float ring2 = exp(-abs(dd - R2 + wob * 1.6) / w2) * L2 * (0.25 + 0.75 * tear);
+    float wake2 = smoothstep(R2, R2 * 0.3, dd) * exp(-dd / (R2 * 0.6 + 8.0)) * L2 * 0.25;
+    // Core flash off the rim, and a faint bloom that fades across the column.
+    float F = pulse(ft, 0.05, 4.8);
+    float flash = exp(-dd / (8.0 + 90.0 * ft)) * F * (0.7 + 0.3 * edgeN);
+    float bloom = exp(-dd / 360.0) * F * smoothstep(R1 * 1.12 + 70.0, R1 * 0.5, dd);
+    // Plasma smoke: advected outward from the rim, cooling pink -> violet -> cyan -> gone.
+    float smL = pulse(ft - 0.06, 0.55, 0.62);
+    vec2 sq = vPos / 52.0 - nrm * ft * 0.85 + uSeed;
+    float s1 = fbm(sq + vec2(0.0, ft * 0.18));
+    float s2 = fbm3(sq * 1.9 - vec2(ft * 0.25, 0.0) + 3.7);
+    float reach = 24.0 + 230.0 * (1.0 - exp(-ft * 1.05));
+    float smoke = smoothstep(0.5, 0.92, s1 * 0.7 + s2 * 0.42) * exp(-dd / reach)
+                * smoothstep(reach * 1.5, reach * 0.4, dd) * smoothstep(0.0, 8.0, dd) * smL;
+    float hue = clamp(ft * 0.55 + (s2 - 0.5) * 0.8 + dd / 400.0, 0.0, 1.0);
+    vec3 pc = mix(uC1, uOff1, smoothstep(0.05, 0.5, hue));
+    pc = mix(pc, uOff2, smoothstep(0.55, 1.0, hue) * 0.45);
+    float topBias = mix(0.75, 1.0, smoothstep(uRect.y + uRect.w, uRect.y - 40.0, vPos.y));
+    heat = (ring2 * 0.38 + wake2 + flash * 0.7 + smoke * 0.18 * (1.0 - hue) + shock.g * 0.4) * topBias;
+    vec3 white = mix(uC3, vec3(1.0), 0.5);
+    tint = (shock * white * 0.8 + uC2 * ring2 * 0.2 + pc * smoke * 0.3
+          + mix(uC2, uOff1, 0.4) * bloom * 0.07 + uC3 * flash * 0.5) * topBias;
+    tintA = (shock.g * 0.4 + smoke * 0.2 + flash * 0.3) * topBias;
   } else if (uMode == 1) {
     // Plasma filament under the header (solstice, nova): one hairline with a shimmer and
-    // travelling highlights; on a flare it lights from the centre outwards.
+    // drifting highlights; on a flare it lights from the centre outwards.
     float nova = float(uTier == 3);
     float lvl = uTier == 3 ? max(act * 0.85, fl) : max(act * 0.55, fl * 0.75);
     float y = vPos.y - uTopY;
     float x = vPos.x / uRes.x;
     float ends = smoothstep(0.0, 0.25, x) * smoothstep(1.0, 0.75, x);
     float shimmer = 0.75 + 0.25 * fbm3(vec2(vPos.x / 140.0 - t * 0.4, t * 0.3));
-    float speed = 0.07 + 0.05 * nova;
-    float h1 = exp(-pow((fract(x - t * speed) - 0.5) * 7.0, 2.0));
-    float h2 = exp(-pow((fract(x * 0.8 + t * speed * 0.6 + 0.37) - 0.5) * 9.0, 2.0)) * 0.6;
-    float hi = max(h1, h2);
+    float hi = smoothstep(0.55, 0.85, fbm3(vec2(vPos.x / 220.0 - t * (0.12 + 0.06 * nova), uSeed)));
     float line = exp(-abs(y) / 0.6) * (0.28 * shimmer + 0.65 * hi);
     float glow = exp(-max(y, 0.0) / (6.0 + 4.0 * nova)) * smoothstep(-1.5, 0.5, y)
                * smoothstep(26.0, 4.0, y) * 0.22 * hi;
-    float cx = (uRect.x + uRect.z * 0.5) / uRes.x;
-    float front = 1.0 - exp(-ft * 2.6);
-    float ign = exp(-ft * 2.4) * step(0.01, fl);
-    float lit = mix(1.0, smoothstep(front + 0.03, front - 0.03, abs(x - cx)), ign);
-    float spark = ign * exp(-abs(abs(x - cx) - front) * 60.0) * exp(-abs(y) / 2.0);
+    float cx = c.x / uRes.x;
+    float front = 1.0 - exp(-max(ft, 0.0) * 2.2);
+    float ign = pulse(ft, 0.1, 1.6);
+    float lit = mix(1.0, smoothstep(front + 0.05, front - 0.05, abs(x - cx)), ign);
+    float spark = ign * exp(-abs(abs(x - cx) - front) * 50.0) * exp(-abs(y) / 2.0);
     heat = (line + glow) * lit * ends * lvl;
     add = spark * (0.4 + 0.6 * nova) * fl;
   } else {
-    vec2 c = uRect.xy + uRect.zw * 0.5;
-    float d = sdRound(vPos - c, uRect.zw * 0.5, uRadius);   // > 0 outside the composer
     if (d < -1.5) { outColor = vec4(0.0); return; }        // under the opaque composer
     float dd = max(d, 0.0);
     float up = uRect.y - vPos.y;                             // px above the top edge
@@ -255,95 +306,110 @@ void main() {
     float topW = smoothstep(uRect.y + uRect.w * 0.9, uRect.y, vPos.y);
     float outside = smoothstep(-1.0, 0.5, d);
     float rimLine = exp(-abs(d - 0.3) / 0.65) * outside;
+    vec2 ap = abs(vPos - c) - uRect.zw * 0.5;
+    float u = ap.x > ap.y ? vPos.y : vPos.x;                 // coordinate along the edge
 
     if (uTier == 0) {
-      // EMBER: a soft warm glow that breathes; heat cracks spread from the edge on a flare
-      // and flicker up here and there while active.
-      float breathe = 0.5 + 0.5 * sin(uClock * 0.8);
-      float side = mix(0.35, 1.0, topW);
-      float patchN = noise(vec2(vPos.x / 70.0 - t * 0.35, vPos.y / 50.0 + t * 0.1));
-      float glow = exp(-dd / (6.0 + 5.0 * act + 10.0 * fl)) * outside;
-      heat = glow * side * (0.15 + 0.08 * breathe + 0.2 * act * (0.5 + patchN) + 0.42 * fl);
-      heat += rimLine * side * (0.16 + 0.1 * breathe + 0.28 * act * patchN + 0.5 * fl);
-      float reach = 2.0 + 24.0 * fl * (1.0 - exp(-ft * 5.0)) + 10.0 * act;
-      float flick = smoothstep(0.6, 0.8, noise(vec2(along * 9.0 + vPos.y * 0.03, t * 0.7)));
-      float amount = fl + act * flick;
-      if (amount > 0.01 && dd < reach + 2.0) {
-        // Cells are laid out along the nearest edge and stretched away from it, so the
-        // cracks run outwards from the border; a slow mask keeps them sparse.
-        vec2 ap = abs(vPos - c) - uRect.zw * 0.5;
-        float u = ap.x > ap.y ? vPos.y : vPos.x;
-        float cr = cracks(vec2(u / 15.0, dd / 20.0 + 0.37));
-        float sparse = smoothstep(0.3, 0.6, noise(vec2(u / 45.0, 3.1 + uFT * 0.3)));
-        float line = smoothstep(0.075, 0.0, cr) * (0.25 + 0.75 * sparse);
-        float fall = exp(-dd / max(reach * 0.45, 1.0)) * smoothstep(reach, reach * 0.4, dd);
-        heat += line * fall * amount * outside * mix(0.5, 1.0, topW) * 0.75;
+      // SPARK: almost nothing on the rim; each live spark (CPU) lights a little of the edge
+      // round it with a flickering blue-white glow.
+      float crawl = smoothstep(0.6, 0.9, noise(vec2(u / 26.0 + uSeed, uClock * 0.7)));
+      heat = rimLine * mix(0.35, 1.0, topW) * (0.015 + 0.08 * act * crawl + 0.5 * fl * crawl);
+      heat += exp(-dd / 10.0) * outside * fl * 0.12
+            * smoothstep(0.35, 0.85, noise(vPos / 22.0 + vec2(uClock * 0.5, uSeed)));
+      float flick = noise(vec2((vPos.x + vPos.y) / 6.0, uClock * 24.0));
+      for (int i = 0; i < 8; i++) {
+        vec4 s = uSparks[i];
+        if (s.z <= 0.0) continue;
+        float r = length(vPos - s.xy);
+        heat += s.z * (exp(-r / (5.0 + 3.0 * s.w)) * 0.55
+                     + rimLine * exp(-r / 26.0) * (0.3 + 0.7 * flick) * 0.8);
+        add += s.z * exp(-r / 3.0) * 0.2;
       }
     } else if (uTier == 1) {
-      // SPARK: a barely-there rim; the bright heads (CPU particles) light the edge around
-      // them with a flickering electric glow.
-      heat = rimLine * (0.035 + 0.12 * act) * mix(0.4, 1.0, topW);
-      float flick = noise(vec2((vPos.x + vPos.y) / 7.0, uClock * 26.0));
-      for (int i = 0; i < 4; i++) {
-        vec4 hd = uHeads[i];
-        if (hd.z <= 0.0) continue;
-        float r = length(vPos - hd.xy);
-        heat += hd.z * outside * (exp(-r / 20.0) * exp(-dd / 6.0) * 0.28
-                                + rimLine * exp(-r / 36.0) * (0.35 + 0.65 * flick) * 0.75);
-        float jag = (noise(vec2((vPos.x + vPos.y) / 4.0, floor(uClock * 30.0) * 1.7)) - 0.5) * 5.0;
-        heat += hd.z * outside * exp(-abs(d - 1.5 - jag) / 0.45) * exp(-r / 26.0) * 0.9;
-        add += hd.z * exp(-r / 5.0) * 0.45;
-      }
-      heat += exp(-dd / 12.0) * outside * fl * exp(-ft * 3.5) * 0.4;
+      // EMBER: the glow lives in the cracks (CPU points); the rim itself only warms faintly
+      // in patches near them.
+      float patchN = smoothstep(0.5, 0.85, noise(vec2(u / 40.0 + uSeed, t * 0.12)));
+      heat = rimLine * mix(0.25, 1.0, topW) * (0.018 * uBreath + 0.05 * act * patchN + 0.14 * fl * patchN);
+      heat += exp(-dd / 4.0) * outside * mix(0.25, 1.0, topW) * (0.05 * fl + 0.015 * act) * patchN;
     } else if (uTier == 2) {
-      // SOLSTICE: warm flame off the top edge, a sunrise on switch, a low lick when idle.
-      float H0 = 22.0 * (0.3 + 0.6 * act + 1.2 * fl);
-      heat = flames(vPos, d, up, H0, 0.0, fl, t, add) * (0.5 + 0.35 * act + 0.4 * fl);
-      heat += rimLine * mix(0.15, 1.0, topW) * (0.05 + 0.08 * act);
-      // Sunrise: a golden bloom rising off the edge, with rays fanning up from below it.
-      float rise = 1.0 - exp(-ft * 2.0);
-      vec2 sv = vec2((vPos.x - c.x) / (70.0 + 300.0 * rise), max(up, 0.0) / (16.0 + 70.0 * rise));
-      float bloom = exp(-dot(sv, sv) * 1.6) * smoothstep(-2.0, 3.0, up) * fl;
-      float ang = atan(vPos.x - c.x, max(up, 0.0) + 60.0);
-      float rays = pow(noise(vec2(ang * 10.0, ft * 0.5)), 3.0)
-                 * exp(-max(up, 0.0) / (50.0 + 90.0 * rise)) * smoothstep(0.0, 10.0, up) * fl;
-      // Keep the sunrise inside the band it is drawn in (no hard quad edges).
-      float bound = smoothstep(200.0, 120.0, up) * smoothstep(320.0, 200.0, abs(vPos.x - c.x));
-      rays *= bound * smoothstep(1.25, 0.75, abs(ang));
-      bloom *= bound;
-      heat += bloom * 0.5 + rays * 0.4;
-      add += bloom * 0.2;
+      // SOLSTICE: a low faint flame off the top edge; on switch a sunset on the edge.
+      float H0 = 22.0 * (0.8 + 0.4 * act + 1.1 * fl);
+      heat = flames(vPos, d, up, H0, 0.0, fl, t, ft, add) * (0.25 * uBreath + 0.32 * act + 0.42 * fl);
+      heat += rimLine * mix(0.15, 1.0, topW) * (0.035 + 0.06 * act);
+      if (ft > 0.0 && ft < 8.0) {
+        float sx = c.x + (hash(vec2(uSeed, 1.7)) - 0.5) * uRect.z * 0.36;
+        vec2 v = vPos - vec2(sx, uRect.y + 3.0);
+        float upS = -v.y;
+        float gl = pulse(ft, 0.85, 0.75);        // the sun's glare comes first
+        float ry = pulse(ft - 0.3, 1.2, 0.42);   // rays, slowly turning
+        float cl = pulse(ft - 0.55, 1.1, 0.5);   // flames and clouds rise and run out
+        vec2 e = vec2(v.x / (50.0 + 110.0 * gl), v.y / (18.0 + 22.0 * gl));
+        float glare = exp(-dot(e, e) * 1.3) * gl * smoothstep(-8.0, 3.0, upS);
+        float streak = exp(-abs(v.y + 0.5) / (2.0 + 2.5 * gl)) * exp(-abs(v.x) / (120.0 + 300.0 * gl)) * gl;
+        float ang = atan(v.x, max(upS, 0.0) + 22.0);
+        float spin = ft * 0.07;
+        float rays = pow(noise(vec2((ang + spin) * 7.0, uSeed * 3.0)), 2.5) * 0.65
+                   + pow(noise(vec2((ang - spin * 0.6) * 15.0, uSeed * 5.0 + 4.0)), 3.0) * 0.35;
+        float rlen = 50.0 + 170.0 * smoothstep(0.0, 1.8, ft);
+        rays *= exp(-length(v) / rlen) * smoothstep(2.0, 18.0, upS) * smoothstep(1.4, 0.8, abs(ang)) * ry;
+        float run = 1.0 + 1.6 * smoothstep(0.0, 4.0, ft - 0.4);
+        vec2 cq = vec2(v.x / (run * 95.0) - sign(v.x) * ft * 0.05, upS / 20.0 - ft * 0.04);
+        float cn = fbm(cq * vec2(1.0, 1.4) + vec2(uSeed, 0.0));
+        float lift = smoothstep(3.0, 20.0, upS) * exp(-upS / (60.0 + 40.0 * cl));
+        float spread = exp(-pow(abs(v.x) / (170.0 * run), 2.0));
+        float clouds = smoothstep(0.38, 0.78, cn) * lift * spread * cl;
+        // Clouds: lit gold low and near the sun, dusky violet-red higher and further out.
+        float dusk = smoothstep(8.0, 80.0, upS + abs(v.x) * 0.15);
+        heat += glare * 0.8 + streak * 0.45 + rays * 0.32 + clouds * 0.3;
+        add += glare * 0.32 + streak * 0.12;
+        tint += mix(uC2 * 0.8, uDusk, dusk) * clouds * 0.6;
+        tintA += clouds * 0.2;
+      }
     } else {
-      // NOVA: a shimmering plasma rim all round; a breathing corona and flames while
-      // active; everything white-hot for a moment on ignition.
-      float rimN = fbm3(vPos / 15.0 + vec2(t * 0.8, -t * 0.5));
-      float shimmer = 0.5 + 0.5 * sin(uClock * 2.2 + vPos.x * 0.025 - vPos.y * 0.02);
-      heat = rimLine * (0.25 + 0.75 * smoothstep(0.45, 0.8, rimN))
-           * (0.22 + 0.1 * shimmer + 0.35 * act + 0.7 * fl);
-      float corona = exp(-dd / (7.0 + 9.0 * act + 16.0 * fl)) * outside;
-      heat += corona * mix(0.45, 1.0, topW)
-            * (0.045 + 0.1 * act * (0.8 + 0.2 * sin(uClock * 2.0)) + 0.32 * fl);
+      // NOVA: a shimmering plasma rim all round, plasma wisps drifting along it; the charge
+      // tightens it, the eruption leaves a lingering afterglow; flames while active.
+      float pre = uPre;
+      float after = pulse(ft, 0.08, 0.55);
+      float rimN = fbm3(vPos / 15.0 + vec2(t * 0.8, -t * 0.5) + uSeed);
+      float lvl = 0.5 * uBreath + 0.25 * act + 0.5 * pre + 0.8 * fl + 0.35 * after;
+      heat = rimLine * (0.3 + 0.7 * smoothstep(0.4, 0.8, rimN)) * lvl;
+      float cw = (8.0 + 7.0 * act + 16.0 * fl + 14.0 * after) * (1.0 - 0.45 * pre);
+      float corona = exp(-dd / cw) * outside;
+      float swell = 0.8 + 0.4 * noise(vec2(t * 0.35, uSeed));
+      heat += corona * mix(0.5, 1.0, topW)
+            * (0.12 * uBreath + 0.08 * act * swell + 0.28 * fl + 0.22 * after + 0.12 * pre);
+      float wn = fbm3(vec2(u / 34.0 - t * 0.18 + uSeed, dd / 9.0 - t * 0.25));
+      heat += smoothstep(0.58, 0.88, wn) * exp(-dd / 13.0) * smoothstep(0.0, 3.0, dd)
+            * (0.17 * uBreath + 0.1 * act) * outside;
+      tint += mix(uOff1, uOff2, smoothstep(0.3, 0.8, wn)) * corona * after * 0.08;
+      if (pre > 0.01) {
+        // Gathering: faint streaks fall in towards the rim, faster as the charge builds.
+        float g = smoothstep(0.62, 0.92, noise(vec2(u / 7.0 + uSeed, dd / 10.0 + uClock * (3.0 + 5.0 * pre))));
+        heat += g * pre * 0.3 * exp(-dd / 26.0) * smoothstep(70.0, 0.0, dd) * outside;
+      }
       float fire = act * 0.8 + fl;
       if (fire > 0.02)
-        heat += flames(vPos, d, up, 28.0 * (0.35 + 0.65 * act + 1.1 * fl), 1.0, fl, t, add) * min(fire, 1.0);
+        heat += flames(vPos, d, up, 28.0 * (0.35 + 0.65 * act + 1.1 * fl), 1.0, fl, t, ft, add) * min(fire, 1.0);
     }
   }
 
   vec4 col = ramp(heat) * uGain * uFade;
   // Paint on paper (light theme): let the shapes thin out instead of a solid silhouette.
-  col *= mix(1.0, 0.15 + 0.85 * clamp(heat * 1.4, 0.0, 1.0), step(0.5, uAlphaK));
+  float light = step(0.5, uAlphaK);
+  col *= mix(1.0, 0.15 + 0.85 * clamp(heat * 1.4, 0.0, 1.0), light);
   col.rgb += (uC3 * 0.6 + uC2 * 0.4) * add * uFade * uGain;
+  col.rgb += tint * uFade * uGain * (1.0 - light);
   // uAlphaK: 0 = additive light (dark theme), 1 = normal paint (light theme).
-  float a = clamp(col.a * uAlphaK + add * uAlphaK * 0.5 * uFade, 0.0, 1.0);
-  outColor = vec4(col.rgb, a);
+  float a = clamp(col.a * uAlphaK + (add * 0.5 + tintA) * uAlphaK * uFade, 0.0, 1.0);
+  outColor = vec4(col.rgb, a) * win;
 }`;
 
 const POINT_VS = `#version 300 es
 in vec4 aP;            // x, y, size, temperature (0..1)
-in vec3 aQ;            // alpha, palette (tier index), sharpness (0 soft ember .. 1 spark)
+in vec3 aQ;            // alpha, palette slot, sharpness (0 soft glow .. 1 hard spark)
 uniform vec2 uRes;
 uniform float uDpr;
-uniform vec3 uPal[16]; // 4 tiers x deep, mid, hot, core
+uniform vec3 uPal[20]; // 5 slots x deep, mid, hot, core
 out vec3 vC;
 out float vA;
 out float vS;
@@ -372,7 +438,7 @@ void main() {
   float soft = smoothstep(1.0, 0.0, r);
   soft = soft * soft * (0.6 + 0.4 * smoothstep(0.5, 0.0, r));
   float halo = smoothstep(1.0, 0.0, r);
-  float sharp = smoothstep(0.5, 0.1, r) + 0.3 * halo * halo;
+  float sharp = smoothstep(0.62, 0.15, r) + 0.3 * halo * halo;
   float a = mix(soft, sharp, vS) * vA;
   outColor = vec4(vC * a * 1.6, a * uAlphaK);
 }`;
@@ -386,7 +452,11 @@ interface Rect {
   radius: number;
 }
 
-/** A rising ember (kind 0) or a falling spark (kind 1). */
+/**
+ * kind 0: rising ember / cinder (buoyant)    kind 1: falling spark (gravity, streak)
+ * kind 2: spark-tier sparklet (fizzles, drifts) kind 3: nova charge mote (falls in)
+ * kind 4: nova debris (fast, light gravity, streak)
+ */
 interface Particle {
   x: number;
   y: number;
@@ -397,35 +467,82 @@ interface Particle {
   size: number;
   seed: number;
   pal: number;
-  kind: 0 | 1;
-}
-
-/** A spark head skipping along the composer's edge (perimeter coordinate s, px). */
-interface Head {
-  s: number;
-  v: number; // px/s, signed
+  kind: 0 | 1 | 2 | 3 | 4;
   age: number;
   ttl: number;
   amp: number;
-  shed: number; // falling sparks per second
-  debt: number;
+  /** sparklet: current brightness, written by the step for arcs / the shader */
+  b: number;
+}
+
+/** A short electric arc between two live sparklets. */
+interface Arc {
+  a: Particle;
+  b: Particle;
+  age: number;
+  ttl: number;
+  seed: number;
+}
+
+/** One point of a crack, in the anchor's frame: t along the edge, n outward. */
+interface CrackPt {
+  t: number;
+  n: number;
+  dist: number;
+  lvl: number;
+}
+interface Crack {
+  frac: number; // anchor, fraction of the perimeter
+  pts: CrackPt[];
+  len: number;
+  delay: number;
+  speed: number;
+  seed: number;
+  period: number;
+  phase: number;
 }
 
 interface Layer {
   tier: TierId;
+  seed: number;
   fade: number;
   fading: boolean;
   flareAt: number; // wall clock s
+  ts: number; // this flare's time stretch
   act: number;
+  actV: number;
   time: number;
   fl: number;
-  // particles bookkeeping
+  pre: number;
+  ft: number;
+  blasted: boolean;
   trickle: number;
-  nextSpark: number;
+  nextSpawn: number;
+  cracks: Crack[];
 }
 
-const MAX_POINTS = 320;
+const MAX_PARTICLES = 420;
+const MAX_POINTS = 4200;
 const FLOATS = 7;
+
+const rand = (a: number, b: number) => a + Math.random() * (b - a);
+const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x));
+const hash1 = (n: number) => {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+};
+/** Smooth 1-D value noise, 0..1. */
+const noise1 = (x: number) => {
+  const i = Math.floor(x);
+  const f = x - i;
+  const u = f * f * (3 - 2 * f);
+  return hash1(i) * (1 - u) + hash1(i + 1) * u;
+};
+const softplus = (x: number) => (x > 4 ? x : Math.log(1 + Math.exp(4 * x)) / 4);
+const smooth = (a: number, b: number, x: number) => {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+};
 
 function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   const gl = canvas.getContext("webgl2", {
@@ -470,8 +587,11 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     "uClock",
     "uFT",
     "uFl",
+    "uPre",
     "uAct",
     "uFade",
+    "uBreath",
+    "uSeed",
     "uAlphaK",
     "uGain",
     "uHaze",
@@ -480,11 +600,15 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     "uMode",
     "uTier",
     "uRect",
+    "uBand",
     "uC0",
     "uC1",
     "uC2",
     "uC3",
-    "uHeads",
+    "uOff1",
+    "uOff2",
+    "uDusk",
+    "uSparks",
   ]);
   const pu = U(ptProg, ["uRes", "uDpr", "uAlphaK", "uPal"]);
 
@@ -520,7 +644,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   let active = false;
   let flareKey = 0;
   let particles: Particle[] = [];
-  let heads: Head[] = [];
+  let arcs: Arc[] = [];
   let raf = 0;
   let timer = 0;
   let last = 0;
@@ -528,7 +652,8 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   let w = 0;
   let h = 0;
   let dpr = 1;
-  let pal = new Float32Array(48);
+  let pal = new Float32Array(60);
+  let off = { a: [0.5, 0.3, 1], b: [0.2, 0.8, 1], dusk: [0.5, 0.15, 0.4] };
   let alphaK = 0;
   let gain = 1;
 
@@ -543,11 +668,22 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   };
   const setPalette = () => {
     const probe = document.createElement("canvas").getContext("2d")!;
-    pal = new Float32Array(
-      TIER_IDS.flatMap((t) =>
+    off = {
+      a: readColor("--fx-nova-off1", probe),
+      b: readColor("--fx-nova-off2", probe),
+      dusk: readColor("--fx-solstice-dusk", probe),
+    };
+    const novaCore = readColor("--fx-nova-core", probe);
+    pal = new Float32Array([
+      ...TIER_IDS.flatMap((t) =>
         ["deep", "mid", "hot", "core"].flatMap((k) => readColor(`--fx-${t}-${k}`, probe)),
       ),
-    );
+      // OFF slot: nova debris cooling through cyan and violet.
+      ...readColor("--fx-nova-deep", probe),
+      ...off.a,
+      ...off.b,
+      ...novaCore,
+    ]);
     const light = document.documentElement.dataset.theme === "light";
     alphaK = light ? 1 : 0.12;
     gain = light ? 1 : 0.9;
@@ -585,8 +721,8 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     };
   };
 
-  // Rounded-rect perimeter, clockwise from the top edge's left end. Returns a point just
-  // outside the border and the outward normal.
+  // Rounded-rect perimeter, clockwise from the top edge's left end. Returns a point on the
+  // border and the outward normal.
   const perimLength = (r: Rect) =>
     2 * (r.w - 2 * r.radius) + 2 * (r.h - 2 * r.radius) + 2 * Math.PI * r.radius;
   const perim = (r: Rect, s: number) => {
@@ -618,132 +754,312 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     s -= b;
     return arc(r.x + R, r.y + R, Math.PI, s);
   };
+  /** A random point on the edge, kept off the bottom (sparks there would hit the window). */
+  const edgePoint = (r: Rect, maxY = 0.6) => {
+    const L = perimLength(r);
+    for (let i = 0; i < 12; i++) {
+      const p = perim(r, Math.random() * L);
+      if (p.y <= r.y + r.h * maxY) return p;
+    }
+    return perim(r, Math.random() * (r.w - 2 * r.radius));
+  };
 
-  const flareEnv = (l: Layer, now: number) => {
+  // ---- envelopes ----
+  const stepFlare = (l: Layer, now: number) => {
     const f = FLARE[l.tier];
-    const ft = now - l.flareAt;
-    if (ft < 0 || ft > f.len) return 0;
-    const e = ft < f.rise ? 1 - Math.pow(1 - ft / f.rise, 3) : Math.exp(-(ft - f.rise) * f.decay);
-    const tail = Math.min(1, (f.len - ft) / (f.len * 0.3));
-    return e * tail;
+    const tt = (now - l.flareAt) / l.ts;
+    l.ft = tt - f.pre;
+    if (tt < 0 || tt > f.pre + f.len) {
+      l.fl = 0;
+      l.pre = 0;
+      return;
+    }
+    // Charge: a slow gather that tips over into the peak, then lets go quickly.
+    l.pre = f.pre > 0 ? (tt < f.pre ? Math.pow(tt / f.pre, 2.2) : Math.exp(-(tt - f.pre) * 7)) : 0;
+    const t = l.ft;
+    if (t <= 0) {
+      l.fl = 0;
+      return;
+    }
+    const x = clamp(t / f.rise, 0, 1);
+    const attack = x * x * x * (x * (x * 6 - 15) + 10);
+    const k = softplus(t - f.rise);
+    const decay = f.m * Math.exp(-f.k1 * k) + (1 - f.m) * Math.exp(-f.k2 * k);
+    const tail = smooth(f.len, f.len * 0.55, t);
+    // A little unevenness so no two flares fall off the same way.
+    const wobble = 1 + 0.12 * (noise1(t * 2.3 + l.seed) - 0.5) * smooth(0, 0.6, t);
+    l.fl = attack * decay * tail * wobble;
   };
 
   // ---- particles ----
-  const rand = (a: number, b: number) => a + Math.random() * (b - a);
+  const pushParticle = (p: Partial<Particle> & { x: number; y: number }) => {
+    if (particles.length >= MAX_PARTICLES) return null;
+    const e: Particle = {
+      vx: 0,
+      vy: 0,
+      temp: 1,
+      cool: 1,
+      size: 2,
+      seed: Math.random() * 100,
+      pal: 0,
+      kind: 0,
+      age: 0,
+      ttl: 99,
+      amp: 1,
+      b: 0,
+      ...p,
+    };
+    particles.push(e);
+    return e;
+  };
 
-  const spawnEmbers = (l: Layer, r: Rect, n: number, burst: boolean) => {
+  /** Rising embers off the top edge; `burst` throws them higher and wider. */
+  const spawnEmbers = (l: Layer, r: Rect, n: number, burst: boolean, small = false) => {
     const nova = l.tier === "nova";
-    const small = l.tier === "ember";
-    for (let i = 0; i < n && particles.length < 200; i++) {
+    for (let i = 0; i < n; i++) {
       const spread = burst ? 1 : 0.35;
-      particles.push({
+      pushParticle({
         x: r.x + r.radius + Math.random() * (r.w - r.radius * 2),
-        y: r.y - 2 - Math.random() * 10,
+        y: r.y - 2 - Math.random() * (small ? 4 : 10),
         vx: (Math.random() - 0.5) * 70 * spread,
-        vy: -(30 + Math.random() * (burst ? 190 : 70)) * (nova ? 0.85 : small ? 0.35 : 0.7),
-        temp: 0.75 + Math.random() * 0.25,
-        cool: small ? rand(0.5, 0.8) : rand(0.32, 0.77),
-        size: small ? rand(2, 3.2) : (burst ? 3.4 : 3) + Math.random() * (nova ? 4.5 : 3.5),
-        seed: Math.random() * 100,
+        vy: small
+          ? -rand(12, 34)
+          : -(30 + Math.random() * (burst ? 190 : 70)) * (nova ? 0.85 : 0.7),
+        temp: small ? rand(0.7, 0.95) : rand(0.75, 1),
+        cool: small ? rand(0.16, 0.3) : rand(0.32, 0.77),
+        size: small ? rand(2.4, 3.6) : (burst ? 3.4 : 3) + Math.random() * (nova ? 4.5 : 3.5),
         pal: TIER_INDEX[l.tier],
         kind: 0,
       });
     }
   };
 
-  const spawnHead = (opts: Partial<Head> & { s: number }) => {
-    if (heads.length >= 6) return;
-    heads.push({ v: 600, age: 0, ttl: 0.3, amp: 1, shed: 20, debt: 0, ...opts });
+  /** A spark fizzling in just outside the edge. `k` 0..1 = how strong. */
+  const spawnSparklet = (r: Rect, k: number) => {
+    const p = edgePoint(r, 0.55);
+    const out = rand(2, 10) + 6 * k * Math.random();
+    const e = pushParticle({
+      x: clamp(p.x + p.nx * out + rand(-3, 3), 10, w - 10),
+      y: clamp(p.y + p.ny * out + rand(-2, 2), 10, h - 10),
+      vx: p.nx * rand(3, 14) + rand(-7, 7),
+      vy: p.ny * rand(3, 14) - rand(2, 9),
+      temp: 1,
+      cool: 0,
+      size: rand(3, 4.4) * (0.85 + 0.35 * k),
+      pal: TIER_INDEX.spark,
+      kind: 2,
+      ttl: rand(0.22, 0.85) * (0.75 + 0.5 * k),
+      amp: rand(0.55, 1) * (0.45 + 0.55 * k),
+    });
+    if (!e) return;
+    // Now and then an arc jumps to a neighbour that is still alive.
+    if (Math.random() < 0.15 + 0.4 * k) {
+      const near = particles.find(
+        (o) =>
+          o !== e &&
+          o.kind === 2 &&
+          o.age < o.ttl * 0.7 &&
+          Math.hypot(o.x - e.x, o.y - e.y) > 14 &&
+          Math.hypot(o.x - e.x, o.y - e.y) < 30 + 60 * k,
+      );
+      if (near && arcs.length < 6)
+        arcs.push({
+          a: e,
+          b: near,
+          age: -rand(0.02, 0.1),
+          ttl: rand(0.05, 0.14),
+          seed: Math.random() * 100,
+        });
+    }
   };
 
-  const shedSpark = (r: Rect, hd: Head) => {
-    if (particles.length >= 200) return;
-    const p = perim(r, hd.s);
-    const dir = Math.sign(hd.v);
-    const tx = -p.ny * dir;
-    const ty = p.nx * dir;
-    const out = rand(40, 170);
-    particles.push({
-      x: p.x + p.nx * 1.5,
-      y: p.y + p.ny * 1.5,
-      vx: p.nx * out + tx * Math.abs(hd.v) * rand(0.05, 0.25) + rand(-30, 30),
-      vy: p.ny * out + ty * Math.abs(hd.v) * rand(0.05, 0.25) + rand(-60, 10),
-      temp: rand(0.85, 1),
-      cool: rand(1.8, 3.6),
-      size: rand(1.6, 2.6) * Math.min(1.2, hd.amp + 0.3),
-      seed: Math.random() * 100,
-      pal: TIER_INDEX.spark,
-      kind: 1,
+  /** Nova's charge: motes a little way out fall in towards the rim. */
+  const spawnMote = (r: Rect) => {
+    const p = edgePoint(r, 0.7);
+    const dist = rand(30, 85);
+    pushParticle({
+      x: p.x + p.nx * dist + rand(-10, 10),
+      y: p.y + p.ny * dist + rand(-6, 6),
+      vx: -p.nx * rand(30, 60),
+      vy: -p.ny * rand(30, 60),
+      temp: rand(0.55, 0.8),
+      cool: 0,
+      size: rand(1.8, 3),
+      pal: TIER_INDEX.nova,
+      kind: 3,
+      ttl: rand(0.45, 0.7),
+      amp: rand(0.5, 0.9),
+      seed: dist,
     });
   };
 
+  /** Nova's eruption debris, thrown out along the whole edge. */
+  const spawnDebris = (r: Rect) => {
+    const L = perimLength(r);
+    for (let i = 0; i < 110; i++) {
+      const p = perim(r, Math.random() * L);
+      const bottom = p.ny > 0.5;
+      if (bottom && Math.random() < 0.75) continue;
+      const sp = rand(90, 520) * (Math.random() < 0.25 ? 0.4 : 1);
+      const tx = -p.ny;
+      const ty = p.nx;
+      const tang = rand(-90, 90);
+      const offPal = Math.random() < 0.16;
+      pushParticle({
+        x: p.x + p.nx * 2,
+        y: p.y + p.ny * 2,
+        vx: p.nx * sp + tx * tang,
+        vy: p.ny * sp + ty * tang - rand(0, 60),
+        temp: rand(0.85, 1),
+        cool: rand(0.5, 1.3),
+        size: rand(1.6, 3.2),
+        pal: offPal ? OFF : TIER_INDEX.nova,
+        kind: 4,
+      });
+    }
+  };
+
+  // ---- ember cracks ----
+  const genCracks = (r: Rect): Crack[] => {
+    const L = perimLength(r);
+    const out: Crack[] = [];
+    const used: number[] = [];
+    const want = Math.round(rand(11, 17) * clamp(r.w / 720, 0.6, 1.3));
+    const cluster = Math.random() * 100;
+    for (let tries = 0; out.length < want && tries < 400; tries++) {
+      const s = Math.random() * L;
+      const p = perim(r, s);
+      if (p.y > r.y + r.h * 0.55) continue;
+      // Clustered, not evenly spaced: some stretches of edge crack a lot, some not at all.
+      if (noise1(s / 70 + cluster) < 0.38) continue;
+      if (used.some((u) => Math.min(Math.abs(u - s), L - Math.abs(u - s)) < 14)) continue;
+      used.push(s);
+      const top = p.ny < -0.7;
+      const pts: CrackPt[] = [];
+      let len = 0;
+      const grow = (
+        t0: number,
+        n0: number,
+        a0: number,
+        budget: number,
+        lvl: number,
+        d0: number,
+      ) => {
+        let t = t0;
+        let n = n0;
+        let a = a0;
+        let dist = d0;
+        // Straight runs broken by kinks, like a real fracture, not a smooth curve.
+        const step = 0.6;
+        let run = 0;
+        for (let walked = 0; walked < budget; walked += step) {
+          run -= step;
+          if (run <= 0) {
+            a += rand(-0.6, 0.6);
+            if (Math.random() < 0.2) a += rand(-0.5, 0.5);
+            run = rand(2, 7);
+          }
+          a += rand(-0.03, 0.03);
+          a = clamp(a, -1.35, 1.35);
+          t += Math.sin(a) * step;
+          n += Math.cos(a) * step;
+          dist += step;
+          pts.push({ t, n, dist, lvl });
+          len = Math.max(len, dist);
+          if (
+            lvl < 2 &&
+            walked > 5 &&
+            walked < budget - 6 &&
+            Math.random() < 0.03 * (lvl ? 0.6 : 1)
+          )
+            grow(
+              t,
+              n,
+              a + (Math.random() < 0.5 ? -1 : 1) * rand(0.4, 0.95),
+              (budget - walked) * rand(0.35, 0.7),
+              lvl + 1,
+              dist,
+            );
+        }
+      };
+      const k = Math.pow(Math.random(), 1.7);
+      grow(0, 0.6, rand(-1, 1), top ? 7 + 50 * k : 5 + 24 * k, 0, 0);
+      out.push({
+        frac: s / L,
+        pts,
+        len,
+        delay: rand(0, 0.5),
+        speed: rand(40, 95),
+        seed: Math.random() * 100,
+        period: rand(2.4, 6),
+        phase: Math.random(),
+      });
+    }
+    return out;
+  };
+
+  // ---- step ----
   const stepLayer = (l: Layer, dt: number, now: number, r: Rect) => {
-    l.fl = flareEnv(l, now);
+    stepFlare(l, now);
+    // Critically damped spring towards the target: eases in and out, never snaps.
     const target = !l.fading && active ? 1 : 0;
-    const k = target > l.act ? 2.4 : 1.1;
-    l.act += (target - l.act) * (1 - Math.exp(-k * dt));
-    if (l.act < 0.001) l.act = 0;
+    const om = target > l.act ? 2.6 : 1.6;
+    l.actV += (om * om * (target - l.act) - 2 * om * l.actV) * dt;
+    l.act = clamp(l.act + l.actV * dt, 0, 1);
+    if (l.act < 0.0005 && target === 0) {
+      l.act = 0;
+      l.actV = 0;
+    }
     l.time += dt * (0.3 + 0.7 * l.act + 0.6 * l.fl);
-    if (l.fading) l.fade = Math.max(0, l.fade - dt / 0.4);
+    if (l.fading) l.fade = Math.max(0, l.fade - dt / 0.6);
     if (l.fading) return;
-    // Steady particle sources for the live layer.
-    if (l.tier === "solstice" || l.tier === "nova") {
-      const rate = (l.tier === "nova" ? 4.5 : 2.2) * l.act;
-      l.trickle += rate * dt;
-      const n = Math.floor(l.trickle);
-      if (n) {
-        spawnEmbers(l, r, n, false);
-        l.trickle -= n;
+
+    if (l.tier === "nova" && !l.blasted && l.ft >= 0 && l.ft < 1) {
+      l.blasted = true;
+      spawnDebris(r);
+      spawnEmbers(l, r, 34, true);
+    }
+
+    // Steady sources for the live layer: rate per second, Poisson-ish.
+    let rate = 0;
+    if (l.tier === "solstice") rate = 0.8 + 2.0 * l.act + 4 * l.fl;
+    if (l.tier === "nova") rate = 0.45 + 4.0 * l.act;
+    if (rate) {
+      l.trickle += rate * dt * (0.6 + 0.8 * noise1(now * 0.7 + l.seed));
+      while (l.trickle >= 1) {
+        // Idle cinders are small and slow; active ones are proper embers.
+        spawnEmbers(l, r, 1, false, Math.random() > l.act * 0.8);
+        l.trickle -= 1;
+      }
+    }
+    if (l.tier === "nova" && l.pre > 0.02 && l.ft < 0) {
+      l.trickle += 40 * l.pre * dt;
+      while (l.trickle >= 1) {
+        spawnMote(r);
+        l.trickle -= 1;
       }
     }
     if (l.tier === "spark") {
-      l.nextSpark -= dt;
-      const ft = now - l.flareAt;
-      if (ft < 0.9 && l.fl > 0.05) {
-        // The flare keeps throwing extra crackle while the two racers go round.
-        if (l.nextSpark > 0.12) l.nextSpark = rand(0.04, 0.12);
-      }
-      if (l.nextSpark <= 0) {
-        const L = perimLength(r);
-        const hot = l.fl > 0.05 ? 1 : l.act;
-        spawnHead({
-          s: Math.random() * L,
-          v: (Math.random() < 0.5 ? -1 : 1) * rand(260 + 400 * hot, 420 + 600 * hot),
-          ttl: rand(0.12 + 0.08 * hot, 0.2 + 0.2 * hot),
-          amp: 0.45 + 0.5 * hot,
-          shed: 4 + 22 * hot,
-        });
-        // Idle: a tiny flick every few seconds. Active: a few per second.
-        l.nextSpark =
-          l.act > 0.05 || l.fl > 0.05 ? rand(0.12, 0.45) / Math.max(0.35, l.act) : rand(2.2, 5);
+      // Idle: a lone spark every few seconds. Active: a few a second. Flare: a scatter.
+      const k = Math.max(l.fl, 0.35 + 0.35 * l.act);
+      const sparkRate = 0.4 + 4.2 * l.act + 36 * l.fl;
+      l.nextSpawn -= dt * sparkRate;
+      while (l.nextSpawn <= 0) {
+        spawnSparklet(r, k);
+        l.nextSpawn += -Math.log(1 - Math.random() * 0.98);
       }
     }
   };
 
   const stepParticles = (dt: number, t: number, r: Rect) => {
-    const L = perimLength(r);
-    const nextHeads: Head[] = [];
-    for (const hd of heads) {
-      hd.age += dt;
-      if (hd.age >= hd.ttl) continue;
-      hd.s += hd.v * dt;
-      // Skip: now and then the head jumps ahead a little, like an arc re-striking.
-      if (Math.random() < dt * 9) hd.s += Math.sign(hd.v) * rand(6, 22);
-      hd.s = ((hd.s % L) + L) % L;
-      hd.debt += hd.shed * dt;
-      while (hd.debt >= 1) {
-        shedSpark(r, hd);
-        hd.debt -= 1;
-      }
-      nextHeads.push(hd);
-    }
-    heads = nextHeads;
-
     const next: Particle[] = [];
     for (const e of particles) {
+      e.age += dt;
       e.temp -= e.cool * dt;
-      if (e.temp <= 0 || r.y - e.y > 160 || e.y > h + 10) continue;
+      if (e.temp <= 0 || e.age >= e.ttl) continue;
+      if (e.y > h + 10 || e.y < -10 || e.x < -10 || e.x > w + 10) continue;
       if (e.kind === 0) {
+        if (r.y - e.y > 220) continue;
         // Buoyancy fades as the ember cools; drag; a swirling turbulence field.
         const buoy = 95 * e.temp * e.temp;
         const tx =
@@ -755,10 +1071,45 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         const drag = 1 - 1.1 * dt;
         e.vx *= drag;
         e.vy *= drag;
-      } else {
-        // Falling spark: gravity and a little drag.
+      } else if (e.kind === 1) {
         e.vy += 520 * dt;
         const drag = 1 - 1.6 * dt;
+        e.vx *= drag;
+        e.vy *= drag;
+      } else if (e.kind === 2) {
+        // Brownian drift, gently damped; it fizzles: on/off flicker under an envelope.
+        e.vx += rand(-1, 1) * 70 * dt;
+        e.vy += (rand(-1, 1) * 70 - 6) * dt;
+        const drag = 1 - 2.2 * dt;
+        e.vx *= drag;
+        e.vy *= drag;
+        const u = e.age / e.ttl;
+        const env = smooth(0, 0.18, u) * (1 - smooth(0.5, 1, u));
+        const fizz = noise1(e.age * 34 + e.seed * 13);
+        e.b = e.amp * env * (0.3 + 0.7 * smooth(0.3, 0.65, fizz));
+        // A crackle now and then throws a tiny falling bit.
+        if (Math.random() < dt * 2.5 * e.amp && particles.length < MAX_PARTICLES - 4)
+          next.push({
+            ...e,
+            kind: 1,
+            vx: rand(-40, 40),
+            vy: rand(-50, 10),
+            temp: rand(0.7, 1),
+            cool: rand(3, 5),
+            size: 1.4,
+            ttl: 99,
+            age: 0,
+            amp: e.amp * 0.6,
+          });
+      } else if (e.kind === 3) {
+        // Mote: accelerates in, brightening, gone as it reaches the rim.
+        e.vx *= 1 + 2.2 * dt;
+        e.vy *= 1 + 2.2 * dt;
+        e.temp = Math.min(1, e.temp + dt * 0.6);
+      } else {
+        // Debris: light gravity, air drag; a little buoyancy once it slows (hot plasma).
+        e.vy += (160 - 90 * e.temp) * dt;
+        const drag = 1 - 1.5 * dt;
         e.vx *= drag;
         e.vy *= drag;
       }
@@ -767,6 +1118,10 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       next.push(e);
     }
     particles = next;
+    arcs = arcs.filter((a) => {
+      a.age += dt;
+      return a.age < a.ttl && a.a.age < a.a.ttl && a.b.age < a.b.ttl;
+    });
   };
 
   const quad = (x0: number, y0: number, x1: number, y1: number) => {
@@ -775,6 +1130,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     x1 = Math.min(w, x1);
     y1 = Math.min(h, y1);
     if (x1 <= x0 || y1 <= y0) return;
+    gl.uniform4f(fu.uBand, x0, y0, x1, y1);
     gl.bufferData(
       gl.ARRAY_BUFFER,
       new Float32Array([x0, y0, x1, y0, x0, y1, x0, y1, x1, y0, x1, y1]),
@@ -783,44 +1139,51 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   };
 
-  const headUniform = new Float32Array(16);
+  const sparkUniform = new Float32Array(32);
+  const breathOf = (l: Layer, now: number) =>
+    0.62 + 0.4 * noise1(now * 0.13 + l.seed) + 0.14 * noise1(now * 0.41 + l.seed * 3);
 
   const drawLayer = (l: Layer, now: number, r: Rect) => {
-    const ft = now - l.flareAt;
     const c = (k: number) => color(l.tier, k);
     gl.uniform1f(fu.uTime, l.time);
-    gl.uniform1f(fu.uFT, ft);
+    gl.uniform1f(fu.uFT, l.ft);
     gl.uniform1f(fu.uFl, l.fl);
+    gl.uniform1f(fu.uPre, l.pre);
     gl.uniform1f(fu.uAct, l.act);
     gl.uniform1f(fu.uFade, l.fade);
+    gl.uniform1f(fu.uBreath, breathOf(l, now));
+    gl.uniform1f(fu.uSeed, l.seed);
     gl.uniform1i(fu.uTier, TIER_INDEX[l.tier]);
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
     gl.uniform3fv(fu.uC2, c(2));
     gl.uniform3fv(fu.uC3, c(3));
-    headUniform.fill(0);
+    sparkUniform.fill(0);
     if (l.tier === "spark") {
-      heads.slice(0, 4).forEach((hd, i) => {
-        const p = perim(r, hd.s);
-        const env = Math.sin(Math.PI * Math.min(1, hd.age / hd.ttl)) ** 0.6;
-        headUniform.set([p.x, p.y, hd.amp * env, 0], i * 4);
-      });
+      particles
+        .filter((p) => p.kind === 2 && p.b > 0.02)
+        .sort((a, b) => b.b - a.b)
+        .slice(0, 8)
+        .forEach((p, i) => sparkUniform.set([p.x, p.y, p.b, p.size / 3], i * 4));
     }
-    gl.uniform4fv(fu.uHeads, headUniform);
+    gl.uniform4fv(fu.uSparks, sparkUniform);
 
-    // Composer band: how far above / around the box this tier can reach right now.
-    let top = 24;
-    let side = 22;
-    if (l.tier === "ember") top = 26 + 30 * l.fl;
-    if (l.tier === "spark") top = side = 40;
+    // Composer band: how far above / around the box this tier reaches right now. The shader
+    // fades everything out before the band's edge, so these only need to be generous.
+    let top = 60;
+    let side = 50;
+    let below = 34;
     if (l.tier === "solstice") {
-      const sunrise = l.fl > 0.002;
-      top = sunrise ? 210 : 30 + 60 * l.act;
-      side = sunrise ? 330 : 10;
+      const sunset = l.ft > 0 && l.ft < 8;
+      top = sunset ? 270 : 70 + 50 * l.act;
+      side = sunset ? 420 : 22;
     }
-    if (l.tier === "nova") top = 34 + 80 * l.act + 130 * l.fl;
+    if (l.tier === "nova") {
+      top = 72 + 90 * l.act + 150 * l.fl;
+      side = 56 + 40 * l.fl;
+    }
     gl.uniform1i(fu.uMode, 0);
-    quad(r.x - side, r.y - top, r.x + r.w + side, r.y + r.h + 24);
+    quad(r.x - side, r.y - top, r.x + r.w + side, r.y + r.h + below);
 
     const filament =
       l.tier === "nova"
@@ -830,13 +1193,13 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
           : 0;
     if (filament > 0.01) {
       gl.uniform1i(fu.uMode, 1);
-      quad(0, r.topY - 6, w, r.topY + 34);
+      quad(0, r.topY - 18, w, r.topY + 44);
     }
-    if (l.tier === "nova" && ft >= 0 && ft < 2.4) {
-      const R = 24 + 720 * (1 - Math.exp(-ft * 1.8));
-      const m = R + 40 + R * 0.08;
+    if (l.tier === "nova" && l.ft > 0 && l.ft < 4.2) {
+      const R = 6 + 600 * (1 - Math.exp(-l.ft * 1.7));
+      const m = R * 1.12 + 70;
       gl.uniform1i(fu.uMode, 2);
-      quad(r.x + r.w / 2 - m, r.y - m, r.x + r.w / 2 + m, r.y + m);
+      quad(r.x - m, r.y - m, r.x + r.w + m, r.y + r.h + m);
     }
   };
 
@@ -862,9 +1225,12 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.uniform1f(fu.uRadius, r.radius);
     gl.uniform1f(fu.uTopY, r.topY);
     gl.uniform4f(fu.uRect, r.x, r.y, r.w, r.h);
+    gl.uniform3fv(fu.uOff1, off.a);
+    gl.uniform3fv(fu.uOff2, off.b);
+    gl.uniform3fv(fu.uDusk, off.dusk);
     for (const l of layers) drawLayer(l, now, r);
 
-    // Points: embers, falling sparks (with a short streak) and spark-head trails.
+    // ---- points ----
     let i = 0;
     let n = 0;
     const put = (
@@ -876,7 +1242,10 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       p: number,
       s: number,
     ) => {
-      if (n >= MAX_POINTS || a <= 0.003) return;
+      if (n >= MAX_POINTS) return;
+      // Fade out near the canvas edges rather than get cut off by them.
+      a *= clamp(Math.min(x, w - x, y, h - y) / 14, 0, 1);
+      if (a <= 0.003) return;
       ptData[i++] = x;
       ptData[i++] = y;
       ptData[i++] = size;
@@ -886,12 +1255,54 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       ptData[i++] = s;
       n++;
     };
-    const fadeOf = (p: number) => layers.find((l) => TIER_INDEX[l.tier] === p)?.fade ?? 1;
+    const fadeOf = (p: number) =>
+      layers.find((l) => TIER_INDEX[l.tier] === (p === OFF ? TIER_INDEX.nova : p))?.fade ?? 1;
+
+    // Ember cracks: drawn from their anchors every frame so they follow the composer.
+    for (const l of layers) {
+      if (l.tier !== "ember" || !l.cracks.length) continue;
+      const L = perimLength(r);
+      const breath = breathOf(l, now);
+      const ft = l.ft;
+      for (const ck of l.cracks) {
+        const p = perim(r, ck.frac * L);
+        const tx = -p.ny;
+        const ty = p.nx;
+        // Growth: eased out, each crack with its own delay and speed.
+        const g = clamp(((ft - ck.delay) * ck.speed) / ck.len, 0, 1);
+        const D = ft > 0 ? ck.len * (1 - Math.pow(1 - g, 2.4)) : ck.len;
+        const growing = 1 - smooth(0.75, 1, g);
+        const flick = 0.7 + 0.3 * noise1(now * 0.5 + ck.seed);
+        const resid = (0.13 * breath + 0.16 * l.act) * flick;
+        const pulseAt = ((now / ck.period + ck.phase) % 1) * ck.period * 38 - 8;
+        for (let k = 0; k < ck.pts.length; k++) {
+          const q = ck.pts[k];
+          const front = D - q.dist;
+          if (front < 0) continue;
+          const taper = 1 - (q.dist / (ck.len + 4)) * 0.55;
+          let heat =
+            resid * taper +
+            0.85 * Math.exp(-front / 5) * growing +
+            0.42 * l.fl * Math.exp(-q.dist / (ck.len * 0.7 + 4));
+          heat += l.act * 0.55 * Math.exp(-Math.abs(q.dist - pulseAt) / 5) * taper;
+          heat = Math.min(1, heat) * l.fade;
+          if (heat < 0.01) continue;
+          const x = p.x + tx * q.t + p.nx * q.n;
+          const y = p.y + ty * q.t + p.ny * q.n;
+          const size = (q.lvl === 0 ? 2.3 : q.lvl === 1 ? 1.8 : 1.5) * (0.75 + 0.25 * taper);
+          put(x, y, size, 0.3 + 0.7 * heat, Math.min(1, heat * 1.2), TIER_INDEX.ember, 0.35);
+          if (k % 4 === 0) put(x, y, 12, heat * 0.75, heat * 0.2, TIER_INDEX.ember, 0);
+          // Where the crack leaves the edge it stays a little hotter.
+          if (k === 0) put(x, y, 16, heat * 0.8, heat * 0.35, TIER_INDEX.ember, 0);
+        }
+      }
+    }
+
     for (const e of particles) {
       const fade = fadeOf(e.pal);
       if (e.kind === 0) {
-        const flicker = 0.75 + 0.25 * Math.sin(now * 23 + e.seed * 7);
-        const keep = Math.min(1, Math.max(0, (140 - (r.y - e.y)) / 60));
+        const flicker = 0.75 + 0.25 * noise1(now * 9 + e.seed * 7);
+        const keep = Math.min(1, Math.max(0, (200 - (r.y - e.y)) / 70));
         put(
           e.x,
           e.y,
@@ -901,28 +1312,74 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
           e.pal,
           0,
         );
-      } else {
-        const a = Math.min(1, e.temp * 1.6) * fade;
+      } else if (e.kind === 1 || e.kind === 4) {
+        const a = Math.min(1, e.temp * 1.6) * fade * (e.kind === 1 ? e.amp : 1);
         put(e.x, e.y, e.size, e.temp, a, e.pal, 1);
-        put(e.x - e.vx * 0.012, e.y - e.vy * 0.012, e.size * 0.8, e.temp * 0.8, a * 0.55, e.pal, 1);
+        const sp = Math.hypot(e.vx, e.vy);
+        if (sp > 60) {
+          put(
+            e.x - e.vx * 0.01,
+            e.y - e.vy * 0.01,
+            e.size * 0.85,
+            e.temp * 0.85,
+            a * 0.6,
+            e.pal,
+            1,
+          );
+          put(e.x - e.vx * 0.02, e.y - e.vy * 0.02, e.size * 0.7, e.temp * 0.7, a * 0.35, e.pal, 1);
+        }
+        if (e.kind === 4) put(e.x, e.y, e.size * 4, e.temp * 0.6, a * 0.14, e.pal, 0);
+      } else if (e.kind === 2) {
+        if (e.b <= 0.01) continue;
+        const b = e.b * fade;
+        // Most glow ice-blue; about a third burn white-gold.
+        const gold = e.seed % 3 < 1;
+        put(e.x, e.y, e.size, 0.85 + 0.15 * b, Math.min(1, b * 2), e.pal, 1);
+        put(e.x, e.y, e.size * 4.5, gold ? 0.9 : 0.55, b * (gold ? 0.3 : 0.4), e.pal, 0);
+        // Crackle: two or three tiny jagged filaments, re-rolled ~25 times a second.
+        if (b > 0.25) {
+          const roll = Math.floor(now * 25) + e.seed * 31;
+          const m = 2 + Math.floor(hash1(roll) * 2);
+          for (let j = 0; j < m; j++) {
+            const ang = hash1(roll + j * 7.1) * Math.PI * 2;
+            const len = 4 + hash1(roll + j * 3.3) * 9 * e.amp;
+            for (let s = 1; s <= 5; s++) {
+              const jit = (hash1(roll + j * 11 + s) - 0.5) * 2;
+              const dx = (Math.cos(ang) * (len * s)) / 5 - Math.sin(ang) * jit;
+              const dy = (Math.sin(ang) * (len * s)) / 5 + Math.cos(ang) * jit;
+              put(e.x + dx, e.y + dy, 1.8, 0.9, b * (1 - s * 0.16), e.pal, 1);
+            }
+          }
+        }
+      } else {
+        const a = smooth(0, 0.25, e.age) * e.amp * fade;
+        put(e.x, e.y, e.size, e.temp, a, e.pal, 0.6);
       }
     }
-    const crackle = Math.floor(now * 30); // jitter re-rolls ~30 times a second
-    for (const hd of heads) {
-      const env = Math.sin(Math.PI * Math.min(1, hd.age / hd.ttl)) ** 0.6;
-      const dir = Math.sign(hd.v);
-      const N = 14;
-      for (let k = 0; k < N; k++) {
-        const p = perim(r, hd.s - dir * k * 4);
-        const jr = Math.sin((crackle + k * 7.13 + hd.s) * 12.9898) * 43758.5453;
-        const j = (jr - Math.floor(jr) - 0.5) * (1.2 + k * 0.8);
-        const fall = 1 - k / N;
+    // Arcs: a jagged chain between two sparks, re-struck every frame or two.
+    for (const a of arcs) {
+      if (a.age < 0) continue;
+      const env = Math.sin(Math.PI * clamp(a.age / a.ttl, 0, 1));
+      const dx = a.b.x - a.a.x;
+      const dy = a.b.y - a.a.y;
+      const len = Math.hypot(dx, dy);
+      const nx = -dy / len;
+      const ny = dx / len;
+      const roll = Math.floor(clock() * 40) + a.seed;
+      const N = Math.ceil(len / 1.6);
+      for (let k = 0; k <= N; k++) {
+        const u = k / N;
+        const j =
+          (Math.sin(u * 9 + roll) * 0.6 + (hash1(roll + k * 0.37) - 0.5) * 0.8) *
+          len *
+          0.09 *
+          Math.sin(Math.PI * u);
         put(
-          p.x + p.nx * (1.2 + j),
-          p.y + p.ny * (1.2 + j),
-          (k === 0 ? 5 : 3 * fall + 1) * Math.min(1.2, hd.amp + 0.3),
-          1 - k * 0.06,
-          hd.amp * env * fall * fadeOf(TIER_INDEX.spark),
+          a.a.x + dx * u + nx * j,
+          a.a.y + dy * u + ny * j,
+          1.7,
+          0.95,
+          env * 0.85 * fadeOf(TIER_INDEX.spark),
           TIER_INDEX.spark,
           1,
         );
@@ -944,9 +1401,9 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   /** Something is moving fast enough to need full frame rate. */
   const busy = () =>
-    particles.length > 0 ||
-    heads.length > 0 ||
-    layers.some((l) => l.fading || l.fl > 0.002 || l.act > 0.002 || active);
+    arcs.length > 0 ||
+    particles.some((p) => p.kind !== 0 || Math.abs(p.vy) > 45) ||
+    layers.some((l) => l.fading || l.fl > 0.002 || l.pre > 0.002 || l.act > 0.002 || active);
 
   const frame = (now: number) => {
     raf = 0;
@@ -959,7 +1416,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   const schedule = () => {
     if (raf || timer || document.hidden) return;
-    if (!layers.length && !particles.length && !heads.length) {
+    if (!layers.length && !particles.length) {
       last = 0;
       draw(0); // clear
       return;
@@ -1002,19 +1459,17 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   const flare = (l: Layer) => {
     l.flareAt = clock();
+    l.ts = rand(0.88, 1.14);
+    l.seed = Math.random() * 100;
+    l.blasted = false;
     const r = composerRect();
     if (!r) return;
-    if (l.tier === "nova") spawnEmbers(l, r, 50, true);
-    if (l.tier === "solstice") spawnEmbers(l, r, 12, true);
-    if (l.tier === "ember") spawnEmbers(l, r, 7, true);
-    if (l.tier === "spark") {
-      // Two racers leave the top centre in opposite directions and meet at the bottom.
-      const L = perimLength(r);
-      const s = (r.w - 2 * r.radius) / 2;
-      for (const dir of [-1, 1])
-        spawnHead({ s, v: (dir * L) / 2 / 0.75, ttl: 0.8, amp: 1.25, shed: 70 });
-      l.nextSpark = 0.05;
+    if (l.tier === "solstice") spawnEmbers(l, r, 10, true);
+    if (l.tier === "ember") {
+      l.cracks = genCracks(r);
+      spawnEmbers(l, r, 4, false, true);
     }
+    if (l.tier === "spark") l.nextSpawn = 0.2;
   };
 
   return {
@@ -1026,14 +1481,21 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         if (tier) {
           const l: Layer = {
             tier,
+            seed: Math.random() * 100,
             fade: 1,
             fading: false,
             flareAt: 0,
+            ts: 1,
             act: 0,
+            actV: 0,
             time: Math.random() * 50,
             fl: 0,
+            pre: 0,
+            ft: 99,
+            blasted: false,
             trickle: 0,
-            nextSpark: rand(1, 3),
+            nextSpawn: 1,
+            cracks: [],
           };
           layers.push(l);
           flare(l);

@@ -33,7 +33,7 @@ const defaultCwd = process.env.PROVENANCE_UI_CWD ?? homedir();
 const tierlmUrl = (process.env.TIERLM_URL ?? "http://127.0.0.1:4141").replace(/\/$/, "");
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
-const FALLBACK_TIERS = ["nova", "solstice", "spark", "ember"];
+const FALLBACK_TIERS = ["nova", "solstice", "ember", "spark"];
 const DEFAULT_TIER = "solstice";
 
 const bridge = new AppServerBridge({

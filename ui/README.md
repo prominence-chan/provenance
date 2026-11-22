@@ -30,7 +30,7 @@ Other scripts:
 | `npm run smoke`               | Headless check through the bridge (no browser): new thread, "reply with just ok", resume      |
 | `npm run e2e`                 | Headless Chromium (Playwright) drives the real UI; `APPROVAL=1` also tests a command approval |
 
-Both checks expect the server to already be running. `MODEL=spark` picks a different tier.
+Both checks expect the server to already be running. `MODEL=ember` picks a different tier.
 The free upstream models sometimes return 503; both checks retry.
 
 Requires Node >= 23.6: the server and scripts are `.ts` files run directly by Node
@@ -135,7 +135,7 @@ the state bottom-left and re-attaches to the open thread once app-server is back
   `components/Approvals.tsx` and reply with `rpc.respond(req.id, result)`. Unsupported ones
   currently render a card that replies with a JSON-RPC error.
 - **Tiers:** the picker lists tierlm's own models (`/v1/models` where `owned_by ==
-"tierlm"`), falling back to `nova / solstice / spark / ember` (`server/main.ts`). Default
+"tierlm"`), falling back to `nova / solstice / ember / spark` (`server/main.ts`). Default
   is `solstice`.
 
 ## Theme
@@ -157,34 +157,48 @@ a 40 px header, 13.5 px body text, tool calls as one-line rows that open on clic
   project's header collapses it (remembered). `⌘B` / `Ctrl+B` or the panel button hides the
   sidebar (remembered). Below 860 px it becomes a drawer that starts closed and closes after
   you pick a thread. The state lives in `src/theme/ui.ts`.
-- **Tiers:** `src/theme/tiers.ts` holds the order (ember < spark < solstice < nova) and the
+- **Tiers:** `src/theme/tiers.ts` holds the order (spark < ember < solstice < nova) and the
   blurbs shown in the picker. Any element with `data-tier="..."` gets `--tier-color` /
   `--tier-grad` for its subtree. `TierBadge` appears in the header, on the "Working…" line and
   in each turn's footer; `TierPicker` is the composer dropdown.
 - **Effects** (always on for the selected tier), all in one WebGL2 canvas behind the main
-  column, `src/components/effects/FlameFx.tsx`. Three states, eased into each other: a short
+  column, `src/components/effects/FlameFx.tsx`. Three states, eased into each other: a
   **flare** when the tier changes (and on first load), an almost-still **idle**, and an
-  **active** state while a turn streams (above idle, well below the flare). Each tier has its
-  own style and ramp (`--fx-<tier>-deep/mid/hot/core`):
-  - ember: a warm glow breathing round the composer; on switch hairline heat cracks spread out
-    from its edge and cool; while active, warm patches drift along the rim and cracks flicker
-    up here and there;
-  - spark: electric crackle; on switch two bright heads race round the edge in opposite
-    directions trailing a jagged arc and shedding falling sparks; while active, quick flicks
-    skip along the edge; idle is a tiny flick every few seconds;
-  - solstice: warm flame off the top edge; on switch a sunrise (golden bloom and rays rising
-    off the edge, flames leaping); idle is a low, slow corona lick;
-  - nova: a shimmering plasma rim all round; on switch a stellar ignition (flash, shockwave
-    ring, ember burst, the header filament lighting outward); while active a breathing plasma
-    corona with flames, embers and the filament.
+  **active** state while a turn streams (above idle, well below the flare). Intensity climbs
+  with the tier, spark subtlest, nova strongest. Each tier has its own style and ramp
+  (`--fx-<tier>-deep/mid/hot/core`):
+  - spark: electric (blue arc, ice-white, white-gold cores); tiny sparks fizzle in and out at
+    random spots just outside the edge, drift and crackle; on switch a scatter of them with
+    short arcs jumping between neighbours; idle is a lone spark every few seconds;
+  - ember: heat cracks; branching, jagged hairline cracks spread out from the edge, hot at the
+    growing tip, then cool to a faint glow that stays in the cracks; while active, heat pulses
+    run out along them;
+  - solstice: sunset; on switch the sun's glare appears on the top edge, flames and dusk
+    clouds (`--fx-solstice-dusk`) rise and run out sideways under slowly turning rays, then
+    it settles; idle is a low, faint flame with sparse cinders drifting up;
+  - nova: plasma; on switch a short charge (motes gather, the rim tightens), then an eruption
+    from the whole composer: core flash, chromatic shockwaves, debris with physics, plasma
+    smoke cooling through violet and cyan (`--fx-nova-off1/2`), a lingering afterglow; idle
+    is a calm shimmering plasma rim, active adds a corona, flames, embers and the header
+    filament.
 
-  The shader runs only in a band around the composer (plus a strip under the header and, for
-  nova's ignition, the ring's box), DPR is capped at 1.5, idle draws at 20 fps, a background
-  window at 30 fps (idle stops after ~8 s unfocused and resumes on focus), and nothing runs
-  while the tab is hidden. The canvas is `pointer-events: none` and sits under the text.
-  Under `prefers-reduced-motion`, or without WebGL2, nothing animates:
-  `src/theme/effects.css` draws a static tier tint on the composer border instead.
+  Motion is organic by construction: smooth attacks into two-rate decays (no kink at the
+  peak), per-flare timing jitter, idle brightness wandering on slow noise, layers fading at
+  different rates. The shader runs only in a band around the composer (plus a strip under
+  the header and, during nova's eruption, the shockwave's box), and every band fades out
+  before its edge; DPR is capped at 1.5, idle draws at 20 fps, a background window at 30
+  fps (idle stops after ~8 s unfocused and resumes on focus), and nothing runs while the tab
+  is hidden. The canvas is `pointer-events: none` and sits under the text. Under
+  `prefers-reduced-motion`, or without WebGL2, nothing animates: `src/theme/effects.css`
+  draws a static tier tint on the composer border instead.
 
+- **Logo and hero:** `src/components/SolarMark.tsx` is the mark (a sun's limb with an
+  erupting prominence arch; gently animated in CSS, `.solar-mark` in `styles.css`; the
+  favicon in `index.html` is a static copy). The new-thread page shows a live sun,
+  `src/components/effects/HeroSun.tsx`: a small WebGL2 canvas with granulation, corona,
+  spicules, prominence loops on their own random life cycles and the odd flare jet; 30 fps,
+  paused when hidden or unfocused, one still frame under reduced motion, the static mark
+  without WebGL2.
 - **Preview without a turn (dev only):** `http://localhost:5173/?fx=nova` (active),
   `?fx=nova:idle` (load flare, then idle); in the console `__provenanceFx("spark", "flare")`
   replays a tier's switch flare, `__provenanceFx("spark", "idle" | "active")` sets the state,

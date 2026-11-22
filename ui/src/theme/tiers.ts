@@ -1,8 +1,8 @@
-// Tier identity: ember < spark < solstice < nova. Colors are CSS variables in
+// Tier identity: spark < ember < solstice < nova. Colors are CSS variables in
 // tokens.css (--tier-<id>, --tier-<id>-grad, --fx-<id>-*); this file only holds names,
 // order and blurbs. Each tier has its own effect style, keyed by id in FlameFx.tsx.
 
-export type TierId = "ember" | "spark" | "solstice" | "nova";
+export type TierId = "spark" | "ember" | "solstice" | "nova";
 
 export interface TierInfo {
   id: TierId;
@@ -11,8 +11,8 @@ export interface TierInfo {
 }
 
 export const TIERS: Record<TierId, TierInfo> = {
-  ember: { id: "ember", rank: 1, blurb: "Fast and small" },
-  spark: { id: "spark", rank: 2, blurb: "Strong mid-tier" },
+  spark: { id: "spark", rank: 1, blurb: "Fast · small" },
+  ember: { id: "ember", rank: 2, blurb: "Strong mid" },
   solstice: { id: "solstice", rank: 3, blurb: "Frontier · default" },
   nova: { id: "nova", rank: 4, blurb: "Hyperfrontier" },
 };

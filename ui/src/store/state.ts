@@ -106,7 +106,7 @@ export function initialState(): AppState {
       sandbox: "workspace-write",
       ...loadSettings(),
     },
-    tiers: ["nova", "solstice", "spark", "ember"],
+    tiers: ["nova", "solstice", "ember", "spark"],
     notices: [],
   };
 }

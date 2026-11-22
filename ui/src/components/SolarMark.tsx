@@ -1,8 +1,15 @@
 import { useId } from "react";
 
-/** The Provenance mark: a sun's limb with a prominence loop arcing off it. */
+/**
+ * The Provenance mark: the limb of a sun with a prominence arching off it, its far foot
+ * lifting as it erupts. Animated in CSS
+ * (styles.css, `.solar-mark`): the glow under the arch breathes, plasma flows along the arch
+ * and a fainter inner loop rises and settles, each on its own period so it never looks
+ * looped. Static under prefers-reduced-motion.
+ */
 export function SolarMark({ size = 20, className }: { size?: number; className?: string }) {
   const id = useId().replace(/:/g, "");
+  const arch = "M9.5 27.2 C 9 9, 27 1.5, 33 23.5";
   return (
     <svg
       width={size}
@@ -12,34 +19,57 @@ export function SolarMark({ size = 20, className }: { size?: number; className?:
       aria-hidden
     >
       <defs>
-        <radialGradient id={`${id}-disc`} cx="42%" cy="40%" r="62%">
+        <radialGradient id={`${id}-limb`} cx="48%" cy="0%" r="95%">
           <stop offset="0%" stopColor="var(--glint)" />
-          <stop offset="35%" stopColor="var(--corona)" />
-          <stop offset="75%" stopColor="var(--ember)" />
+          <stop offset="18%" stopColor="var(--corona)" />
+          <stop offset="50%" stopColor="var(--ember)" />
           <stop offset="100%" stopColor="var(--crimson)" />
         </radialGradient>
-        <linearGradient id={`${id}-loop`} x1="0" y1="1" x2="1" y2="0">
-          <stop offset="0%" stopColor="var(--ember)" />
-          <stop offset="55%" stopColor="var(--magenta)" />
-          <stop offset="100%" stopColor="var(--crimson)" />
+        <radialGradient id={`${id}-halo`} cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="var(--ember)" stopOpacity="0.4" />
+          <stop offset="100%" stopColor="var(--ember)" stopOpacity="0" />
+        </radialGradient>
+        <linearGradient id={`${id}-arch`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="var(--corona)" />
+          <stop offset="50%" stopColor="var(--magenta)" />
+          <stop offset="100%" stopColor="var(--ember)" />
         </linearGradient>
+        <clipPath id={`${id}-clip`}>
+          <circle cx="20" cy="20" r="19.5" />
+        </clipPath>
       </defs>
-      <circle cx="17" cy="23" r="13" fill={`url(#${id}-disc)`} />
-      <path
-        d="M24.5 13.2 C 25 5, 35.5 3.5, 36 11 C 36.4 16.5, 31.5 19.5, 29.2 17.8"
-        fill="none"
-        stroke={`url(#${id}-loop)`}
-        strokeWidth="2.6"
-        strokeLinecap="round"
-      />
-      <path
-        d="M27.6 15.4 C 29 10.5, 33.2 10.6, 33 13.4"
-        fill="none"
-        stroke="var(--magenta)"
-        strokeOpacity="0.55"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
+      <g clipPath={`url(#${id}-clip)`}>
+        <ellipse className="sm-halo" cx="20" cy="22" rx="17" ry="14" fill={`url(#${id}-halo)`} />
+        <path
+          className="sm-loop2"
+          d="M16 26.2 C 16 15.5, 25.5 11.5, 27.5 25.4"
+          fill="none"
+          stroke="var(--magenta)"
+          strokeOpacity="0.35"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+        />
+        <path
+          d={arch}
+          fill="none"
+          stroke={`url(#${id}-arch)`}
+          strokeWidth="3.2"
+          strokeLinecap="round"
+        />
+        <path
+          className="sm-flow"
+          d={arch}
+          fill="none"
+          stroke="var(--glint)"
+          strokeOpacity="0.8"
+          strokeWidth="1.1"
+          strokeLinecap="round"
+          pathLength={100}
+          strokeDasharray="16 84"
+          strokeDashoffset={-30}
+        />
+        <circle cx="20" cy="58" r="33" fill={`url(#${id}-limb)`} />
+      </g>
     </svg>
   );
 }

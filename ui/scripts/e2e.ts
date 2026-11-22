@@ -1,7 +1,7 @@
 // Headless browser check of the real UI (Playwright, its own Chromium; never your Chrome).
 //
 //   npm run dev        # in another terminal (NO_OPEN=1 to skip opening a tab)
-//   npm run e2e        # MODEL=spark to pick another tier, SHOT=path for the screenshot
+//   npm run e2e        # MODEL=ember to pick another tier, SHOT=path for the screenshot
 //   APPROVAL=1 npm run e2e   # also exercise a command approval (touches a file in /tmp)
 //
 // Flow: new thread -> pick tier -> send "reply with just ok" -> wait for the
@@ -18,7 +18,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 const port = Number(process.env.PORT ?? 5173);
-const model = process.env.MODEL ?? "ember";
+const model = process.env.MODEL ?? "spark";
 const shot = process.env.SHOT ?? "/tmp/provenance-ui-e2e.png";
 const prompt = "reply with just ok";
 const log = (...a: unknown[]) => console.log("[e2e]", ...a);

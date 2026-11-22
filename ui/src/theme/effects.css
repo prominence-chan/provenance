@@ -1,8 +1,8 @@
 /* Tier effects around the composer.
 
    The effects themselves are drawn by components/effects/FlameFx.tsx: one WebGL2 canvas
-   behind the main column, a different style per tier (ember glow and heat cracks, spark
-   crackle, solstice flame, nova plasma), each in three states: a flare when the tier is
+   behind the main column, a different style per tier (spark crackle, ember heat cracks,
+   solstice sunset, nova plasma eruption), each in three states: a flare when the tier is
    picked, a near-still idle, and a livelier state while a turn streams. This file only
    places that canvas, plus the static fallback that replaces it under
    prefers-reduced-motion or without WebGL2 (.main[data-fx="static"]).

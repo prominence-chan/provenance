@@ -1,6 +1,6 @@
 // Headless end-to-end check of the bridge (no browser):
 //   1. connect to ws://127.0.0.1:$PORT/rpc and wait for bridge/status ready
-//   2. initialize, thread/start (model $MODEL, default "ember"), turn/start "reply with just ok"
+//   2. initialize, thread/start (model $MODEL, default "spark"), turn/start "reply with just ok"
 //   3. stream item/agentMessage/delta until turn/completed; assert the reply
 //   4. thread/list includes the thread; thread/resume + thread/turns/list return it
 //
@@ -8,7 +8,7 @@
 // Retries the turn a few times because free upstream models sometimes 503.
 
 const port = Number(process.env.PORT ?? 5173);
-const model = process.env.MODEL ?? "ember";
+const model = process.env.MODEL ?? "spark";
 const attempts = Number(process.env.ATTEMPTS ?? 4);
 
 type Msg = { id?: number | string; method?: string; params?: any; result?: any; error?: any };

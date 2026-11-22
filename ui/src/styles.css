@@ -581,36 +581,82 @@ select {
   gap: 10px;
   padding: 0 20px 40px;
 }
-.hero-lockup {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
 .hero h1 {
   font-size: var(--fs-hero);
   font-weight: 500;
   letter-spacing: -0.3px;
   margin: 0;
 }
-.hero-mark {
-  position: relative;
-  display: grid;
-  place-items: center;
+/* The sun's corona fades out inside its canvas, so it can sit close to the heading. */
+.hero-sun {
+  display: block;
+  margin-bottom: -18px;
+  pointer-events: none;
 }
-.hero-mark::before {
-  content: "";
-  position: absolute;
-  inset: -14px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--ember) 26%, transparent) 0%,
-    transparent 70%
-  );
-  opacity: calc(0.9 * var(--fx-glow-strength));
+@media (max-height: 560px) {
+  .hero-sun {
+    display: none;
+  }
 }
-.hero-mark .solar-mark {
-  position: relative;
+
+/* Logo: the glow breathes, plasma flows along the arch, the inner loop rises and settles
+   (incommensurate periods, so it never looks looped). */
+.solar-mark .sm-halo {
+  transform-origin: 20px 26px;
+  animation: sm-breathe 7.3s var(--ease) infinite alternate;
+}
+.solar-mark .sm-flow {
+  animation: sm-flow 5.3s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+.solar-mark .sm-loop2 {
+  transform-origin: 20.5px 26px;
+  animation: sm-rise 11.9s ease-in-out infinite;
+}
+@keyframes sm-breathe {
+  from {
+    opacity: 0.5;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+@keyframes sm-flow {
+  from {
+    stroke-dashoffset: 16;
+    stroke-opacity: 0;
+  }
+  15% {
+    stroke-opacity: 0.85;
+  }
+  85% {
+    stroke-opacity: 0.85;
+  }
+  to {
+    stroke-dashoffset: -100;
+    stroke-opacity: 0;
+  }
+}
+@keyframes sm-rise {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+  45% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  70% {
+    opacity: 0.7;
+    transform: scale(0.96);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .solar-mark * {
+    animation: none !important;
+  }
 }
 
 .user-message {
