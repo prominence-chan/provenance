@@ -9,9 +9,10 @@
 //   spark     electric: tiny sparks fizzle in and out at random spots just outside the edge,
 //             drift a little and crackle; on switch a scatter of them with short arcs jumping
 //             between neighbours
-//   ember     craquelure: a Voronoi network of craggy cracks opens outward from the
-//             composer behind a ragged front, white-hot at the front, then cools to a faint
-//             glow that lives in the cracks; while active, heat pulses run out along it
+//   ember     small craquelure: a sparse network of hairline cracks creeps along and a
+//             little way out from the edge, meandering, branching and stopping at random,
+//             white-hot only at the growing tips, then a faint glow that lives in the
+//             cracks; while active, slow heat pulses wander along it
 //   solstice  sunset: on switch the sun's glare appears on the top edge, flames and dusk
 //             clouds rise and run out sideways under slowly turning rays, then it settles to
 //             a low, faint flame with sparse cinders drifting up; all of it stays inside the
@@ -170,8 +171,9 @@ vec2 hash2(vec2 p) {
   return vec2(hash(p), hash(p + 17.31));
 }
 // Distance (in cell units) to the nearest Voronoi edge, irregular cells (IQ's two-pass
-// method). id = a random 0..1 per cell.
-float vorEdge(vec2 x, out float id) {
+// method). id = a random 0..1 per cell; eid = a random 0..1 per edge (the same from both
+// sides), so single edges can be dropped to break the network into meandering paths.
+float vorEdge(vec2 x, out float id, out float eid) {
   vec2 n = floor(x), f = fract(x);
   vec2 mg = vec2(0.0), mr = vec2(0.0);
   float md = 8.0;
@@ -184,13 +186,18 @@ float vorEdge(vec2 x, out float id) {
     }
   id = hash(n + mg + 3.7);
   md = 8.0;
+  vec2 eg = mg;
   for (int j = -2; j <= 2; j++)
     for (int i = -2; i <= 2; i++) {
       vec2 g = mg + vec2(float(i), float(j));
       vec2 r = g + 0.1 + 0.8 * hash2(n + g) - f;
       vec2 e = r - mr;
-      if (dot(e, e) > 1e-5) md = min(md, dot(0.5 * (mr + r), normalize(e)));
+      if (dot(e, e) > 1e-5) {
+        float de = dot(0.5 * (mr + r), normalize(e));
+        if (de < md) { md = de; eg = g; }
+      }
     }
+  eid = hash(2.0 * n + mg + eg + 11.3);
   return md;
 }
 // Thermal colour for nova's heat-up: dull orange -> yellow -> white-hot.
@@ -438,55 +445,59 @@ void main() {
         add += s.z * exp(-r / 3.0) * 0.2;
       }
     } else if (uTier == 1) {
-      // EMBER: craquelure. A Voronoi network of craggy cracks round the composer (two
-      // levels: big plates split by finer cracks), revealed by a ragged front that runs out
-      // from the edge; white-hot where the front is, then each crack cools from the moment
-      // it opened to a faint glow that stays in the network. While active, heat pulses run
-      // outward along it.
+      // EMBER: a small, sparse craquelure hugging the edge. One Voronoi network (cells
+      // stretched along the edge so cracks run sideways as much as outward), with single
+      // edges dropped at random so it reads as meandering cracks that branch and stop, not
+      // a grid of cells. It grows from a few seed points on the edge, faster along the edge
+      // than away from it, white-hot only at the growing tips, and cools to a faint glow
+      // that stays in the cracks. While active, slow heat pulses wander along the network.
       vec2 lp = vPos - uRect.xy;                     // ride with the composer
-      // Craggy edges: jitter the domain at two small scales so every edge zigzags.
-      vec2 jp = lp + (vec2(noise(lp / 4.5 + uSeed), noise(lp / 4.5 + uSeed + 9.1)) - 0.5) * 3.2
-              + (vec2(noise(lp / 19.0 + 3.0), noise(lp / 19.0 + 7.0)) - 0.5) * 11.0;
-      float id1, id2;
-      float e1 = vorEdge(jp / 30.0 + uSeed, id1) * 30.0;        // px to a primary crack
-      float e2 = vorEdge(jp / 12.0 + uSeed * 1.7 + 40.0, id2) * 12.0; // px to a fine one
-      // How far the network reaches: most above the top edge, little at the sides/bottom,
-      // ragged along the edge.
-      float reach = mix(22.0, 104.0, topW)
-                  * (0.25 + 1.15 * smoothstep(0.28, 0.72, fbm3(vec2(u / 120.0 + uSeed, 2.0))));
-      // Front: per pixel distance warped by noise and a per-plate lag, so it advances
-      // unevenly, plate by plate.
-      float q = dd * (0.85 + 0.3 * id1) + 22.0 * (noise(lp / 46.0 + uSeed) - 0.5) + 6.0;
-      float F = 150.0 * (1.0 - exp(-max(ft, 0.0) * 0.45));
-      float opened = smoothstep(F + 1.0, F - 3.0, q);
-      float tOpen = -log(max(1.0 - q / 150.0, 0.02)) / 0.45;  // when the front got here
-      float age = max(ft - tOpen, 0.0);
-      // The network thins out unevenly: past half its reach, plates drop out one by one,
-      // leaving cracks that end partway.
+      // Craggy edges: jitter the domain at two small scales so every crack zigzags.
+      vec2 jp = lp + (vec2(noise(lp / 3.5 + uSeed), noise(lp / 3.5 + uSeed + 9.1)) - 0.5) * 2.4
+              + (vec2(noise(lp / 14.0 + 3.0), noise(lp / 14.0 + 7.0)) - 0.5) * 7.0;
+      float cid, eid;
+      float e = vorEdge(jp / vec2(19.0, 12.0) + uSeed, cid, eid) * 12.0;  // ~px to a crack
+      // Short reach: a few px at the sides and bottom, a little more on top, ragged.
+      float reach = mix(8.0, 24.0, topW)
+                  * (0.45 + 1.0 * smoothstep(0.25, 0.75, fbm3(vec2(vPos.x / 80.0 + uSeed, 3.0))));
       float rel = dd / max(reach, 1.0);
-      float within = smoothstep(1.0, 0.45, rel) * smoothstep(-0.05, 0.12, id1 - (rel - 0.45) * 1.5)
-                   * outside;
-      // Width: wide near the composer, hairline far out; fine cracks only near the edge,
-      // patchy, and they open later than the primary ones.
-      float w1 = mix(1.7, 0.55, clamp(dd / reach, 0.0, 1.0)) * (0.7 + 0.6 * noise(jp / 23.0));
-      float c1 = 1.0 - smoothstep(w1 * 0.5, w1 * 0.5 + 0.9, e1);
-      float fineOn = smoothstep(0.42, 0.62, noise(lp / 34.0 + uSeed + 5.0))
-                   * smoothstep(reach * 0.75, 0.0, dd) * smoothstep(F - 18.0, F - 34.0, q);
-      float c2 = (1.0 - smoothstep(0.25, 1.0, e2)) * fineOn * 0.6;
-      float crack = max(c1, c2) * opened * within;
-      float bleed = (exp(-e1 / 3.5) * 0.5 + exp(-e2 / 2.5) * 0.18 * fineOn) * opened * within;
-      // Heat: hot tip at the front, cooling behind it; a residual glow; active pulses.
-      float tip = exp(-max(F - q, 0.0) / 6.0) * exp(-max(ft, 0.0) * 0.3) * 0.85;
-      float cool = exp(-age * 0.9) * 0.45 + exp(-age * 0.2) * 0.16;
-      float resid = (0.16 * uBreath + 0.12 * act) * (1.0 - 0.6 * clamp(dd / reach, 0.0, 1.0));
-      float P = fract(uClock * 0.28 + noise(vec2(u / 90.0, uSeed)) * 0.6) * (reach * 1.4) - 10.0;
-      float pulseA = act * exp(-abs(dd - P) / 9.0) * 0.6;
-      float ch = crack * (resid + cool + tip * 1.1 + pulseA);
-      heat = ch + bleed * (resid * 0.6 + cool * 0.4 + tip * 0.5 + pulseA * 0.7) * 0.5;
-      // The edge itself warms faintly where cracks leave it.
-      heat += rimLine * mix(0.25, 1.0, topW) * (0.02 * uBreath + 0.05 * act + 0.12 * fl)
-            * smoothstep(3.0, 0.5, e1);
-      add += crack * tip * 0.25;
+      // Growth distance: from the nearest seed point along the edge (one per ~150 px, placed
+      // at random), stretched so the network creeps along the edge before it creeps out.
+      float sx = vPos.x / 150.0 + uSeed * 0.37;
+      float k0 = floor(sx), sAlong = 9.0, kSeed = k0;
+      for (int i = -1; i <= 1; i++) {
+        float kk = k0 + float(i);
+        float a = abs(sx - kk - 0.15 - 0.7 * hash(vec2(kk, uSeed)));
+        if (a < sAlong) { sAlong = a; kSeed = kk; }
+      }
+      sAlong *= 150.0;
+      float g = length(vec2(sAlong, dd * 2.6)) * (0.8 + 0.45 * noise(lp / 24.0 + uSeed)) + 10.0 * cid;
+      float F = 150.0 * (1.0 - exp(-max(ft, 0.0) * 0.8));
+      float opened = smoothstep(F + 1.0, F - 2.0, g);
+      float tOpen = -log(max(1.0 - g / 150.0, 0.02)) / 0.8;  // when the growth got here
+      float age = max(ft - tOpen, 0.0);
+      // Sparse: edges drop out more often further from the composer (cracks end at random),
+      // and whole stretches of the edge stay quiet.
+      float keep = step(0.12 + 0.6 * clamp(rel, 0.0, 1.0), eid);
+      float live = smoothstep(0.27, 0.5, fbm3(vec2(vPos.x / 110.0 + uSeed * 1.3, 7.0)));
+      float within = smoothstep(1.0, 0.55, rel) * keep * live * outside;
+      // Hairline: a little wider at the edge, thinning out.
+      float w = mix(1.15, 0.5, clamp(rel, 0.0, 1.0)) * (0.7 + 0.6 * noise(jp / 21.0));
+      float crack = (1.0 - smoothstep(w * 0.5, w * 0.5 + 0.6, e)) * opened * within;
+      float bleed = exp(-e / 1.6) * opened * within;
+      // Heat: a hot tip where the crack is growing, cooling behind it; a faint residual
+      // glow that lives in the network; active pulses that wander along it.
+      float tip = exp(-max(F - g, 0.0) / 5.0) * exp(-max(ft, 0.0) * 0.45) * 0.62;
+      float cool = exp(-age * 1.1) * 0.26 + exp(-age * 0.22) * 0.07;
+      float resid = (0.14 * uBreath + 0.1 * act) * (1.0 - 0.5 * clamp(rel, 0.0, 1.0));
+      float P = fract(uClock * 0.2 + hash(vec2(kSeed, 4.0))) * 130.0 - 10.0;
+      float pulseA = act * exp(-abs(g - P) / 7.0) * 0.3;
+      float hc = resid + cool + tip + pulseA;
+      heat = crack * hc + bleed * hc * 0.12;
+      // The edge itself warms faintly only where a crack leaves it.
+      heat += rimLine * mix(0.3, 1.0, topW) * (0.015 * uBreath + 0.03 * act + 0.07 * fl)
+            * smoothstep(2.5, 0.5, e) * live;
+      add += crack * tip * 0.12;
     } else if (uTier == 2) {
       // SOLSTICE: a low faint flame off the top edge; on switch a sunset on the edge.
       // Every solstice layer fades out inside the composer's own width: nothing runs past
@@ -1287,8 +1298,8 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     let side = 50;
     let below = 34;
     if (l.tier === "ember") {
-      top = 156;
-      side = 44;
+      top = 56;
+      side = 34;
     }
     if (l.tier === "solstice") {
       // Everything solstice draws tapers off inside the composer's own width.
@@ -1552,7 +1563,6 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     const r = composerRect();
     if (!r) return;
     if (l.tier === "solstice") spawnEmbers(l, r, 10, true);
-    if (l.tier === "ember") spawnEmbers(l, r, 4, false, true);
     if (l.tier === "spark") l.nextSpawn = 0.2;
   };
 
