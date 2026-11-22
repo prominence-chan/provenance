@@ -2,6 +2,7 @@
 //   - the React app (Vite dev middleware with HMR, or the built `dist/`)
 //   - GET /api/info    -> defaults for the UI (cwd, binary, tiers source)
 //   - GET /api/tiers   -> tier list from tierlm (/v1/models, owned_by=tierlm)
+//   - GET /api/sources -> each tier's sources and usage left (provenance-core /v1/sources)
 //   - GET /api/health  -> is the provenance binary there, is provenance-core up
 //   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage)
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
@@ -101,6 +102,22 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     }
     if (url.pathname === "/api/tiers") {
       sendJson(res, { ...(await fetchTiers()), defaultTier: DEFAULT_TIER });
+      return true;
+    }
+    if (url.pathname === "/api/sources") {
+      // Which sources serve each tier (pool, web models) and how much each has left.
+      // Router down or without /v1/sources: no tiers, and the picker shows plain tiers.
+      try {
+        const r = await fetch(`${tierlmUrl}/v1/sources`, { signal: AbortSignal.timeout(2000) });
+        const body = r.ok ? ((await r.json()) as { tiers?: unknown }) : null;
+        if (Array.isArray(body?.tiers)) {
+          sendJson(res, { tiers: body.tiers, source: "tierlm" });
+          return true;
+        }
+      } catch {
+        // fall through
+      }
+      sendJson(res, { tiers: [], source: "fallback" });
       return true;
     }
     if (url.pathname === "/api/health") {

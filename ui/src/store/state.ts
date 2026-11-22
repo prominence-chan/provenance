@@ -64,6 +64,24 @@ export interface ThreadView {
   cwd: string | null;
 }
 
+/**
+ * One way provenance-core can serve a tier (GET /v1/sources): the token pool or a web
+ * model. Lists come best-first, the order the router uses when nothing is pinned.
+ */
+export interface Source {
+  id: string;
+  label: string;
+  kind: string;
+  /** Send this as the model to pin the source, e.g. "luna/solstice". */
+  model: string;
+  /** Share (0-1) of today's usage left; null when the router doesn't say. */
+  remaining: number | null;
+  /** Requests it is serving now. */
+  busy: number;
+  available: boolean;
+  pinnable: boolean;
+}
+
 export interface Settings {
   model: string;
   cwd: string;
@@ -92,6 +110,8 @@ export interface AppState {
   sending: boolean;
   settings: Settings;
   tiers: string[];
+  /** Per tier: its sources, best first. Empty when the router doesn't list them. */
+  sources: Record<string, Source[]>;
   notices: Notice[];
   /** Per turn id: which models served it (absent = not fetched yet). */
   usage: Record<string, TurnUsage>;
@@ -129,6 +149,7 @@ export function initialState(): AppState {
       ...loadSettings(),
     },
     tiers: ["nova", "solstice", "ember", "spark"],
+    sources: {},
     notices: [],
     usage: {},
   };

@@ -10,11 +10,13 @@ import type {
   Thread,
 } from "../protocol";
 import { RpcClient } from "../rpc/client";
+import { splitModel } from "../theme/tiers";
 import { applyNotification, turnFromProtocol, upsertThreadInList } from "./reducer";
 import {
   saveSettings,
   type AppState,
   type Settings,
+  type Source,
   type ThreadView,
   type TurnUsage,
   type TurnView,
@@ -87,11 +89,54 @@ export async function boot(): Promise<void> {
     // The launcher's directory wins; otherwise keep the last-used cwd.
     if (info && (info.cwdFromLauncher || !settings.cwd)) settings.cwd = info.defaultCwd;
     const list = tiers?.tiers?.length ? tiers.tiers : s.tiers;
-    if (!list.includes(settings.model))
-      settings.model = list.includes("solstice") ? "solstice" : list[0];
+    settings.model = validModel(settings.model, list);
     return { ...s, settings, tiers: list };
   });
   rpc.connect();
+  void refreshSources(); // once, so a pinned source shows its label; the picker refreshes it
+}
+
+/** Keep a saved model whose tier still exists (pinned "luna/solstice" included), else the default. */
+function validModel(model: unknown, tiers: string[]): string {
+  if (typeof model === "string" && tiers.includes(splitModel(model).tier)) return model;
+  return tiers.includes("solstice") ? "solstice" : tiers[0];
+}
+
+/**
+ * Re-read which sources serve each tier (GET /api/sources). Called when the tier picker
+ * opens, not on a timer. Router down or too old to list sources: an empty map, and the
+ * picker shows the plain tiers as before.
+ */
+export async function refreshSources(): Promise<void> {
+  let sources: Record<string, Source[]> = {};
+  try {
+    const body = (await (await fetch("/api/sources")).json()) as { tiers?: unknown };
+    sources = parseSources(body.tiers);
+  } catch {
+    // leave it empty
+  }
+  setState((s) => ({ ...s, sources }));
+}
+
+function parseSources(tiers: unknown): Record<string, Source[]> {
+  const out: Record<string, Source[]> = {};
+  if (!Array.isArray(tiers)) return out;
+  for (const t of tiers as { tier?: unknown; sources?: unknown }[]) {
+    if (typeof t?.tier !== "string" || !Array.isArray(t.sources)) continue;
+    out[t.tier] = (t.sources as Record<string, unknown>[])
+      .filter((x) => typeof x?.model === "string" && typeof x?.id === "string")
+      .map((x) => ({
+        id: x.id as string,
+        label: typeof x.label === "string" && x.label ? x.label : (x.id as string),
+        kind: typeof x.kind === "string" ? x.kind : "",
+        model: x.model as string,
+        remaining: typeof x.remaining === "number" ? x.remaining : null,
+        busy: typeof x.busy === "number" ? x.busy : 0,
+        available: x.available !== false,
+        pinnable: x.pinnable === true,
+      }));
+  }
+  return out;
 }
 
 /** Re-read the tier list (e.g. once provenance-core comes up after launch). */
@@ -100,9 +145,7 @@ export async function refreshTiers(): Promise<void> {
     const t = (await (await fetch("/api/tiers")).json()) as { tiers: string[] };
     if (!t.tiers?.length) return;
     setState((s) => {
-      const settings = { ...s.settings };
-      if (!t.tiers.includes(settings.model))
-        settings.model = t.tiers.includes("solstice") ? "solstice" : t.tiers[0];
+      const settings = { ...s.settings, model: validModel(s.settings.model, t.tiers) };
       return { ...s, settings, tiers: t.tiers };
     });
   } catch {
