@@ -93,6 +93,13 @@ file = "codex-rs/tui/src/app_server_session/provider_selection.rs"
 count = 1
 why = "default provider in provider selection"
 
+# ---- build ---------------------------------------------------------------------------
+
+[[hook]]
+file = "codex-rs/Cargo.toml"
+count = 1
+why = "workspace version 0.171.0 (the release the fork started from); upstream main keeps 0.0.0"
+
 # ---- dependency lines on codex-provenance -------------------------------------------
 
 [[hook]]
@@ -143,6 +150,7 @@ paths = [
     "codex-rs/*/src/provenance.rs",
     "docs/UPSTREAM.md",
     "scripts/sync-upstream.sh",
+    "scripts/provenance-smoke.py",
     "ui/",
     ".github/provenance-ui.png",
 ]
