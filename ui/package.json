@@ -22,7 +22,8 @@
     "build:electron": "node scripts/build-electron.mjs",
     "app:dev": "node scripts/build-electron.mjs && PROVENANCE_APP_VITE=1 electron .",
     "app:start": "npm run build && node scripts/build-electron.mjs && electron .",
-    "app:build": "npm run build && node scripts/build-electron.mjs && electron-builder --mac --arm64 --publish never",
+    "app:build": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && electron-builder --mac --arm64 --publish never",
+    "browser:fetch": "node scripts/fetch-browser.ts",
     "app:install": "node scripts/install-app.mjs",
     "app:e2e": "node scripts/app-e2e.ts"
   },
@@ -67,6 +68,12 @@
     "extraMetadata": {
       "main": "build-electron/main.cjs"
     },
+    "extraResources": [
+      {
+        "from": "vendor/browser",
+        "to": "browser"
+      }
+    ],
     "asar": true,
     "electronLanguages": [
       "en"
