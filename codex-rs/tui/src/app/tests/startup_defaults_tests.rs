@@ -465,7 +465,7 @@ requires_openai_auth = false
         }
         let defaults = crate::config_update::read_effective_config_with_layers(
             &server.request_handle(),
-            startup_config_cwd(&config, &server, &target)
+            startup_config_cwd(&config, &server, &target, /*resumed_cwd*/ None)
                 .display()
                 .to_string(),
         )
@@ -636,7 +636,7 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         )?;
         std::fs::write(
             server_home.path().join("config.toml"),
-            "model_reasoning_effort = \"high\"\nsandbox_mode = \"read-only\"\nmodel_reasoning_summary = \"concise\"\n",
+            "model_reasoning_effort = \"high\"\nsandbox_mode = \"read-only\"\nmodel_reasoning_summary = \"concise\"\n[model_providers.server-only]\nname = \"OpenAI\"\nwire_api = \"responses\"\n",
         )?;
         let mut config = ConfigBuilder::default()
             .codex_home(client_home.path().to_path_buf())
@@ -680,6 +680,16 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         } else {
             AppServerTarget::Embedded
         };
+        if remote {
+            assert_eq!(
+                startup_config_cwd(&config, &server, &target, Some(destination.path())),
+                if override_cwd {
+                    launch_cwd.path()
+                } else {
+                    destination.path()
+                },
+            );
+        }
         let bootstrap = server.bootstrap(&config).await?;
         assert_eq!(
             bootstrap.default_model.as_deref(),
@@ -687,7 +697,7 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         );
         let defaults = crate::config_update::read_effective_config_with_layers(
             &server.request_handle(),
-            startup_config_cwd(&config, &server, &target)
+            startup_config_cwd(&config, &server, &target, /*resumed_cwd*/ None)
                 .display()
                 .to_string(),
         )
@@ -702,6 +712,11 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
             &EnvironmentManager::default_for_tests(),
         );
         assert!(!defaults_read.prompt_windows_sandbox);
+        assert_eq!(
+            config.model_reasoning_summary,
+            Some(codex_protocol::config_types::ReasoningSummary::Concise)
+        );
+        assert!(config.model_providers["server-only"].is_openai());
         assert_eq!(config.model, None);
         let selected_model =
             startup_model(&config, &bootstrap, /*server_defaults_read*/ true)?;
@@ -717,15 +732,13 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         )
         .await?;
         assert_eq!(started.session.model, selected_model);
+        let cwd = started.session.cwd.to_path_buf();
         assert!(
             !started
                 .session
                 .permission_profile
                 .file_system_sandbox_policy()
-                .can_write_local_path_with_cwd(
-                    started.session.cwd.as_path(),
-                    started.session.cwd.as_path()
-                )
+                .can_write_local_path_with_cwd(&cwd, &cwd)
         );
         let starts = recorded_params(&requests, "thread/start");
         assert_eq!(starts.len(), if remote { 1 } else { 2 });
@@ -774,8 +787,12 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
     Ok(())
 }
 
-#[tokio::test]
-async fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<()> {
+#[test]
+fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<()> {
+    run_embedded_tui_scenario("tui-startup-after-trust", startup_after_directory_trust)
+}
+
+async fn startup_after_directory_trust() -> Result<()> {
     let home = tempdir()?;
     let destination = tempdir()?;
     std::fs::create_dir(destination.path().join(".git"))?;
@@ -834,8 +851,12 @@ async fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
+#[test]
+fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
+    run_embedded_tui_scenario("tui-startup-defaults", startup_with_server_defaults)
+}
+
+async fn startup_with_server_defaults() -> Result<()> {
     let client_home = tempdir()?;
     let server_home = tempdir()?;
     let projectless_cwd = tempdir()?;

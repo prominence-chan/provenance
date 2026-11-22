@@ -96,7 +96,10 @@ Any upstream Codex setting works in `~/.provenance/config.toml`. To use another 
   reasoning-summary parameter, standard JSON-schema function tools.
 - The startup update check is off by default, since it would point at upstream Codex releases.
 
-Everything else is upstream Codex. The patch is kept small so it rebases cleanly onto new upstream tags.
+Everything else is upstream Codex. The fork's settings (names, provider, tiers, model metadata, prompt overrides)
+live in [`codex-rs/provenance/harness.toml`](codex-rs/provenance/harness.toml); upstream code reaches them through
+one-line tagged hooks. [`docs/UPSTREAM.md`](docs/UPSTREAM.md) maps every hook and how to merge new
+upstream Codex (`scripts/sync-upstream.sh`).
 
 </details>
 
@@ -108,6 +111,7 @@ team. Not affiliated with or endorsed by OpenAI.
 
 ---
 
+<!-- PROVENANCE-HOOK: the fork's README ends here; upstream's README follows unchanged. -->
 <p align="center"><sub><b>Upstream README</b>: everything below is the original OpenAI Codex CLI README, kept as is.<br/>Commands there say <code>codex</code>; in this fork the binary is <code>provenance</code>.</sub></p>
 
 ---

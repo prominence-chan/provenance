@@ -97,13 +97,6 @@ fn is_h1_heading(line: &str) -> bool {
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub fn model_info_from_slug(slug: &str) -> ModelInfo {
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
-    fallback_model_info(slug)
-}
-
-/// Provenance: conservative metadata for non-OpenAI models (tierlm tiers and any
-/// unknown slug): 128k context, no reasoning-summary parameter, standard
-/// JSON-schema function tools.
-pub fn fallback_model_info(slug: &str) -> ModelInfo {
     ModelInfo {
         slug: slug.to_string(),
         display_name: slug.to_string(),
@@ -124,17 +117,16 @@ pub fn fallback_model_info(slug: &str) -> ModelInfo {
         include_skills_usage_instructions: false,
         include_plugin_usage_instructions: false,
         include_apps_usage_instructions: false,
-        supports_reasoning_summary_parameter: false,
-        default_reasoning_summary: ReasoningSummary::None,
+        supports_reasoning_summary_parameter: true,
+        default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
         apply_patch_tool_type: None,
         web_search_tool_type: WebSearchToolType::Text,
-        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
-        context_window: Some(128_000),
-        max_context_window: Some(128_000),
+        context_window: Some(272_000),
+        max_context_window: Some(272_000),
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,

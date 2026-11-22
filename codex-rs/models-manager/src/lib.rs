@@ -20,30 +20,6 @@ pub fn bundled_models_response()
     serde_json::from_str(include_str!("../models.json"))
 }
 
-/// Provenance: the tierlm strength tiers offered by the built-in `tierlm` provider.
-pub fn tierlm_models_response() -> codex_protocol::openai_models::ModelsResponse {
-    const TIERS: [(&str, &str, &str); 4] = [
-        ("nova", "Nova", "Hyperfrontier: strongest pooled models"),
-        ("solstice", "Solstice", "Frontier: default for everyday coding"),
-        ("ember", "Ember", "Strong mid tier: capable, plentiful"),
-        ("spark", "Spark", "Fast: small models for quick tasks"),
-    ];
-    let models = TIERS
-        .into_iter()
-        .zip(1..)
-        .map(|((slug, display_name, description), priority)| {
-            codex_protocol::openai_models::ModelInfo {
-                display_name: display_name.to_string(),
-                description: Some(description.to_string()),
-                visibility: codex_protocol::openai_models::ModelVisibility::List,
-                priority,
-                ..model_info::fallback_model_info(slug)
-            }
-        })
-        .collect();
-    codex_protocol::openai_models::ModelsResponse { models }
-}
-
 /// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
 pub fn client_version_to_whole() -> String {
     format!(
@@ -53,3 +29,6 @@ pub fn client_version_to_whole() -> String {
         env!("CARGO_PKG_VERSION_PATCH")
     )
 }
+
+// PROVENANCE-HOOK: the fork's tier catalog and fallback metadata (src/provenance.rs).
+pub mod provenance;

@@ -11,7 +11,12 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# PROVENANCE-HOOK: the fork's settings crate (docs/UPSTREAM.md).
+[dependencies.codex-provenance]
+path = "../provenance"
+
 [dependencies]
+codex-thread-context-ids = { workspace = true }
 codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
@@ -72,6 +77,7 @@ codex-skills-extension = { workspace = true }
 codex-state = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-thread-store = { workspace = true }
+codex-tool-call-id = { workspace = true }
 codex-tools = { workspace = true }
 codex-user-input = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
@@ -142,6 +148,7 @@ openssl-sys = { workspace = true, features = ["vendored"] }
 openssl-sys = { workspace = true, features = ["vendored"] }
 
 [dev-dependencies]
+codex-thread-context-ids-test-support = { workspace = true }
 codex-backend-client = { workspace = true }
 codex-message-board = { workspace = true }
 codex-agent-message-board-host = { workspace = true }
@@ -191,4 +198,6 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 
 [package.metadata.cargo-shear]
 ignored = ["openssl-sys"]
-ignored-paths = ["tests/remote_env_windows/*.rs"]
+ignored-paths = [
+    "tests/remote_env_windows/*.rs",
+]

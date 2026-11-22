@@ -1,0 +1,156 @@
+# Every upstream file the fork edits, and how many `PROVENANCE-HOOK` tags it carries.
+#
+# `cargo test -p codex-provenance --test hooks` and scripts/sync-upstream.sh check this list
+# against the tree: a hook lost in a merge, a tag in an unlisted file, or a count that
+# changed all fail. When you add a hook, tag it and add or bump its entry here.
+# docs/UPSTREAM.md explains each one.
+#
+# Paths are relative to the repository root.
+
+# ---- branding ----------------------------------------------------------------------
+
+[[hook]]
+file = "codex-rs/cli/Cargo.toml"
+count = 3
+why = "binary named provenance (default-run, [[bin]] name); codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/cli/src/main.rs"
+count = 2
+why = "clap name/bin_name/usage/about from [branding]; shell-completion command name"
+
+[[hook]]
+file = "codex-rs/tui/src/history_cell/session.rs"
+count = 2
+why = "TUI session header says the product name"
+
+[[hook]]
+file = "codex-rs/exec/src/event_processor_with_human_output.rs"
+count = 1
+why = "`exec` banner says the product name"
+
+[[hook]]
+file = "README.md"
+count = 1
+why = "marks where the fork's README section ends and upstream's README begins"
+
+# ---- config home -------------------------------------------------------------------
+
+[[hook]]
+file = "codex-rs/arg0/src/lib.rs"
+count = 1
+why = "export PROVENANCE_HOME (default ~/.provenance) as CODEX_HOME at startup"
+
+[[hook]]
+file = "codex-rs/utils/home-dir/src/lib.rs"
+count = 2
+why = "default config home ~/.provenance instead of ~/.codex (and its upstream test)"
+
+# ---- default provider, model, catalog ----------------------------------------------
+
+[[hook]]
+file = "codex-rs/core/src/config/mod.rs"
+count = 4
+why = "default provider, default tier, update check off, tier catalog"
+
+[[hook]]
+file = "codex-rs/model-provider-info/src/lib.rs"
+count = 2
+why = "built-in tierlm provider entry; `pub mod provenance`"
+
+[[hook]]
+file = "codex-rs/models-manager/src/lib.rs"
+count = 1
+why = "`pub mod provenance` (tier catalog, fallback metadata)"
+
+[[hook]]
+file = "codex-rs/models-manager/src/manager.rs"
+count = 1
+why = "unknown models get the harness's [model_defaults] over upstream's fallback"
+
+[[hook]]
+file = "codex-rs/app-server/src/config_manager.rs"
+count = 1
+why = "default provider when validating a saved route"
+
+[[hook]]
+file = "codex-rs/app-server/src/config_manager_service_model_providers.rs"
+count = 1
+why = "default provider reported by the model-providers service"
+
+[[hook]]
+file = "codex-rs/tui/src/app/agents_overview.rs"
+count = 1
+why = "default provider for embedded thread/start"
+
+[[hook]]
+file = "codex-rs/tui/src/app_server_session/account.rs"
+count = 1
+why = "default provider when checking auth capabilities"
+
+[[hook]]
+file = "codex-rs/tui/src/app_server_session/provider_selection.rs"
+count = 1
+why = "default provider in provider selection"
+
+# ---- build ---------------------------------------------------------------------------
+
+[[hook]]
+file = "codex-rs/Cargo.toml"
+count = 1
+why = "workspace version 0.171.0 (the release the fork started from); upstream main keeps 0.0.0"
+
+# ---- dependency lines on codex-provenance -------------------------------------------
+
+[[hook]]
+file = "codex-rs/app-server/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/arg0/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/core/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/exec/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/model-provider-info/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/models-manager/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/tui/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+[[hook]]
+file = "codex-rs/utils/home-dir/Cargo.toml"
+count = 1
+why = "codex-provenance dependency"
+
+# Paths the fork owns outright: never in upstream, so they never conflict. Globs: `*`
+# matches within one path segment, a trailing `/` means the whole directory.
+[owned]
+paths = [
+    "codex-rs/provenance/",
+    "codex-rs/*/src/provenance.rs",
+    "docs/UPSTREAM.md",
+    "scripts/sync-upstream.sh",
+    "scripts/provenance-smoke.py",
+    "ui/",
+    ".github/provenance-ui.png",
+]
