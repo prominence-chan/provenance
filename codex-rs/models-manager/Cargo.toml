@@ -12,6 +12,10 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# PROVENANCE-HOOK: the fork's settings crate (docs/UPSTREAM.md).
+[dependencies.codex-provenance]
+path = "../provenance"
+
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 codex-http-client = { workspace = true }

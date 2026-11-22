@@ -21,6 +21,10 @@ doctest = false
 [lints]
 workspace = true
 
+# PROVENANCE-HOOK: the fork's settings crate (docs/UPSTREAM.md).
+[dependencies.codex-provenance]
+path = "../provenance"
+
 [dependencies]
 codex-build-info = { workspace = true }
 anyhow = { workspace = true }

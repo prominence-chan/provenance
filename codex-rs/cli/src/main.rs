@@ -112,7 +112,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
 
-/// Provenance: a Codex CLI fork that runs on tierlm's pooled model tiers
+/// Codex CLI
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
 #[derive(Debug, Parser)]
@@ -124,9 +124,12 @@ use codex_terminal_detection::TerminalName;
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
     // the generic `codex` command name that users run.
-    name = "provenance",
-    bin_name = "provenance",
-    override_usage = "provenance [OPTIONS] [PROMPT]\n       provenance [OPTIONS] <COMMAND> [ARGS]"
+    // PROVENANCE-HOOK: branding from codex-rs/provenance/harness.toml.
+    name = codex_provenance::bin_name(),
+    bin_name = codex_provenance::bin_name(),
+    override_usage = codex_provenance::cli_usage(),
+    about = codex_provenance::cli_about(),
+    long_about = codex_provenance::cli_long_about()
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -2798,7 +2801,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
 
 fn print_completion(cmd: CompletionCommand) {
     let mut app = MultitoolCli::command();
-    let name = "provenance";
+    let name = codex_provenance::bin_name(); // PROVENANCE-HOOK
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
 }
 

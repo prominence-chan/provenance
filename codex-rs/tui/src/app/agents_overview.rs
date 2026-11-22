@@ -1378,9 +1378,10 @@ impl App {
                 );
                 // Embedded thread/start sends a provider ID alongside the selected model.
                 if use_server_provider {
-                    config.model_provider_id = defaults.model_provider.unwrap_or_else(|| {
-                        codex_model_provider_info::TIERLM_PROVIDER_ID.to_string()
-                    });
+                    config.model_provider_id = defaults
+                        .model_provider
+                        // PROVENANCE-HOOK: the fork's provider when config names none.
+                        .unwrap_or_else(|| codex_provenance::default_provider("openai").into());
                 }
             }
             Ok(None) => {}

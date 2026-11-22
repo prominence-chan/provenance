@@ -1242,7 +1242,7 @@ fn construct_model_info(
     config: &ModelsManagerConfig,
 ) -> CatalogModel {
     let mut resolved = remote.unwrap_or_else(|| CatalogModel {
-        model: model_info::model_info_from_slug(model).into(),
+        model: crate::provenance::fallback_model_info(model).into(), // PROVENANCE-HOOK
         origin: ModelOrigin::Synthetic,
     });
     let mut metadata = Arc::unwrap_or_clone(resolved.model);

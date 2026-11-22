@@ -106,8 +106,6 @@ use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
-use codex_model_provider_info::TIERLM_DEFAULT_MODEL;
-use codex_model_provider_info::TIERLM_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -4148,7 +4146,8 @@ impl Config {
         let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
             .or(model_provider)
             .or(cfg.model_provider)
-            .unwrap_or_else(|| TIERLM_PROVIDER_ID.to_string());
+            // PROVENANCE-HOOK: the fork's provider when config names none.
+            .unwrap_or_else(|| codex_provenance::default_provider("openai").to_string());
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -4298,9 +4297,9 @@ impl Config {
 
         let forced_login_method = cfg.forced_login_method;
 
-        let model = model.or(cfg.model).or_else(|| {
-            (model_provider_id == TIERLM_PROVIDER_ID).then(|| TIERLM_DEFAULT_MODEL.to_string())
-        });
+        let model = model.or(cfg.model);
+        // PROVENANCE-HOOK: the default tier when config and flags name no model.
+        let model = model.or_else(|| codex_provenance::default_model(&model_provider_id));
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
@@ -4445,11 +4444,15 @@ impl Config {
         let compact_prompt = compact_prompt.or(file_compact_prompt);
         let review_model = override_review_model.or(cfg.review_model);
 
-        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(false);
-        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?.or_else(|| {
-            (model_provider_id == TIERLM_PROVIDER_ID)
-                .then(codex_models_manager::tierlm_models_response)
-        });
+        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
+        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
+        // PROVENANCE-HOOK: no upstream update check by default.
+        let check_for_update_on_startup = cfg
+            .check_for_update_on_startup
+            .unwrap_or(codex_provenance::check_for_update_on_startup(check_for_update_on_startup));
+        // PROVENANCE-HOOK: the tier catalog when config sets no model_catalog_json.
+        let model_catalog = model_catalog
+            .or_else(|| codex_models_manager::provenance::catalog_for_provider(&model_provider_id));
 
         let log_dir = cfg
             .log_dir

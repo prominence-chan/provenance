@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# PROVENANCE-HOOK: the fork's settings crate (docs/UPSTREAM.md).
+[dependencies.codex-provenance]
+path = "../provenance"
+
 [dependencies]
 codex-utils-process = { workspace = true }
 anyhow = { workspace = true }

@@ -2153,6 +2153,7 @@ dependencies = [
  "codex-plugin",
  "codex-prompts",
  "codex-protocol",
+ "codex-provenance",
  "codex-queue-extension",
  "codex-rmcp-client",
  "codex-rollout",
@@ -2424,6 +2425,7 @@ dependencies = [
  "codex-exec-server",
  "codex-install-context",
  "codex-linux-sandbox",
+ "codex-provenance",
  "codex-sandboxing",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
@@ -2614,6 +2616,7 @@ dependencies = [
  "codex-multi-env-copy-file",
  "codex-plugin",
  "codex-protocol",
+ "codex-provenance",
  "codex-responses-api-proxy",
  "codex-rmcp-client",
  "codex-rollout",
@@ -3078,6 +3081,7 @@ dependencies = [
  "codex-prompts",
  "codex-protocol",
  "codex-protocol-test-support",
+ "codex-provenance",
  "codex-response-debug-context",
  "codex-rmcp-client",
  "codex-rollout",
@@ -3309,6 +3313,7 @@ dependencies = [
  "codex-model-provider-info",
  "codex-otel",
  "codex-protocol",
+ "codex-provenance",
  "codex-rollout",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
@@ -4442,6 +4447,7 @@ dependencies = [
  "codex-client",
  "codex-http-client",
  "codex-protocol",
+ "codex-provenance",
  "codex-utils-absolute-path",
  "codex-utils-redacted-string",
  "http 1.4.0",
@@ -4463,6 +4469,7 @@ dependencies = [
  "codex-otel",
  "codex-prompts",
  "codex-protocol",
+ "codex-provenance",
  "codex-utils-output-truncation",
  "pretty_assertions",
  "serde",
@@ -4753,6 +4760,25 @@ version = "0.171.0"
 dependencies = [
  "codex-protocol",
  "uuid",
+]
+
+[[package]]
+name = "codex-provenance"
+version = "0.171.0"
+dependencies = [
+ "codex-config",
+ "codex-core",
+ "codex-model-provider-info",
+ "codex-models-manager",
+ "codex-protocol",
+ "codex-utils-home-dir",
+ "dirs",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]
@@ -5280,6 +5306,7 @@ dependencies = [
  "codex-prompts",
  "codex-protocol",
  "codex-protocol-test-support",
+ "codex-provenance",
  "codex-realtime-webrtc",
  "codex-rollout",
  "codex-sandboxing",
@@ -5526,6 +5553,7 @@ dependencies = [
 name = "codex-utils-home-dir"
 version = "0.171.0"
 dependencies = [
+ "codex-provenance",
  "codex-utils-absolute-path",
  "dirs",
  "pretty_assertions",

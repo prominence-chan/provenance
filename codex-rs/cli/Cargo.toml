@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
-default-run = "provenance"
+default-run = "provenance" # PROVENANCE-HOOK: binary name ([branding] bin_name)
 
 [[bin]]
-name = "provenance"
+name = "provenance" # PROVENANCE-HOOK: binary name ([branding] bin_name)
 path = "src/main.rs"
 
 [[bin]]
@@ -25,6 +25,10 @@ doctest = false
 
 [lints]
 workspace = true
+
+# PROVENANCE-HOOK: the fork's settings crate (docs/UPSTREAM.md).
+[dependencies.codex-provenance]
+path = "../provenance"
 
 [dependencies]
 codex-utils-process = { workspace = true }

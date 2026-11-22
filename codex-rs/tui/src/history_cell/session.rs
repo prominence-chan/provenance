@@ -44,7 +44,7 @@ pub(crate) fn with_border_with_inner_width(
 pub(crate) fn codex_title(version: &str) -> Vec<Span<'static>> {
     vec![
         ">_ ".fg(accent_color()),
-        "Provenance".bold(),
+        codex_provenance::product_name().bold(), // PROVENANCE-HOOK
         format!(" (v{version})").dim(),
     ]
 }
@@ -406,7 +406,12 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(format!("Provenance (v{})", self.version)),
+            // PROVENANCE-HOOK: product name in the header.
+            Line::from(format!(
+                "{} (v{})",
+                codex_provenance::product_name(),
+                self.version
+            )),
             Line::from(format!(
                 "model: {}{}",
                 self.model,
