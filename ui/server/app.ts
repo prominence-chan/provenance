@@ -3,9 +3,10 @@
 //   - GET /api/info    -> defaults for the UI (cwd, binary, tiers source)
 //   - GET /api/tiers   -> tier list from tierlm (/v1/models, owned_by=tierlm)
 //   - GET /api/sources -> each tier's sources and usage left (provenance-core /v1/sources)
-//   - GET /api/health  -> is the provenance binary there, is provenance-core up
+//   - GET /api/health  -> is the provenance binary there, is provenance-core up (and whose it is)
 //   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage)
-//   - /api/web/*       -> provenance-core's sign-in API (/web/*: accounts, sign-in window, browser)
+//   - /api/web/*, /api/pool/* -> provenance-core's setup API (accounts, sign-in window, browser,
+//                        per-site settings, API keys); the routes are shared/router-api.ts's table
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
 //
 // Used by server/main.ts (the `npm run dev` / `npm start` CLI) and by the desktop
@@ -15,16 +16,25 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { WebSocketServer } from "ws";
+import {
+  ROUTER_ROUTES,
+  type RouterInfo,
+  type UiHealth,
+  type WireHealth,
+} from "../shared/router-api.ts";
 import { AppServerBridge } from "./bridge.ts";
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
 const FALLBACK_TIERS = ["nova", "solstice", "ember", "spark"];
 const DEFAULT_TIER = "solstice";
 
-export interface RouterStatus {
-  up: boolean;
-  /** e.g. "starting provenance-core…" or why it couldn't be started. */
-  message?: string;
+/** What the host knows about the router beyond what it answers (the app starting its own). */
+export type RouterStatus = Pick<RouterInfo, "up" | "message" | "mode">;
+
+/** Where provenance-core is, and the bearer token it wants (the app's own router has one). */
+export interface RouterConnection {
+  url: string;
+  token?: string;
 }
 
 export interface UiServerOptions {
@@ -35,7 +45,10 @@ export interface UiServerOptions {
   port: number;
   host: string;
   bin: string;
-  tierlmUrl: string;
+  /** The router, or a getter for it: the app's own router can move to another port on a restart. */
+  router: RouterConnection | (() => RouterConnection);
+  /** Extra environment for `provenance app-server` (e.g. PROVENANCE_HOME for a scratch run). */
+  appServerEnv?: NodeJS.ProcessEnv;
   /** Returns the current default cwd and whether it came from a launcher. */
   cwd: () => { defaultCwd: string; fromLauncher: boolean };
   /** Extra router state from the host (e.g. the app trying to start it). */
@@ -51,7 +64,17 @@ export interface UiServer {
 }
 
 export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
-  const tierlmUrl = opts.tierlmUrl.replace(/\/$/, "");
+  const conn = (): RouterConnection => {
+    const c = typeof opts.router === "function" ? opts.router() : opts.router;
+    return { url: c.url.replace(/\/$/, ""), token: c.token };
+  };
+  /** fetch() to the router, with its token when it has one. */
+  const routerFetch = (path: string, init: RequestInit = {}): Promise<Response> => {
+    const { url, token } = conn();
+    const headers = new Headers(init.headers);
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    return fetch(`${url}${path}`, { ...init, headers });
+  };
   const bridge = new AppServerBridge({
     bin: opts.bin,
     clientInfo: {
@@ -59,12 +82,18 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       title: opts.clientTitle ?? "Provenance UI",
       version: "0.1.0",
     },
+    // app-server's built-in tierlm provider reads these at start (codex-rs model-provider-info:
+    // TIERLM_BASE_URL, TIERLM_TOKEN), so the agent always talks to the same router as this page.
+    env: () => {
+      const { url, token } = conn();
+      return { ...opts.appServerEnv, TIERLM_BASE_URL: `${url}/v1`, TIERLM_TOKEN: token ?? "" };
+    },
   });
   bridge.start();
 
   async function fetchTiers(): Promise<{ tiers: string[]; source: string }> {
     try {
-      const res = await fetch(`${tierlmUrl}/v1/models`, { signal: AbortSignal.timeout(2000) });
+      const res = await routerFetch("/v1/models", { signal: AbortSignal.timeout(2000) });
       const body = (await res.json()) as { data?: { id: string; owned_by?: string }[] };
       const tiers = (body.data ?? []).filter((m) => m.owned_by === "tierlm").map((m) => m.id);
       if (tiers.length) return { tiers, source: "tierlm" };
@@ -74,12 +103,19 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     return { tiers: FALLBACK_TIERS, source: "fallback" };
   }
 
-  async function routerUp(): Promise<boolean> {
+  /** Up, and which router it is (its /health; an older router without it only says it's up). */
+  async function routerInfo(): Promise<RouterInfo> {
+    const url = conn().url;
     try {
-      const res = await fetch(`${tierlmUrl}/v1/models`, { signal: AbortSignal.timeout(1500) });
-      return res.ok;
+      const res = await routerFetch("/health", { signal: AbortSignal.timeout(1500) });
+      if (res.ok) {
+        const h = (await res.json()) as Partial<WireHealth>;
+        return { url, up: true, pid: h.pid, home: h.home, version: h.version };
+      }
+      const models = await routerFetch("/v1/models", { signal: AbortSignal.timeout(1500) });
+      return { url, up: models.ok };
     } catch {
-      return false;
+      return { url, up: false };
     }
   }
 
@@ -89,23 +125,14 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   }
 
   /**
-   * /api/web/<route> -> provenance-core's /web/<route>: the sign-in API behind "Models &
-   * accounts" (accounts, one sign-in window, the bundled browser). Only these routes pass,
-   * with the router's status and body as-is (a 409's {detail} included). Router down:
-   * 502 {detail, down: true}. Writes must come from our own page (a JSON body and our
-   * Origin), since they open windows and change accounts.
+   * /api/web/<route>, /api/pool/<route> -> provenance-core's own: the setup API behind
+   * "Models & accounts" (accounts, one sign-in window, the bundled browser, per-site
+   * settings, API keys). Only the routes in ROUTER_ROUTES pass, with the router's status and
+   * body as-is (a 409's {detail} included). Router down: 502 {detail, down: true}. Writes
+   * must come from our own page (a JSON body and our Origin), since they open windows,
+   * change accounts and store keys. Bodies are never logged (a PUT carries an API key).
    */
-  const WEB_ROUTES: { method: string; path: RegExp }[] = [
-    { method: "GET", path: /^\/web\/accounts$/ },
-    { method: "POST", path: /^\/web\/accounts$/ },
-    { method: "DELETE", path: /^\/web\/accounts\/[A-Za-z0-9_.-]+$/ },
-    { method: "GET", path: /^\/web\/login$/ },
-    { method: "POST", path: /^\/web\/login$/ },
-    { method: "POST", path: /^\/web\/login\/cancel$/ },
-    { method: "POST", path: /^\/web\/browser\/prepare$/ },
-  ];
-
-  async function proxyWeb(
+  async function proxyRouter(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     url: URL,
@@ -116,7 +143,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(body));
     };
-    if (!WEB_ROUTES.some((r) => r.method === method && r.path.test(routerPath))) {
+    if (!ROUTER_ROUTES.some((r) => r.method === method && r.path.test(routerPath))) {
       reply(404, { detail: "Not Found" });
       return;
     }
@@ -126,7 +153,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         reply(403, { detail: "Forbidden" });
         return;
       }
-      if (method === "POST") {
+      if (method !== "DELETE") {
         if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) {
           reply(415, { detail: "Send JSON" });
           return;
@@ -143,7 +170,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       }
     }
     try {
-      const r = await fetch(`${tierlmUrl}${routerPath}${url.search}`, {
+      const r = await routerFetch(`${routerPath}${url.search}`, {
         method,
         body,
         headers: body ? { "content-type": "application/json" } : undefined,
@@ -171,7 +198,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         cwdFromLauncher: fromLauncher,
         bin: opts.bin,
         defaultTier: DEFAULT_TIER,
-        tierlmUrl,
+        tierlmUrl: conn().url,
       });
       return true;
     }
@@ -183,7 +210,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       // Which sources serve each tier (pool, web models) and how much each has left.
       // Router down or without /v1/sources: no tiers, and the picker shows plain tiers.
       try {
-        const r = await fetch(`${tierlmUrl}/v1/sources`, { signal: AbortSignal.timeout(2000) });
+        const r = await routerFetch("/v1/sources", { signal: AbortSignal.timeout(2000) });
         const body = r.ok ? ((await r.json()) as { tiers?: unknown }) : null;
         if (Array.isArray(body?.tiers)) {
           sendJson(res, { tiers: body.tiers, source: "tierlm" });
@@ -195,17 +222,18 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       sendJson(res, { tiers: [], source: "fallback" });
       return true;
     }
-    if (url.pathname.startsWith("/api/web/")) {
-      await proxyWeb(req, res, url);
+    if (url.pathname.startsWith("/api/web/") || url.pathname.startsWith("/api/pool/")) {
+      await proxyRouter(req, res, url);
       return true;
     }
     if (url.pathname === "/api/health") {
-      const up = await routerUp();
+      const info = await routerInfo();
       const extra = opts.routerStatus?.();
-      sendJson(res, {
+      const body: UiHealth = {
         bin: { path: opts.bin, exists: existsSync(opts.bin) },
-        router: { url: tierlmUrl, up, message: up ? undefined : extra?.message },
-      });
+        router: { ...info, mode: extra?.mode, message: info.up ? undefined : extra?.message },
+      };
+      sendJson(res, body);
       return true;
     }
     if (url.pathname === "/api/usage") {
@@ -216,7 +244,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         if (v) q.set(k, v);
       }
       try {
-        const r = await fetch(`${tierlmUrl}/v1/pcore/usage?${q}`, {
+        const r = await routerFetch(`/v1/pcore/usage?${q}`, {
           signal: AbortSignal.timeout(3000),
         });
         sendJson(res, r.ok ? await r.json() : { models: [], unavailable: r.status });

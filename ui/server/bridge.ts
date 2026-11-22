@@ -37,6 +37,8 @@ export interface BridgeOptions {
   bin: string;
   args?: string[];
   clientInfo: { name: string; title: string | null; version: string };
+  /** Extra environment, read at every start (the router's URL can change between starts). */
+  env?: () => NodeJS.ProcessEnv;
   log?: (...args: unknown[]) => void;
 }
 
@@ -73,6 +75,16 @@ export class AppServerBridge {
     this.stopped = true;
     this.child?.kill();
     this.child = null;
+  }
+
+  /** Start a fresh app-server now (it reads its environment, e.g. the router's URL, at start). */
+  restart(): void {
+    const old = this.child;
+    this.child = null; // its exit handler then does nothing
+    old?.kill();
+    this.failPending("app-server restarted");
+    this.attempt = 0;
+    if (!this.stopped) void this.launch();
   }
 
   // ---- client side -------------------------------------------------------
@@ -153,7 +165,7 @@ export class AppServerBridge {
 
     const child = spawn(this.opts.bin, ["app-server", ...(this.opts.args ?? [])], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: { ...process.env, ...this.opts.env?.() },
     });
     this.child = child;
     const gen = ++this.generation;
