@@ -1,0 +1,127 @@
+// Builds vendor/agent/ (git-ignored): the `provenance` binary Provenance.app ships, so someone
+// with only the app can run threads. electron-builder copies it to
+// Provenance.app/Contents/Resources/agent/ (`extraResources` in package.json); the app uses it
+// when PROVENANCE_BIN is unset, settings.json names no provenanceBin and ~/.local/bin/provenance
+// does not exist (electron/main.ts, resolveAgent).
+//
+//   node scripts/fetch-agent.ts               # part of `npm run app:build`
+//   AGENT_BIN=/path/to/provenance ...         # default: this checkout's release build,
+//                                             # ../codex-rs/target/release/provenance
+//
+// The copy is stripped (symbols and line tables: 432 MB -> 285 MB for 0.171.0) and ad-hoc signed again (strip
+// rewrites the binary; Apple Silicon only runs signed arm64 code), then checked: it runs, it
+// is a provenance binary, and the protocol types it generates match src/protocol/generated (a
+// warning if not: run `npm run gen:protocol` with this binary).
+//
+// What ends up in vendor/agent/:
+//   provenance     the stripped, signed binary
+//   VERSION.json   its version, size, sha256, and what it was made from (also how a rebuild is skipped)
+
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const src = path.resolve(
+  process.env.AGENT_BIN ?? path.join(root, "../codex-rs/target/release/provenance"),
+);
+const dest = path.join(root, "vendor/agent");
+const bin = path.join(dest, "provenance");
+const stamp = path.join(dest, "VERSION.json");
+const log = (...a: unknown[]) => console.log("[fetch-agent]", ...a);
+
+if (!existsSync(src)) {
+  console.error(
+    `[fetch-agent] ${src} not found. Build it first (cd codex-rs && cargo build --release -p codex-cli --bin provenance -j 4), or set AGENT_BIN.`,
+  );
+  process.exit(1);
+}
+
+const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+const srcSha = sha256(src);
+
+let old: { sourceSha256?: string } = {};
+try {
+  old = JSON.parse(readFileSync(stamp, "utf8"));
+} catch {
+  // none yet
+}
+if (old.sourceSha256 === srcSha && existsSync(bin)) {
+  log(`vendor/agent is up to date (${src})`);
+} else {
+  mkdirSync(dest, { recursive: true });
+  const tmp = `${bin}.tmp`;
+  copyFileSync(src, tmp);
+  execFileSync("strip", [tmp]); // everything: a release binary's line tables are most of it
+  execFileSync("codesign", ["--force", "--sign", "-", "--timestamp=none", tmp]);
+  renameSync(tmp, bin);
+  const version = execFileSync(bin, ["--version"], { encoding: "utf8" }).trim();
+  if (!/^provenance \d/.test(version)) {
+    rmSync(bin);
+    console.error(`[fetch-agent] ${src} says "${version}": not a provenance binary`);
+    process.exit(1);
+  }
+  const info = {
+    version,
+    size: statSync(bin).size,
+    sha256: sha256(bin),
+    source: src,
+    sourceSize: statSync(src).size,
+    sourceSha256: srcSha,
+    built: new Date().toISOString(),
+  };
+  writeFileSync(stamp, JSON.stringify(info, null, 2) + "\n");
+  log(
+    `${version}: ${(info.sourceSize / 1e6).toFixed(0)} MB -> ${(info.size / 1e6).toFixed(0)} MB stripped, from ${src}`,
+  );
+}
+
+// The app's protocol types should be the ones this binary speaks.
+const gen = mkdtempSync(path.join(tmpdir(), "provenance-agent-types-"));
+try {
+  const r = spawnSync(bin, ["app-server", "generate-ts", "--experimental", "--out", gen], {
+    stdio: "ignore",
+  });
+  if (r.status !== 0) throw new Error(`generate-ts exited ${r.status}`);
+  const committed = path.join(root, "src/protocol/generated");
+  const differ = diffTrees(gen, committed);
+  if (differ.length)
+    log(
+      `WARNING: src/protocol/generated does not match this binary (${differ.length} files, e.g. ${differ.slice(0, 3).join(", ")}): PROVENANCE_BIN=${bin} npm run gen:protocol`,
+    );
+  else log("protocol types match src/protocol/generated");
+} finally {
+  rmSync(gen, { recursive: true, force: true });
+}
+
+function diffTrees(a: string, b: string): string[] {
+  const files = (dir: string, rel = ""): string[] =>
+    readdirSync(path.join(dir, rel), { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? files(dir, path.join(rel, e.name)) : [path.join(rel, e.name)],
+    );
+  const left = new Set(files(a));
+  const right = existsSync(b) ? new Set(files(b)) : new Set<string>();
+  const out: string[] = [];
+  for (const f of new Set([...left, ...right]))
+    if (
+      !left.has(f) ||
+      !right.has(f) ||
+      !readFileSync(path.join(a, f)).equals(readFileSync(path.join(b, f)))
+    )
+      out.push(f);
+  return out.sort();
+}

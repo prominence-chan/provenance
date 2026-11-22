@@ -23,12 +23,14 @@
     "build:electron": "node scripts/build-electron.mjs",
     "app:dev": "node scripts/build-electron.mjs && PROVENANCE_APP_VITE=1 electron .",
     "app:start": "npm run build && node scripts/build-electron.mjs && electron .",
-    "app:build": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && electron-builder --mac --arm64 --publish never",
+    "app:build": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && node scripts/fetch-agent.ts && electron-builder --mac --arm64 --publish never",
     "browser:fetch": "node scripts/fetch-browser.ts",
     "router:fetch": "node scripts/fetch-router.ts",
+    "agent:fetch": "node scripts/fetch-agent.ts",
     "app:install": "node scripts/install-app.mjs",
     "app:e2e": "node scripts/app-e2e.ts",
-    "app:check:router": "node scripts/app-router-check.ts"
+    "app:check:router": "node scripts/app-router-check.ts",
+    "app:check:fresh": "node scripts/app-fresh-check.ts"
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -82,6 +84,14 @@
         "filter": [
           "**/*",
           "!.python-stamp"
+        ]
+      },
+      {
+        "from": "vendor/agent",
+        "to": "agent",
+        "filter": [
+          "provenance",
+          "VERSION.json"
         ]
       }
     ],

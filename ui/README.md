@@ -51,7 +51,8 @@ Requires Node >= 23.6: the server and scripts are `.ts` files run directly by No
 parameter properties).
 
 Env vars (server): `PORT` (5173), `HOST` (127.0.0.1), `PROVENANCE_BIN`
-(`~/.local/bin/provenance`), `PROVENANCE_UI_CWD` (default cwd, `$HOME` otherwise),
+(`~/.local/bin/provenance`; the desktop app also falls back to its own copy, see
+[Which provenance binary](#which-provenance-binary)), `PROVENANCE_UI_CWD` (default cwd, `$HOME` otherwise),
 `TIERLM_URL` (`http://127.0.0.1:4141`), `PCORE_TOKEN` (the router's bearer token, if it has one).
 The server starts app-server with `TIERLM_BASE_URL=<router>/v1` and `TIERLM_TOKEN`, which its
 built-in `tierlm` provider reads (`codex-rs/model-provider-info`), so the agent and the page always
@@ -68,8 +69,9 @@ localStorage, i.e. tier, theme and collapsed projects, survives relaunches; if t
 it falls back to a random one).
 
 ```sh
-npm run app:build     # dist/ + build-electron/ + vendor/browser/ + vendor/router/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
+npm run app:build     # dist/ + build-electron/ + vendor/browser/ + vendor/router/ + vendor/agent/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
 npm run app:check:router  # the packaged app's own router, with no window (below)
+npm run app:check:fresh   # a brand-new user's first run of the packaged app, with no window (below)
 npm run app:install   # copy it to /Applications/Provenance.app (quits a running copy first)
 npm run app:e2e       # Playwright drives the installed app: window, health, a real "reply with just ok" turn
 npm run app:dev       # run Electron from the checkout with Vite + HMR (DevTools in the View menu)
@@ -119,7 +121,7 @@ Files, all in `~/Library/Application Support/Provenance/`:
 | `logs/provenance-core.log` | the app's own router (one older copy kept as `.1` past 5 MB)                                                                                   |
 | `router/`                  | the app's own router's home (`PCORE_HOME`): accounts and sign-ins, `settings.json`, `keys.json` (0600), browser profiles, the prepared browser |
 
-`settings.json` keys (defaults): `provenanceBin` (`~/.local/bin/provenance`), `routerUrl`
+`settings.json` keys (defaults): `provenanceBin` (empty: see [Which provenance binary](#which-provenance-binary)), `routerUrl`
 (`http://127.0.0.1:4141`: where your own router answers, if you run one), `router` (`auto`: the
 router at `routerUrl` if it answers at launch, else the app's own; `external`: only `routerUrl`;
 `bundled`: always the app's own), `routerLaunchdLabel` (empty; a launchd agent running your own
@@ -154,6 +156,34 @@ pip and headers are removed; everything is compiled ahead (unchecked-hash `.pyc`
 into `vendor/.cache/` and rebuilding the wheels only when the pins change. It adds ~96 MB to the
 app (~33 MB to the DMG).
 
+**Bundled agent:** `Contents/Resources/agent/provenance` is the `provenance` binary itself, so
+someone with only the app can run threads. `scripts/fetch-agent.ts` (run by `app:build`, or
+`npm run agent:fetch`) copies this checkout's release build (`../codex-rs/target/release/provenance`;
+`AGENT_BIN=` another) into `vendor/agent/`, strips it (symbols and line tables: 432 MB -> 285 MB),
+ad-hoc signs it again, checks it runs, writes `VERSION.json`, and warns when
+`src/protocol/generated` doesn't match the types it generates. Build it first:
+`cd codex-rs && cargo build --release -p codex-cli --bin provenance -j 4`.
+
+#### Which provenance binary
+
+The app runs `provenance app-server` from the first of:
+
+1. `PROVENANCE_BIN` (env), then `provenanceBin` in `settings.json` when set: used as given,
+   even if missing (the banner says so);
+2. `~/.local/bin/provenance`, when it exists;
+3. the binary inside the app, `Contents/Resources/agent/provenance`.
+
+`~/.local/bin` wins over the app's copy because that is where a build of the fork is installed
+(`docs/UPSTREAM.md`, "Install the new binary"): someone who builds Provenance gets their own,
+newer binary without rebuilding the app, and the app's copy is for everyone else. The choice is
+made at launch (main.log: `launch … bin=<path> (<which>)`). Its config home is the binary's own
+default, `~/.provenance` (`PROVENANCE_HOME` overrides it), which it creates on first start; the
+app hands it the router's URL and token (`TIERLM_BASE_URL`, `TIERLM_TOKEN`), so a new user needs
+no `config.toml`. An empty or old-default (`~/.local/bin/provenance`) `provenanceBin` means
+"automatic". The app's protocol types (`src/protocol/generated`) are generated from the
+bundled binary; a different `~/.local/bin/provenance` may speak a slightly newer or older
+protocol.
+
 **Bundled browser:** the app carries the Chrome for Testing build provenance-core drives for the
 chat sites, unmodified, at `Contents/Resources/browser/Google Chrome for Testing.app`
 (`extraResources` from `vendor/browser/`, git-ignored). provenance-core looks there first and
@@ -172,7 +202,13 @@ from the preload), which sets `html[data-shell="darwin"]` for the window-chrome 
 **Checking the packaged app without a window:** `PROVENANCE_HEADLESS=1` opens no window and no
 Dock icon and prints one `PROVENANCE_READY {ui, router, mode, routerPid}` line once serving;
 `PROVENANCE_USER_DATA=<dir>` keeps settings, logs and the router's home there (and with them the
-single-instance lock), so a check never meets the installed app. `npm run app:check:router`
+single-instance lock), so a check never meets the installed app. `npm run app:check:fresh` runs the
+packaged app as a brand-new user: `HOME` an empty scratch folder (no `~/.provenance`, no
+`~/.local/bin/provenance`), no `PROVENANCE_*` / `TIERLM_*` / `PCORE_*` env, and a `routerUrl` where
+nothing answers; it checks the app picked its own binary, its own router (port, pid, not the
+launchd one), app-server's binary, environment and new config home, the Models & accounts
+dialog in headless Chromium, one turn (`TURN_MODEL`, default `spark`, served by whatever the fresh
+router can reach without a key or sign-in; `TURN=0` skips it), and that quitting ends both. `npm run app:check:router`
 (`APP=` another .app) uses both, with app-server's state in a scratch `PROVENANCE_HOME`: an
 answering router at `routerUrl` is used and nothing starts; otherwise the bundled router answers
 on its own port and pid (checked with `lsof` against the launchd router's), wants its token,
@@ -202,7 +238,8 @@ ui/
 │   ├── setup-e2e.ts / router-e2e.ts, e2e-kit.ts   Models & accounts on the mock / a real router
 │   ├── mock-router.ts   stand-in for provenance-core's setup API (dev + setup-e2e)
 │   ├── app-router-check.ts, first-run-tour.ts   the packaged app's router, headless; first-run screenshots
-│   ├── build-electron.mjs, fetch-browser.ts, fetch-router.ts (+ router-requirements.txt),
+│   ├── app-fresh-check.ts   a brand-new user's packaged app, headless (bundled binary + router, a turn)
+│   ├── build-electron.mjs, fetch-browser.ts, fetch-router.ts (+ router-requirements.txt), fetch-agent.ts,
 │   │   adhoc-sign.cjs, install-app.mjs   app packaging
 │   └── provenance-ui    launcher (symlinked into ~/.local/bin)
 └── src/

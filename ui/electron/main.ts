@@ -69,7 +69,11 @@ for (const level of ["log", "warn", "error"] as const) {
 // ---- settings ----------------------------------------------------------------
 
 interface Settings {
-  /** The provenance binary (`provenance app-server` is spawned from it). */
+  /**
+   * The provenance binary (`provenance app-server` is spawned from it). Empty (or the old
+   * default "~/.local/bin/provenance"): ~/.local/bin/provenance when it exists, else the one
+   * inside the app (resolveAgent).
+   */
   provenanceBin: string;
   /** Where your own provenance-core (tierlm) router answers, if you run one. */
   routerUrl: string;
@@ -87,7 +91,7 @@ interface Settings {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  provenanceBin: "~/.local/bin/provenance",
+  provenanceBin: "",
   routerUrl: "http://127.0.0.1:4141",
   router: "auto",
   routerLaunchdLabel: "",
@@ -112,8 +116,7 @@ function loadSettings(): Settings {
   const old = raw as { autoStartRouter?: boolean };
   if (raw.router === undefined && old.autoStartRouter === false) s.router = "external";
   if (!["auto", "external", "bundled"].includes(s.router)) s.router = "auto";
-  // Env still wins, like the CLI server.
-  if (process.env.PROVENANCE_BIN) s.provenanceBin = process.env.PROVENANCE_BIN;
+  // Env still wins, like the CLI server (PROVENANCE_BIN: resolveAgent).
   if (process.env.TIERLM_URL) s.routerUrl = process.env.TIERLM_URL;
   if (process.env.PROVENANCE_ROUTER_AUTOSTART === "0") s.router = "external";
   const r = process.env.PROVENANCE_ROUTER as RouterPolicy | undefined;
@@ -127,7 +130,38 @@ function ensureSettingsFile(): void {
 }
 
 const settings = loadSettings();
-const bin = expandHome(settings.provenanceBin);
+
+// ---- which provenance binary -----------------------------------------------------
+
+const LOCAL_BIN = "~/.local/bin/provenance";
+type AgentSource = "PROVENANCE_BIN" | "settings" | "~/.local/bin" | "bundled" | "missing";
+
+/**
+ * The binary app-server runs from, first match wins:
+ *   1. PROVENANCE_BIN (env), 2. provenanceBin in settings.json, when set to a path other than
+ *   the old default; both used as given, even when missing (the banner then says so);
+ *   3. ~/.local/bin/provenance when it exists: where a build of the fork is installed
+ *   (docs/UPSTREAM.md), so a developer's newer binary beats the app's copy;
+ *   4. the copy inside the app (Contents/Resources/agent/provenance, scripts/fetch-agent.ts),
+ *   so the app alone can run threads.
+ */
+function resolveAgent(s: Settings): { path: string; source: AgentSource } {
+  if (process.env.PROVENANCE_BIN)
+    return { path: expandHome(process.env.PROVENANCE_BIN), source: "PROVENANCE_BIN" };
+  const configured = s.provenanceBin.trim();
+  if (configured && configured !== LOCAL_BIN)
+    return { path: expandHome(configured), source: "settings" };
+  const local = expandHome(LOCAL_BIN);
+  if (existsSync(local)) return { path: local, source: "~/.local/bin" };
+  const bundled = app.isPackaged
+    ? path.join(process.resourcesPath, "agent/provenance")
+    : path.join(app.getAppPath(), "vendor/agent/provenance");
+  if (existsSync(bundled)) return { path: bundled, source: "bundled" };
+  return { path: local, source: "missing" };
+}
+
+const agent = resolveAgent(settings);
+const bin = agent.path;
 
 // ---- launch cwd (`provenance-ui` passes --cwd <dir>) -------------------------
 
@@ -466,7 +500,7 @@ app
   .whenReady()
   .then(async () => {
     console.log(
-      `launch ${app.getVersion()} packaged=${app.isPackaged} bin=${bin} router=${settings.router} (${settings.routerUrl})`,
+      `launch ${app.getVersion()} packaged=${app.isPackaged} bin=${bin} (${agent.source}) router=${settings.router} (${settings.routerUrl})`,
     );
     if (isDev && process.platform === "darwin") {
       const icon = nativeImage.createFromPath(
@@ -506,7 +540,7 @@ app
     if (!headless) watchSettings();
     else
       process.stdout.write(
-        `PROVENANCE_READY ${JSON.stringify({ ui: ui.url, router: router.connection().url, mode: router.status().mode, routerPid: router.pid ?? null })}\n`,
+        `PROVENANCE_READY ${JSON.stringify({ ui: ui.url, router: router.connection().url, mode: router.status().mode, routerPid: router.pid ?? null, bin, binSource: agent.source })}\n`,
       );
   })
   .catch((e) => {
