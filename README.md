@@ -1,27 +1,28 @@
 <div align="center">
 
+<img src="ui/design/icon/icon-256.png" alt="Provenance app icon" width="112" />
+
 # Provenance
 
-**A coding agent in your terminal, running on pooled free-tier models.**
+**A coding agent for your Mac and your terminal, running on pooled free-tier models.**
 
-A rebranded fork of [OpenAI Codex CLI](https://github.com/openai/codex), powered by
+A fork of [OpenAI Codex CLI](https://github.com/openai/codex), powered by
 [provenance-core](https://github.com/prominence-chan/provenance-core). Pick a strength, not a model.
 
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-![Rust](https://img.shields.io/badge/Rust-CLI-000000?logo=rust&logoColor=white)
-![React](https://img.shields.io/badge/web%20UI-React%20%2B%20Vite-61DAFB?logo=react&logoColor=black)
-![Backend](https://img.shields.io/badge/backend-provenance--core-F97316)
-[![Upstream](https://img.shields.io/badge/upstream-openai%2Fcodex-412991?logo=openai&logoColor=white)](https://github.com/openai/codex)
+[![Download for macOS](https://img.shields.io/badge/download-macOS%20arm64-111111?style=flat-square&logo=apple&logoColor=white)](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0)
+[![License](https://img.shields.io/badge/license-Apache--2.0-111111?style=flat-square)](LICENSE)
+[![provenance-core](https://img.shields.io/badge/backend-provenance--core-111111?style=flat-square)](https://github.com/prominence-chan/provenance-core)
+[![Upstream](https://img.shields.io/badge/upstream-openai%2Fcodex-111111?style=flat-square)](https://github.com/openai/codex)
 
-<img src=".github/provenance-ui.png" alt="Provenance web UI" width="88%" />
+<img src=".github/provenance-ui.png" alt="The Provenance desktop app" width="88%" />
 
 </div>
 
 ## Why
 
-Codex is a great agent harness, but it wants an OpenAI account. Provenance keeps the harness and swaps the brain:
-requests go to a local [provenance-core](https://github.com/prominence-chan/provenance-core), which pools the free
-tiers of a dozen LLM providers and sorts them into four tiers.
+Codex is a great agent harness, but it wants an OpenAI account. Provenance keeps the harness and swaps the brain.
+Requests go to a local [provenance-core](https://github.com/prominence-chan/provenance-core), which pools the free
+tiers of a dozen LLM providers and sorts them into four tiers:
 
 | Tier       | Strength                    |
 | ---------- | --------------------------- |
@@ -30,9 +31,23 @@ tiers of a dozen LLM providers and sorts them into four tiers.
 | `ember`    | strong mid-size             |
 | `spark`    | fast / small                |
 
-No ChatGPT login, no `OPENAI_API_KEY`.
+No ChatGPT login and no `OPENAI_API_KEY`.
 
-## Build
+## Install the app
+
+1. Download `Provenance-0.1.0-arm64.dmg` from the
+   [latest release](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0) (Apple Silicon)
+   and drag **Provenance** into Applications.
+2. The app is ad-hoc signed, not notarized, so the first launch needs a right-click on it, then **Open**. Or run
+   `xattr -dr com.apple.quarantine /Applications/Provenance.app` once.
+3. It needs the `provenance` binary in `~/.local/bin` (see [Build the CLI](#build-the-cli)) and provenance-core on
+   `127.0.0.1:4141`. If provenance-core isn't running, the app starts it, and shows a banner if it can't. Paths and
+   URLs can be changed under **Provenance → Preferences…**
+
+Or build it yourself: `cd ui && npm install && npm run app:build && npm run app:install`. Details in
+[`ui/README.md`](ui/README.md#app).
+
+## Build the CLI
 
 Needs a Rust toolchain (`codex-rs/rust-toolchain.toml` pins the version; rustup installs it on first use).
 
@@ -50,15 +65,12 @@ Start provenance-core (it serves `http://127.0.0.1:4141/v1`), then:
 provenance                          # interactive TUI
 provenance exec "<task>"            # non-interactive
 provenance -m nova exec "<task>"    # choose a tier
+provenance-ui                       # the desktop app (or the web UI with --web)
 ```
 
-**Web UI.** `ui/` is a local, Codex-desktop-style frontend driving `provenance app-server`:
-
-```shell
-cd ui && npm install && npm run dev  # http://localhost:5173
-```
-
-See [`ui/README.md`](ui/README.md) for how it fits together.
+The desktop app and the web UI share one frontend in `ui/`, a Codex-desktop-style client for
+`provenance app-server`. Without the app installed, `cd ui && npm install && npm run dev` serves it on
+`http://localhost:5173`. See [`ui/README.md`](ui/README.md) for how it fits together.
 
 ## Configure
 

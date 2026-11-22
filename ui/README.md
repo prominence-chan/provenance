@@ -1,6 +1,6 @@
 # Provenance UI
 
-A local, Codex-desktop-style web UI for Provenance. It talks to `provenance app-server`
+A local, Codex-desktop-style UI for Provenance, as a macOS app or in the browser. It talks to `provenance app-server`
 (the same JSON-RPC protocol the official Codex IDE extension / desktop app use) through a
 small Node bridge, because browsers can't speak stdio.
 
@@ -16,8 +16,9 @@ npm install          # first time
 npm run dev          # http://localhost:5173, opens your browser (NO_OPEN=1 to skip)
 ```
 
-Or from anywhere: `provenance-ui` (symlink in `~/.local/bin` to `scripts/provenance-ui`).
-New threads then default to the directory you ran it from.
+Or from anywhere: `provenance-ui --web` (symlink in `~/.local/bin` to `scripts/provenance-ui`).
+New threads then default to the directory you ran it from. Without `--web` it opens the
+desktop app if it's installed (see [App](#app)).
 
 Other scripts:
 
@@ -41,16 +42,90 @@ Env vars (server): `PORT` (5173), `HOST` (127.0.0.1), `PROVENANCE_BIN`
 (`~/.local/bin/provenance`), `PROVENANCE_UI_CWD` (default cwd, `$HOME` otherwise),
 `TIERLM_URL` (`http://127.0.0.1:4141`).
 
+## App
+
+`Provenance.app` is an Electron shell around the same UI. The UI server (`server/app.ts`:
+static `dist/`, `/api/*`, the `/rpc` bridge to `provenance app-server`) runs inside the app's
+main process on Electron's own Node, so it needs no Node install and doesn't depend on your
+shell's PATH. The window loads it from `http://localhost:41730` (a fixed port, so the page's
+localStorage, i.e. tier, theme and collapsed projects, survives relaunches; if the port is taken
+it falls back to a random one).
+
+```sh
+npm run app:build     # dist/ + build-electron/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
+npm run app:install   # copy it to /Applications/Provenance.app (quits a running copy first)
+npm run app:e2e       # Playwright drives the installed app: window, health, a real "reply with just ok" turn
+npm run app:dev       # run Electron from the checkout with Vite + HMR (DevTools in the View menu)
+npm run app:start     # run Electron from the checkout on the built dist/
+```
+
+`provenance-ui` opens the installed app (`/Applications` or `~/Applications`) with `--cwd
+$PWD`; if it's already running, the new instance hands the directory to it and exits (single
+instance), and the app starts a new thread there. `provenance-ui --web` keeps the old
+browser mode.
+
+What the shell adds:
+
+- **Window:** `hiddenInset` title bar, the traffic lights over the sidebar head (or the main
+  header when the sidebar is hidden), both header strips drag the window; min 720 x 480;
+  bounds remembered (`window-state.json`). Closing the window keeps the app (and running turns)
+  alive; the Dock icon reopens it.
+- **Menu:** About, Preferences… (`⌘,`), File → New Thread (`⌘N`) / Open Folder… (`⌘O`), the
+  standard Edit menu (copy/paste), View (reload, zoom, full screen; DevTools only when not
+  packaged), Window, Help (GitHub, logs, settings file).
+- **Folder picker:** the folder icon in the composer's working-directory field opens the
+  native folder dialog.
+- **Links** open in the default browser.
+- **provenance-core:** on launch the app checks `routerUrl`; if it's down it runs
+  `launchctl kickstart` on the `com.yufan.tierlm` agent (or bootstraps its plist, or runs
+  `~/.tierlm/serve.sh` detached) and waits up to 20 s. A one-line banner under the header
+  says so if provenance-core still isn't answering (with a "Start it" button), or if the
+  `provenance` binary is missing. In the browser, the same banner shows without the buttons
+  (`GET /api/health`).
+- **PATH:** the login shell's PATH (`$SHELL -ilc`) plus `~/.local/bin` and Homebrew, so
+  commands the agent runs find your tools.
+
+Files, all in `~/Library/Application Support/Provenance/`:
+
+| file                       | what                                                                  |
+| -------------------------- | --------------------------------------------------------------------- |
+| `settings.json`            | overrides (Preferences… opens it; the app offers to relaunch on save) |
+| `window-state.json`        | window bounds                                                         |
+| `logs/main.log`            | app + bridge log                                                      |
+| `logs/provenance-core.log` | output of `serve.sh` when the app started it                          |
+
+`settings.json` keys (defaults): `provenanceBin` (`~/.local/bin/provenance`), `routerUrl`
+(`http://127.0.0.1:4141`), `autoStartRouter` (`true`), `routerLaunchdLabel`
+(`com.yufan.tierlm`), `routerStartScript` (`~/.tierlm/serve.sh`), `defaultCwd` (empty: last
+used, else home), `port` (`41730`). The env vars `PROVENANCE_BIN`, `TIERLM_URL` and
+`PROVENANCE_ROUTER_AUTOSTART=0` still win.
+
+Packaging: `scripts/build-electron.mjs` bundles `electron/main.ts` (with `server/app.ts`,
+`bridge.ts` and `ws`) and `electron/preload.ts` with esbuild into `build-electron/*.cjs`, so the
+app ships no `node_modules`. electron-builder (`build` in `package.json`) makes an arm64 `.app`
+and `.dmg`; `scripts/adhoc-sign.cjs` ad-hoc signs the app before the DMG is made (Apple Silicon
+won't run unsigned arm64 code). No Developer ID, no notarization: a downloaded DMG needs
+right-click → Open the first time. The icon is `design/icon/Provenance.icns`.
+
+The web UI only knows it's in the app through `window.provenanceApp` (`src/app-shell.ts`,
+from the preload), which sets `html[data-shell="darwin"]` for the window-chrome styles.
+
 ## Layout
 
 ```
 ui/
 ├── server/
-│   ├── main.ts        HTTP server: Vite middleware (dev) or dist/ (prod), /api/info, /api/tiers, WS /rpc
+│   ├── app.ts         startUiServer(): Vite middleware (dev) or dist/ (prod), /api/info, /api/tiers,
+│   │                  /api/health, WS /rpc (same-origin only)
+│   ├── main.ts        CLI for `npm run dev` / `npm start`
 │   └── bridge.ts      AppServerBridge: spawns `provenance app-server`, relays JSON-RPC
+├── electron/
+│   ├── main.ts        desktop app: window, menu, settings, provenance-core start, runs startUiServer()
+│   └── preload.ts     window.provenanceApp (folder picker, start router, preferences, menu events)
 ├── scripts/
 │   ├── gen-protocol.ts  runs `provenance app-server generate-ts --experimental`
-│   ├── smoke.ts / e2e.ts
+│   ├── smoke.ts / e2e.ts / app-e2e.ts
+│   ├── build-electron.mjs, adhoc-sign.cjs, install-app.mjs   app packaging
 │   └── provenance-ui    launcher (symlinked into ~/.local/bin)
 └── src/
     ├── protocol/
@@ -70,7 +145,7 @@ ui/
     │   │                      items render as one-line rows, consecutive ones grouped
     │   ├── Approvals.tsx      command / file-change approval cards
     │   ├── Composer.tsx       prompt box, tier picker, permissions preset, cwd, send/stop
-    │   ├── Markdown.tsx, DiffView.tsx, Notices.tsx, icons.tsx, format.ts
+    │   ├── Markdown.tsx, DiffView.tsx, Notices.tsx, HealthBanner.tsx, icons.tsx, format.ts
     ├── components/effects/  FlameFx.tsx (WebGL2 tier effects), useFx.ts
     ├── components/TierPicker.tsx, TierBadge.tsx, SolarMark.tsx
     ├── theme/           tokens.css, effects.css, tiers.ts, theme.ts, ui.ts (see "Theme" below)
@@ -231,4 +306,5 @@ a 40 px header, 13.5 px body text, tool calls as one-line rows that open on clic
   fallback card only).
 - Reasoning-effort picker (tierlm tiers currently report no effort options), plan/goal UI,
   review mode, MCP/plugin management.
-- A native folder picker for the cwd (it's a text box).
+- A native folder picker in the browser (the app has one; the browser keeps the text box).
+- Notarized / universal (x64) app builds, auto-update.

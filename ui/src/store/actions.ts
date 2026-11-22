@@ -87,6 +87,22 @@ export async function boot(): Promise<void> {
   rpc.connect();
 }
 
+/** Re-read the tier list (e.g. once provenance-core comes up after launch). */
+export async function refreshTiers(): Promise<void> {
+  try {
+    const t = (await (await fetch("/api/tiers")).json()) as { tiers: string[] };
+    if (!t.tiers?.length) return;
+    setState((s) => {
+      const settings = { ...s.settings };
+      if (!t.tiers.includes(settings.model))
+        settings.model = t.tiers.includes("solstice") ? "solstice" : t.tiers[0];
+      return { ...s, settings, tiers: t.tiers };
+    });
+  } catch {
+    // keep the current list
+  }
+}
+
 export function notify(level: "info" | "warn" | "error", text: string): void {
   const id = noticeSeq++;
   setState((s) => ({ ...s, notices: [...s.notices, { id, level, text }] }));

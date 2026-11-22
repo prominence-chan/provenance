@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { appShell } from "../app-shell";
 import type { SandboxMode } from "../protocol";
 import { interrupt, sendMessage, updateSettings } from "../store/actions";
 import type { Settings } from "../store/state";
@@ -48,6 +49,14 @@ export function Composer() {
     void sendMessage(msg, cwdDraft);
   };
 
+  const pickCwd = async () => {
+    const dir = await appShell?.pickDirectory(cwdDraft || undefined);
+    if (!dir) return;
+    setCwdDraft(dir);
+    if (!selected) updateSettings({ cwd: dir });
+    ref.current?.focus();
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
@@ -75,7 +84,22 @@ export function Composer() {
             <TierPicker />
             <PermissionsPicker settings={settings} />
             <label className="cwd-input" title={`Working directory: ${cwdDraft}`}>
-              <IconFolder size={12} />
+              {appShell ? (
+                <button
+                  type="button"
+                  className="cwd-pick"
+                  title="Choose folder…"
+                  aria-label="Choose working directory"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void pickCwd();
+                  }}
+                >
+                  <IconFolder size={12} />
+                </button>
+              ) : (
+                <IconFolder size={12} />
+              )}
               <input
                 value={cwdDraft}
                 onChange={(e) => setCwdDraft(e.target.value)}

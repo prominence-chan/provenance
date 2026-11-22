@@ -1,6 +1,7 @@
 import { Composer } from "./components/Composer";
 import { Conversation } from "./components/Conversation";
 import { FlameFx } from "./components/effects/FlameFx";
+import { HealthBanner } from "./components/HealthBanner";
 import { HeroSun } from "./components/effects/HeroSun";
 import { useFx } from "./components/effects/useFx";
 import { Notices } from "./components/Notices";
@@ -23,6 +24,7 @@ export function App() {
       <main className="main">
         <FlameFx fx={fx} />
         <ThreadHeader />
+        <HealthBanner />
         {selected ? <Conversation threadId={selected} /> : <NewThreadHero />}
         <Composer />
       </main>

@@ -1546,3 +1546,80 @@ select.picker {
     display: none;
   }
 }
+
+/* ---- health banner (provenance-core down / binary missing) -------------- */
+.health-banner {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+  border-bottom: 1px solid var(--warn-border);
+  background: color-mix(in srgb, var(--warn) 7%, var(--bg));
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.health-row {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 16px;
+}
+.health-text {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+}
+.health-btn {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--warn-border);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.health-btn:hover {
+  background: var(--hover);
+}
+.health-x {
+  padding: 2px 6px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* ---- cwd folder picker (desktop app) ------------------------------------ */
+.cwd-pick {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 3px;
+  margin: 0 -3px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+}
+.cwd-pick:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+/* ---- desktop app window chrome (html[data-shell], set by app-shell.ts) ---
+   hiddenInset title bar: the traffic lights sit over the sidebar head, both
+   header strips drag the window, controls inside them don't. */
+html[data-shell="darwin"] .sidebar-head,
+html[data-shell="darwin"] .thread-header {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+html[data-shell="darwin"] .sidebar-head :is(button, a, input, select),
+html[data-shell="darwin"] .thread-header :is(button, a, input, select, [title]) {
+  -webkit-app-region: no-drag;
+}
+html[data-shell="darwin"] .sidebar-head {
+  padding-left: 84px;
+}
+/* Sidebar hidden or drawer: the lights sit over the main header instead. */
+html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .thread-header {
+  padding-left: 84px;
+}

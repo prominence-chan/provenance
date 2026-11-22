@@ -16,7 +16,13 @@
     "smoke": "node scripts/smoke.ts",
     "e2e": "node scripts/e2e.ts",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "build:electron": "node scripts/build-electron.mjs",
+    "app:dev": "node scripts/build-electron.mjs && PROVENANCE_APP_VITE=1 electron .",
+    "app:start": "npm run build && node scripts/build-electron.mjs && electron .",
+    "app:build": "npm run build && node scripts/build-electron.mjs && electron-builder --mac --arm64 --publish never",
+    "app:install": "node scripts/install-app.mjs",
+    "app:e2e": "node scripts/app-e2e.ts"
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -31,9 +37,66 @@
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
     "playwright": "^1.65.1",
     "prettier": "^3.10.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
+  },
+  "main": "build-electron/main.cjs",
+  "author": "prominence-chan",
+  "build": {
+    "appId": "dev.prominence.provenance",
+    "productName": "Provenance",
+    "copyright": "Provenance contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "design/icon"
+    },
+    "files": [
+      "dist/**",
+      "build-electron/**",
+      "package.json",
+      "!**/node_modules/**",
+      "!build-electron/**/*.map"
+    ],
+    "extraMetadata": {
+      "main": "build-electron/main.cjs"
+    },
+    "asar": true,
+    "electronLanguages": [
+      "en"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "design/icon/Provenance.icns",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "hardenedRuntime": false,
+      "darkModeSupport": true,
+      "extendInfo": {
+        "NSHighResolutionCapable": true
+      }
+    },
+    "dmg": {
+      "title": "Provenance ${version}",
+      "artifactName": "Provenance-${version}-arm64.dmg"
+    },
+    "afterPack": "scripts/adhoc-sign.cjs"
   }
 }
