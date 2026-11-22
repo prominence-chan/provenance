@@ -84,9 +84,14 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     },
     // app-server's built-in tierlm provider reads these at start (codex-rs model-provider-info:
     // TIERLM_BASE_URL, TIERLM_TOKEN), so the agent always talks to the same router as this page.
+    // Without a token of ours, an inherited TIERLM_TOKEN (your router's) is left as it is.
     env: () => {
       const { url, token } = conn();
-      return { ...opts.appServerEnv, TIERLM_BASE_URL: `${url}/v1`, TIERLM_TOKEN: token ?? "" };
+      return {
+        ...opts.appServerEnv,
+        TIERLM_BASE_URL: `${url}/v1`,
+        ...(token ? { TIERLM_TOKEN: token } : {}),
+      };
     },
   });
   bridge.start();

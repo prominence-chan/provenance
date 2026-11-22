@@ -10,7 +10,7 @@
 //   PROVENANCE_BIN    default ~/.local/bin/provenance
 //   PROVENANCE_UI_CWD default working directory offered to new threads (default: $HOME)
 //   TIERLM_URL        default http://127.0.0.1:4141
-//   PCORE_TOKEN       the router's bearer token, if it has one
+//   PCORE_TOKEN       the router's bearer token, if it has one (TIERLM_TOKEN also works)
 //   NO_OPEN=1         don't open a browser even with --open
 
 import { execFile } from "node:child_process";
@@ -35,7 +35,7 @@ try {
     bin,
     router: {
       url: process.env.TIERLM_URL ?? "http://127.0.0.1:4141",
-      token: process.env.PCORE_TOKEN || undefined,
+      token: process.env.PCORE_TOKEN || process.env.TIERLM_TOKEN || undefined,
     },
     cwd: () => ({ defaultCwd, fromLauncher: !!process.env.PROVENANCE_UI_CWD }),
   });

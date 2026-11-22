@@ -60,6 +60,8 @@ export class RouterSupervisor {
   private misses = 0;
   private healthTimer: NodeJS.Timeout | undefined;
   private restartTimer: NodeJS.Timeout | undefined;
+  /** One "Start it" at a time: two clicks must not start two routers. */
+  private ensuring: Promise<RouterStatus> | null = null;
   private state: RouterStatus = { up: false, message: "Checking provenance-core…" };
   private readonly log: (...a: unknown[]) => void;
   private readonly opts: RouterOptions;
@@ -95,6 +97,7 @@ export class RouterSupervisor {
    */
   async start(): Promise<void> {
     const { policy } = this.opts;
+    if (this.stopping) return;
     if (policy !== "bundled" && (await answers(this.opts.configuredUrl))) return this.useExternal();
     if (
       policy === "auto" &&
@@ -104,10 +107,11 @@ export class RouterSupervisor {
       // The user's own router is managed by launchd (KeepAlive): give it time to come back
       // rather than start a second one with an empty home.
       this.state = { up: false, message: `Waiting for ${this.opts.launchdLabel}…` };
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 40 && !this.stopping; i++) {
         await sleep(500);
         if (await answers(this.opts.configuredUrl)) return this.useExternal();
       }
+      if (this.stopping) return;
     }
     if (policy === "external" || !this.bundledDir) {
       this.useExternal();
@@ -123,17 +127,22 @@ export class RouterSupervisor {
     await this.useBundled();
   }
 
-  /** The banner's "Start it" / "Retry": restart the bundled router, or switch to it. */
-  async ensure(): Promise<RouterStatus> {
-    if (this.mode === "bundled") {
-      if (!(await this.healthy())) await this.restartNow("asked to restart");
-    } else if (await answers(this.url)) {
-      this.state = { up: true };
-    } else if (this.opts.policy === "auto" && this.bundledDir) {
-      await this.useBundled();
-    }
-    for (let i = 0; i < 40 && !this.state.up; i++) await sleep(500);
-    return this.status();
+  /** The banner's "Restart it" / "Retry": restart the bundled router, or switch to it. */
+  ensure(): Promise<RouterStatus> {
+    this.ensuring ??= (async () => {
+      if (this.mode === "bundled") {
+        if (!(await this.healthy())) await this.restartNow("asked to restart");
+      } else if (await answers(this.url)) {
+        this.state = { up: true };
+      } else if (this.opts.policy === "auto" && this.bundledDir) {
+        await this.useBundled();
+      }
+      for (let i = 0; i < 40 && !this.state.up && !this.stopping; i++) await sleep(500);
+      return this.status();
+    })().finally(() => {
+      this.ensuring = null;
+    });
+    return this.ensuring;
   }
 
   async stop(): Promise<void> {
@@ -168,13 +177,17 @@ export class RouterSupervisor {
     const changed = this.mode !== "bundled";
     this.mode = "bundled";
     this.port = await freePort();
+    if (this.stopping) return; // quit while we looked for a port
     this.url = `http://127.0.0.1:${this.port}`;
     if (changed) this.opts.onUrlChange?.(this.url);
     this.spawn();
     this.watch();
   }
 
+  /** Start the bundled router, unless one is running already or the app is quitting. */
   private spawn(): void {
+    if (this.child || this.stopping) return;
+    clearTimeout(this.restartTimer); // a pending restart would start a second one
     const dir = this.bundledDir!;
     mkdirSync(this.opts.home, { recursive: true, mode: 0o700 });
     rotate(this.opts.logFile);
@@ -226,18 +239,23 @@ export class RouterSupervisor {
       `started the bundled router (pid ${child.pid}) on ${this.url}, home ${this.opts.home}`,
     );
     child.stdin?.on("error", () => {}); // EPIPE once it's gone
-    child.on("error", (e) => this.log("could not start:", e.message));
-    child.on("exit", (code, signal) => {
+    const gone = (why: string) => {
       if (this.child !== child) return;
       this.child = null;
       if (this.stopping) return;
       this.state = {
         up: false,
-        message: `provenance-core stopped (${signal ?? `exit code ${code}`}); restarting. Log: ${this.opts.logFile}`,
+        message: `provenance-core stopped (${why}); restarting. Log: ${this.opts.logFile}`,
       };
-      this.log(`exited (${signal ?? code})`);
+      this.log(`exited (${why})`);
       this.scheduleRestart();
+    };
+    // A process that could not be started at all (EACCES, ENOENT) emits "error" and no "exit".
+    child.on("error", (e) => {
+      this.log("could not start:", e.message);
+      if (child.pid === undefined) gone(e.message);
     });
+    child.on("exit", (code, signal) => gone(signal ?? `exit code ${code}`));
   }
 
   private scheduleRestart(): void {
@@ -246,10 +264,12 @@ export class RouterSupervisor {
     this.crashes++;
     clearTimeout(this.restartTimer);
     this.restartTimer = setTimeout(async () => {
-      if (this.stopping) return;
+      if (this.stopping || this.child) return;
       // The port was taken meanwhile (another program): a new one, and tell the UI server.
       if (!(await portFree(this.port))) {
-        this.port = await freePort();
+        const port = await freePort();
+        if (this.stopping || this.child) return;
+        this.port = port;
         this.url = `http://127.0.0.1:${this.port}`;
         this.opts.onUrlChange?.(this.url);
       }
@@ -259,21 +279,24 @@ export class RouterSupervisor {
 
   private async restartNow(why: string): Promise<void> {
     this.log(`restarting: ${why}`);
+    clearTimeout(this.restartTimer);
     await this.kill();
     this.crashes = 0;
-    if (!this.stopping) this.spawn();
+    this.spawn(); // not when quitting meanwhile (spawn checks)
   }
 
+  /** Stop the running router: a clean shutdown, SIGKILL after 8 s, given up on after 10 s. */
   private async kill(): Promise<void> {
     const child = this.child;
     if (!child) return;
     this.child = null;
+    if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
     const gone = new Promise<void>((r) => child.once("exit", () => r()));
     child.stdin?.end(); // --watch-stdin: a clean shutdown (its browsers and sign-in window close)
     child.kill("SIGTERM");
-    const t = setTimeout(() => child.kill("SIGKILL"), 8000);
-    await gone;
-    clearTimeout(t);
+    const hard = setTimeout(() => child.kill("SIGKILL"), 8000);
+    await Promise.race([gone, sleep(10_000)]); // never hold up quitting forever
+    clearTimeout(hard);
   }
 
   // ---- watching ------------------------------------------------------------------------

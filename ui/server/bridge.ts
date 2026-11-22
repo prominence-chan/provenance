@@ -58,6 +58,8 @@ export class AppServerBridge {
   private generation = 0;
   private attempt = 0;
   private stopped = false;
+  /** The pending retry after a failed start: cleared by restart() and stop(), or two would run. */
+  private retryTimer: NodeJS.Timeout | undefined;
   private readonly log: (...args: unknown[]) => void;
   private readonly opts: BridgeOptions;
 
@@ -73,12 +75,14 @@ export class AppServerBridge {
 
   stop(): void {
     this.stopped = true;
+    clearTimeout(this.retryTimer);
     this.child?.kill();
     this.child = null;
   }
 
   /** Start a fresh app-server now (it reads its environment, e.g. the router's URL, at start). */
   restart(): void {
+    clearTimeout(this.retryTimer);
     const old = this.child;
     this.child = null; // its exit handler then does nothing
     old?.kill();
@@ -268,7 +272,8 @@ export class AppServerBridge {
     const retryInMs = Math.min(1000 * 2 ** Math.max(0, this.attempt - 1), 10_000);
     this.log(`${error}; retrying in ${retryInMs}ms`);
     this.setStatus({ state: "down", error, retryInMs });
-    setTimeout(() => void this.launch(), retryInMs);
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => void this.launch(), retryInMs);
   }
 
   private setStatus(status: BridgeStatus): void {
