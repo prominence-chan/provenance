@@ -148,7 +148,7 @@ export function SiteStep({
         </div>
       </div>
 
-      <SiteSettings provider={provider} onChanged={onChanged} />
+      {provider.changeable && <SiteSettings provider={provider} onChanged={onChanged} />}
 
       <h4 className="meta setup-label">Models</h4>
       <ul className="setup-models">

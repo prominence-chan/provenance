@@ -22,7 +22,11 @@ export type { LoginState } from "../../shared/router-api";
 export type Login = Pick<WireLogin, "state" | "reason"> & { shown?: boolean };
 export type WebAccount = Required<WireAccount>;
 export type WebModel = WireWebModel;
-export type WebProvider = Required<Omit<WireProvider, "accounts">> & { accounts: WebAccount[] };
+export type WebProvider = Required<Omit<WireProvider, "accounts">> & {
+  accounts: WebAccount[];
+  /** The router can turn it on or off and change its daily cap (an older one can't). */
+  changeable: boolean;
+};
 export type BrowserStatus = Required<WireBrowser>;
 export type PoolProvider = WirePoolProvider;
 
@@ -131,6 +135,7 @@ export function parseProvider(p: Obj): WebProvider {
     shares_browser_with: strOrNull(p.shares_browser_with),
     models,
     accounts,
+    changeable: typeof by === "string",
   };
 }
 
