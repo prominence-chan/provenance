@@ -94,11 +94,12 @@ function Turn({
   }, [showFooter, threadId, turn.id]);
   const last = turn.items[turn.items.length - 1];
   const streamingText = running && last?.type === "agentMessage" && !last.completedAtMs;
+  const groups = groupItems(turn.items);
   return (
     <section className="turn" data-tier={tierOf(model)?.id}>
-      {groupItems(turn.items).map((g) =>
+      {groups.map((g, i) =>
         Array.isArray(g) ? (
-          <ToolGroup key={g[0].id} items={g} collapsed={!running} />
+          <ToolGroup key={g[0].id} items={g} collapsed={!running || textAfter(groups, i)} />
         ) : (
           <ItemView key={g.id} item={g} />
         ),
@@ -158,6 +159,16 @@ function groupItems(items: ThreadItem[]): (ThreadItem | ThreadItem[])[] {
     } else out.push(item);
   }
   return out;
+}
+
+/**
+ * Has the assistant started writing after group `i`? A tool group folds into its summary as soon
+ * as the first characters of a later reply stream in, not only when the turn ends.
+ */
+function textAfter(groups: (ThreadItem | ThreadItem[])[], i: number): boolean {
+  return groups
+    .slice(i + 1)
+    .some((g) => !Array.isArray(g) && g.type === "agentMessage" && g.text.trim() !== "");
 }
 
 function DiffStat({ diff }: { diff: string }) {

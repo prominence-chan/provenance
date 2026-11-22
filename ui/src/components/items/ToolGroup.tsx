@@ -3,9 +3,11 @@ import { IconChevron, IconStack } from "../icons";
 import { ItemView } from "./ItemView";
 
 /**
- * A run of consecutive tool items. While the turn runs every row shows live; once it's done the
- * run folds into one line ("Ran 6 commands, edited 3 files, read 2 files") that opens back to
- * the rows, which open to their output / diffs as before.
+ * A run of consecutive tool items. While it runs every row shows live; once the assistant starts
+ * writing after it (or the turn ends) the run folds into one line ("Ran 6 commands, edited 3
+ * files, read 2 files") that opens back to the rows, which open to their output / diffs as
+ * before. The fold is an uncontrolled <details>: once the user opens it, later renders (more
+ * streamed text, the turn ending) leave it as they set it.
  */
 export function ToolGroup({ items, collapsed }: { items: ThreadItem[]; collapsed: boolean }) {
   const s = summarize(items);
