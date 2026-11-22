@@ -37,6 +37,7 @@ export function FallbacksStep({ lead }: { lead?: boolean }) {
             health={info?.claude ?? null}
             on={prefs.claude}
             onToggle={(on) => setFallbackPrefs({ claude: on })}
+            note={prefs.claude ? NO_ASK : undefined}
           />
         </li>
         <li>
@@ -64,18 +65,24 @@ export function FallbacksStep({ lead }: { lead?: boolean }) {
 
 const healthy = (h: CliHealth) => h.installed && h.signedIn !== false && !h.problem;
 
+/** Claude Code and Codex in the background can't ask for approval (server/fallback/backend.ts). */
+const NO_ASK = "Can't ask for approval: Ask every time runs without asking, like Auto";
+
 function CliRow({
   name,
   health: h,
   on,
   onToggle,
   usable,
+  note,
 }: {
   name: string;
   health: CliHealth | null;
   on: boolean;
   onToggle: (on: boolean) => void;
   usable?: boolean;
+  /** One line about how it runs, under the row. */
+  note?: string;
 }) {
   const ok = usable ?? (!!h && healthy(h));
   let status = <Status cls="dot-busy" text="Checking…" />;
@@ -104,6 +111,7 @@ function CliRow({
           onChange={(e) => onToggle(e.target.checked)}
         />
       </label>
+      {note && ok && <p className="meta fallback-note">{note}</p>}
       {h?.fix && (
         <p className="meta fallback-fix">
           {fixParts(h.fix).map((p, i) => (p.code ? <code key={i}>{p.text}</code> : p.text))}
@@ -153,14 +161,14 @@ function CodexMode({ info, prefs }: { info: FallbacksInfo; prefs: FallbackPrefs 
       {choice(
         "provenance",
         "Run Codex through Provenance",
-        "Provenance runs each turn on your Codex sign-in; approvals and edits show here",
+        "Provenance runs each turn on your Codex sign-in, with its history trimming; approvals and edits show here",
         pv.ready,
         pv.problem,
       )}
       {choice(
         "background",
         "Codex in the background",
-        "The codex command runs each turn on its own",
+        `The codex command runs each turn on its own. ${NO_ASK}`,
         bgOk,
         info.codex.problem,
       )}

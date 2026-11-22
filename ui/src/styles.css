@@ -1087,9 +1087,15 @@ select {
   overflow: hidden;
   white-space: nowrap;
 }
-.turn-models + .turn-dur::before {
+.turn-models + .turn-dur::before,
+.turn-models + .turn-saved::before,
+.turn-saved + .turn-dur::before {
   content: "·";
   margin-right: 8px;
+}
+.turn-saved {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .turn-models-ghost {
   position: absolute;
@@ -1406,6 +1412,15 @@ button.turn-models-list:hover .turn-models-more {
   gap: 2px;
   margin-left: -6px;
   min-width: 0;
+}
+/* A note under the bar (a fallback that can't ask for approval): one quiet line. */
+.composer-note {
+  margin: 4px 0 0 2px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.composer-note.warn {
+  color: var(--warn);
 }
 .picker {
   height: 24px;
@@ -2575,9 +2590,13 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .fallback-row .setup-switch-text {
   gap: 1px;
 }
-.fallback-fix {
+.fallback-fix,
+.fallback-note {
   margin: -4px 0 10px 40px;
   white-space: normal;
+}
+.fallback-note {
+  color: var(--warn);
 }
 .fallback-fix code {
   font-family: var(--font-mono);

@@ -12,8 +12,9 @@
 // kept, and the next turn resumes it (claude --resume <id>, codex exec resume <id>). Permissions
 // follow the composer's preset: read only -> claude dontAsk / codex -s read-only; auto ->
 // acceptEdits / workspace-write; full access -> --dangerously-skip-permissions /
-// danger-full-access. The CLIs can't ask the page for approval, so anything they would ask
-// about is declined by the CLI itself (and shows as a failed tool row).
+// danger-full-access. The CLIs can't ask the page for approval, so "Ask every time" runs like
+// Auto (the composer and the Fallbacks page warn about it), and anything the CLI itself would
+// still ask about is declined by the CLI (and shows as a failed tool row).
 //
 // Threads are JSON files in <dir>/threads, written when a turn starts and ends. Ids start with
 // "fb-" so the page can tell where a thread lives before the lists have loaded.
@@ -532,10 +533,10 @@ export function codexArgs(
 }
 
 function sandboxFrom(sandbox: unknown, approval: unknown): Sandbox {
-  const s: Sandbox =
-    sandbox === "read-only" || sandbox === "danger-full-access" ? sandbox : "workspace-write";
-  // "Ask every time" can't ask here: it runs like read only (nothing unapproved happens).
-  return approval === "untrusted" ? "read-only" : s;
+  // "Ask every time" can't ask here: it runs like Auto, without asking (the page says so). Never
+  // more than that: full access only when the preset itself is Full access.
+  if (approval === "untrusted") return "workspace-write";
+  return sandbox === "read-only" || sandbox === "danger-full-access" ? sandbox : "workspace-write";
 }
 
 function policyMode(p: unknown): Sandbox | null {

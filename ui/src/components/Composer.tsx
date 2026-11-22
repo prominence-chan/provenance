@@ -58,6 +58,14 @@ export function Composer() {
   }, [text]);
 
   const canSend = ready && !sending && !running && text.trim().length > 0;
+  // Claude Code and Codex in the background can't ask the page for approval: "Ask every time"
+  // runs them like Auto (server/fallback/backend.ts). Say so before sending, without blocking.
+  const noAsk =
+    fb && fb.mode !== "codex-pv" && settings.approvalPolicy === "untrusted"
+      ? fb.mode === "codex"
+        ? "Codex in the background"
+        : MODE_NAME[fb.mode]
+      : null;
 
   const submit = () => {
     if (!canSend) return;
@@ -151,6 +159,11 @@ export function Composer() {
               </button>
             )}
           </div>
+          {noAsk && (
+            <p className="composer-note warn" role="note">
+              {noAsk} can't ask for approval here: it will run without asking, like Auto.
+            </p>
+          )}
         </div>
       </div>
     </div>
