@@ -5,7 +5,8 @@ A local, Codex-desktop-style UI for Provenance, as a macOS app or in the browser
 small Node bridge, because browsers can't speak stdio.
 
 ```
-browser (React, Vite)  <── WebSocket /rpc ──>  server/main.ts + bridge.ts  <── stdio JSON-RPC ──>  provenance app-server  ──>  tierlm :4141
+browser (React, Vite)  <── WebSocket /rpc ──>  server/main.ts + bridge.ts  <── stdio JSON-RPC ──>  provenance app-server  ──>  provenance-core
+                       <── /api/* ─────────>  server/app.ts  ──────────────────────────────────────────────────────────────>  (:4141, or the app's own)
 ```
 
 ## Run
@@ -31,10 +32,18 @@ Other scripts:
 | `npm run smoke`               | Headless check through the bridge (no browser): new thread, "reply with just ok", resume      |
 | `npm run e2e`                 | Headless Chromium (Playwright) drives the real UI; `APPROVAL=1` also tests a command approval |
 | `npm run e2e:setup`           | Headless walk through Models & accounts against the mock router (needs `npm run build`)       |
-| `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's sign-in API (`/web/*`)    |
+| `npm run e2e:router`          | The same against a **real** provenance-core on its mock chat page, plus a real turn (below)   |
+| `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's setup API                 |
 
 `smoke` and `e2e` expect the server to already be running; `e2e:setup` starts its own UI
 server and mock router and needs neither app-server nor model quota. `MODEL=ember` picks a different tier.
+`e2e:router` runs provenance-core's `tests/serve_mock.py` (its real server; the web chats pointed
+at its mock page; a scratch home; every browser headless, the sign-in window included) from
+`ROUTER_SRC` (default `../../provenance-core`) on the Python bundled in `vendor/router` (else
+`ROUTER_SRC/.venv`), and walks first run, the browser set-up, a sign-in placed beside the app,
+shown, cancelled and then done for real, a pinned web source serving a real turn through
+app-server (`PROVENANCE_HOME` in a scratch folder; `TURN=0` skips it), site switches, accounts,
+an API key, and the router going away. Nothing shows on screen or reaches a real site.
 The free upstream models sometimes return 503; both checks retry.
 
 Requires Node >= 23.6: the server and scripts are `.ts` files run directly by Node
@@ -43,7 +52,11 @@ parameter properties).
 
 Env vars (server): `PORT` (5173), `HOST` (127.0.0.1), `PROVENANCE_BIN`
 (`~/.local/bin/provenance`), `PROVENANCE_UI_CWD` (default cwd, `$HOME` otherwise),
-`TIERLM_URL` (`http://127.0.0.1:4141`).
+`TIERLM_URL` (`http://127.0.0.1:4141`), `PCORE_TOKEN` (the router's bearer token, if it has one).
+The server starts app-server with `TIERLM_BASE_URL=<router>/v1` and `TIERLM_TOKEN`, which its
+built-in `tierlm` provider reads (`codex-rs/model-provider-info`), so the agent and the page always
+use the same router. (A `model_provider` of your own in `~/.provenance/config.toml` takes its own
+`base_url` instead.)
 
 ## App
 
@@ -55,7 +68,8 @@ localStorage, i.e. tier, theme and collapsed projects, survives relaunches; if t
 it falls back to a random one).
 
 ```sh
-npm run app:build     # dist/ + build-electron/ + vendor/browser/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
+npm run app:build     # dist/ + build-electron/ + vendor/browser/ + vendor/router/ -> release/mac-arm64/Provenance.app + release/Provenance-<v>-arm64.dmg
+npm run app:check:router  # the packaged app's own router, with no window (below)
 npm run app:install   # copy it to /Applications/Provenance.app (quits a running copy first)
 npm run app:e2e       # Playwright drives the installed app: window, health, a real "reply with just ok" turn
 npm run app:dev       # run Electron from the checkout with Vite + HMR (DevTools in the View menu)
@@ -79,29 +93,40 @@ What the shell adds:
 - **Folder picker:** the folder icon in the composer's working-directory field opens the
   native folder dialog.
 - **Links** open in the default browser.
-- **provenance-core:** on launch the app checks `routerUrl`; if it's down it runs
-  `launchctl kickstart` on the `com.yufan.tierlm` agent (or bootstraps its plist, or runs
-  `~/.tierlm/serve.sh` detached) and waits up to 20 s. A one-line banner under the header
-  says so if provenance-core still isn't answering (with a "Start it" button), or if the
-  `provenance` binary is missing. In the browser, the same banner shows without the buttons
-  (`GET /api/health`).
+- **provenance-core, its own** (`electron/router.ts`): on launch the app uses a router that
+  already answers at `routerUrl` (yours, e.g. a launchd agent: used as it is, never started,
+  restarted or stopped; with `routerLaunchdLabel` set, a loaded agent is waited for up to 20 s).
+  Otherwise it runs the copy inside the app (`Contents/Resources/router`, below) on a free
+  127.0.0.1 port, home `~/Library/Application Support/Provenance/router`, a random bearer token
+  per launch, the web chats on and pointed at the app's own browser, and hands that URL and token
+  to the UI server and to `provenance app-server`. It watches it (`/health` every 5 s), restarts
+  it with backoff when it exits or stops answering, and stops it on quit; if the app dies, the
+  router stops by itself (`serve --watch-stdin`: its stdin is a pipe the app holds) and so do its
+  browsers (their own watchdogs). The banner under the header says "Starting Provenance's model
+  router…" while it comes up, and which router is down otherwise, with Restart it / Retry; it
+  also says when the `provenance` binary is missing. In the browser, the same banner shows
+  without the buttons (`GET /api/health`).
 - **PATH:** the login shell's PATH (`$SHELL -ilc`) plus `~/.local/bin` and Homebrew, so
   commands the agent runs find your tools.
 
 Files, all in `~/Library/Application Support/Provenance/`:
 
-| file                       | what                                                                  |
-| -------------------------- | --------------------------------------------------------------------- |
-| `settings.json`            | overrides (Preferences… opens it; the app offers to relaunch on save) |
-| `window-state.json`        | window bounds                                                         |
-| `logs/main.log`            | app + bridge log                                                      |
-| `logs/provenance-core.log` | output of `serve.sh` when the app started it                          |
+| file                       | what                                                                                                                                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `settings.json`            | overrides (Preferences… opens it; the app offers to relaunch on save)                                                                          |
+| `window-state.json`        | window bounds                                                                                                                                  |
+| `logs/main.log`            | app + bridge log                                                                                                                               |
+| `logs/provenance-core.log` | the app's own router (one older copy kept as `.1` past 5 MB)                                                                                   |
+| `router/`                  | the app's own router's home (`PCORE_HOME`): accounts and sign-ins, `settings.json`, `keys.json` (0600), browser profiles, the prepared browser |
 
 `settings.json` keys (defaults): `provenanceBin` (`~/.local/bin/provenance`), `routerUrl`
-(`http://127.0.0.1:4141`), `autoStartRouter` (`true`), `routerLaunchdLabel`
-(`com.yufan.tierlm`), `routerStartScript` (`~/.tierlm/serve.sh`), `defaultCwd` (empty: last
-used, else home), `port` (`41730`). The env vars `PROVENANCE_BIN`, `TIERLM_URL` and
-`PROVENANCE_ROUTER_AUTOSTART=0` still win.
+(`http://127.0.0.1:4141`: where your own router answers, if you run one), `router` (`auto`: the
+router at `routerUrl` if it answers at launch, else the app's own; `external`: only `routerUrl`;
+`bundled`: always the app's own), `routerLaunchdLabel` (empty; a launchd agent running your own
+router, waited for at launch), `defaultCwd` (empty: last used, else home), `port` (`41730`). The
+env vars `PROVENANCE_BIN`, `TIERLM_URL`, `PROVENANCE_ROUTER=auto|external|bundled` and
+`PROVENANCE_ROUTER_AUTOSTART=0` (= external) still win; an old `autoStartRouter: false` means
+external.
 
 Packaging: `scripts/build-electron.mjs` bundles `electron/main.ts` (with `server/app.ts`,
 `bridge.ts` and `ws`) and `electron/preload.ts` with esbuild into `build-electron/*.cjs`, so the
@@ -109,6 +134,25 @@ app ships no `node_modules`. electron-builder (`build` in `package.json`) makes 
 and `.dmg`; `scripts/adhoc-sign.cjs` ad-hoc signs the app before the DMG is made (Apple Silicon
 won't run unsigned arm64 code). No Developer ID, no notarization: a downloaded DMG needs
 right-click → Open the first time. The icon is `design/icon/Provenance.icns`.
+
+**Bundled router:** `Contents/Resources/router/` is provenance-core with no Python install, venv
+or launchd job needed: `python/` is CPython 3.13 from python-build-standalone (a relocatable
+CPython, pinned with its sha256 in `scripts/fetch-router.ts`) whose own site-packages hold the
+wheels in `scripts/router-requirements.txt` (the versions provenance-core's tests pass with,
+wheels only) and `provenance_core` itself as plain files; `catalog.yaml` and `catalog.app.yaml`
+(the router's overlay for a new user: one account per site, nothing signed in skipped, OVH needing
+a key); `node`, a wrapper that runs patchright's driver on the app's own Electron in Node mode
+(`ELECTRON_RUN_AS_NODE`), so the driver's own 117 MB Node isn't shipped; `VERSION.json`. Chosen
+over a frozen binary (PyInstaller, Nuitka) because it is CPython as-is: the router stays readable
+and patchable `.py` files, its dependencies are the ordinary wheels its tests run with, and
+nothing has to be taught about patchright's driver files or lazy imports; a freezer would carry
+the same interpreter and libraries, so it would not be smaller. tkinter, idle, the test suite,
+pip and headers are removed; everything is compiled ahead (unchecked-hash `.pyc`) and run with
+`-I -B`, so nothing is ever written inside the signed bundle. `scripts/fetch-router.ts` (run by
+`app:build`, or `npm run router:fetch`) builds `vendor/router/` from `ROUTER_SRC` (default
+`../../provenance-core`; it must have `catalog.app.yaml`), downloading the pinned Python once
+into `vendor/.cache/` and rebuilding the wheels only when the pins change. It adds ~96 MB to the
+app (~33 MB to the DMG).
 
 **Bundled browser:** the app carries the Chrome for Testing build provenance-core drives for the
 chat sites, unmodified, at `Contents/Resources/browser/Google Chrome for Testing.app`
@@ -125,23 +169,41 @@ Chrome's major version passes it: provenance-core only uses a build at least tha
 The web UI only knows it's in the app through `window.provenanceApp` (`src/app-shell.ts`,
 from the preload), which sets `html[data-shell="darwin"]` for the window-chrome styles.
 
+**Checking the packaged app without a window:** `PROVENANCE_HEADLESS=1` opens no window and no
+Dock icon and prints one `PROVENANCE_READY {ui, router, mode, routerPid}` line once serving;
+`PROVENANCE_USER_DATA=<dir>` keeps settings, logs and the router's home there (and with them the
+single-instance lock), so a check never meets the installed app. `npm run app:check:router`
+(`APP=` another .app) uses both, with app-server's state in a scratch `PROVENANCE_HOME`: an
+answering router at `routerUrl` is used and nothing starts; otherwise the bundled router answers
+on its own port and pid (checked with `lsof` against the launchd router's), wants its token,
+lists the sites and tiers, prepares the browser from `Contents/Resources/browser`, is restarted
+when killed, and is gone after quit; a second launch is killed outright and its router stops by
+itself. `node scripts/first-run-tour.ts` screenshots a new user's first launch (the app's
+supervisor on `vendor/router` with a fresh home, headless Chromium).
+
 ## Layout
 
 ```
 ui/
 ├── server/
 │   ├── app.ts         startUiServer(): Vite middleware (dev) or dist/ (prod), /api/info, /api/tiers,
-│   │                  /api/sources, /api/health, /api/usage, /api/web/*, WS /rpc (same-origin only)
+│   │                  /api/sources, /api/health, /api/usage, /api/web/*, /api/pool/*, WS /rpc
 │   ├── main.ts        CLI for `npm run dev` / `npm start`
-│   └── bridge.ts      AppServerBridge: spawns `provenance app-server`, relays JSON-RPC
+│   └── bridge.ts      AppServerBridge: spawns `provenance app-server` (router URL in its env), relays JSON-RPC
+├── shared/
+│   └── router-api.ts  provenance-core's wire shapes + the proxy's route table, shared by all of the above
 ├── electron/
-│   ├── main.ts        desktop app: window, menu, settings, provenance-core start, runs startUiServer()
+│   ├── main.ts        desktop app: window, menu, settings, runs startUiServer(), test switches
+│   ├── router.ts      RouterSupervisor: an answering router, else the bundled one (start, watch, stop)
 │   └── preload.ts     window.provenanceApp (folder picker, start router, preferences, menu events)
 ├── scripts/
 │   ├── gen-protocol.ts  runs `provenance app-server generate-ts --experimental`
-│   ├── smoke.ts / e2e.ts / app-e2e.ts / setup-e2e.ts, chromium.ts (which Chromium they run)
-│   ├── mock-router.ts   stand-in for provenance-core's /web/* sign-in API (dev + setup-e2e)
-│   ├── build-electron.mjs, fetch-browser.ts, adhoc-sign.cjs, install-app.mjs   app packaging
+│   ├── smoke.ts / e2e.ts / app-e2e.ts, chromium.ts (which Chromium they run)
+│   ├── setup-e2e.ts / router-e2e.ts, e2e-kit.ts   Models & accounts on the mock / a real router
+│   ├── mock-router.ts   stand-in for provenance-core's setup API (dev + setup-e2e)
+│   ├── app-router-check.ts, first-run-tour.ts   the packaged app's router, headless; first-run screenshots
+│   ├── build-electron.mjs, fetch-browser.ts, fetch-router.ts (+ router-requirements.txt),
+│   │   adhoc-sign.cjs, install-app.mjs   app packaging
 │   └── provenance-ui    launcher (symlinked into ~/.local/bin)
 └── src/
     ├── protocol/
@@ -153,8 +215,8 @@ ui/
     │   ├── state.ts     AppState / ThreadView / TurnView shapes, settings persistence
     │   ├── reducer.ts   applyNotification(): app-server notifications -> state (pure)
     │   └── actions.ts   everything that sends requests (threads, turns, approvals, interrupt)
-    ├── setup/           Models & accounts: SetupDialog.tsx (the four steps), SetupArt.tsx (step
-    │                    pictures), web.ts (the /api/web client), open.ts (open state, first run)
+    ├── setup/           Models & accounts: SetupDialog.tsx, SiteSteps / SignInSteps / KeysStep.tsx,
+    │                    parts.tsx, SetupArt.tsx (step pictures), web.ts (the API client), open.ts
     ├── components/
     │   ├── Sidebar.tsx        threads grouped by project (cwd), search, new thread, archive, status
     │   ├── ThreadHeader.tsx   slim bar: sidebar toggle (when hidden), title, cwd, tier, context ring
@@ -229,27 +291,42 @@ and once on first run when no site is signed in on any account (closing it is re
 localStorage `provenance-ui.setup-dismissed`).
 
 - **Site:** each site with the models it gives and the tier they land in, and one status
-  line (Ready, Ready on N accounts, Signing in…, Blocked, Not signed in).
-- **Account:** per account (one browser profile, shared by every site), signed in or not, when
-  last checked, requests today against the cap, a block reason; one primary Sign in; add another
-  account (next free letter id), remove one (from all sites). A model limited to some accounts
-  says which ("only on Account B").
-- **Sign in:** provenance-core opens one visible browser window beside the app on the site's
-  sign-in page; the dialog says so and polls `GET /web/login` once a second through
-  preparing (the browser still downloading) → open → verifying → signed_in, or failed with
-  the router's reason and Try again. The router closes the window itself. Cancel, Back or
-  closing the dialog mid sign-in cancels it. A 409 (another sign-in open) shows its detail under
-  the account.
-- **Ready:** the models now in the tier picker (sources are re-read), Done.
-- Browser not ready: a strip with Download and its progress (`POST /web/browser/prepare`).
+  line (Ready, Ready on N accounts, Signing in…, Paused, Off, Not signed in); sites without
+  models are left out. Below them, the **Token pool** row, and a note saying which router the
+  app uses (Provenance's own, or yours at host:port, with its pid).
+- **Account:** the site's own switches first: **Use <site>** (on / off) and its **daily limit**
+  (chats per account per day), kept by the router (`PATCH /web/providers/{id}`; PCORE_CHATGPT_WEB=0
+  on the router locks the switch). Then per account (one browser profile, shared by every site):
+  signed in or not, as whom (the e-mail the site showed), when last checked, chats today against
+  the limit, why it is paused; one primary Sign in; add another account (next free letter id),
+  remove one (from all sites). A model limited to some accounts says which ("only on Account B").
+- **Sign in:** provenance-core opens one visible browser window beside the app (the page sends
+  `bounds` worked out from its own window and screen) on the site's sign-in page; the dialog says
+  so, offers **Show the window** (`POST /web/login/show`) and polls `GET /web/login` once a second
+  through preparing (the browser being set up: its stage and download progress) → open →
+  verifying → signed_in, or failed with the router's reason and Try again. The router closes the
+  window itself. Cancel, Back or closing the dialog mid sign-in cancels it. A 409 (another
+  sign-in open) shows its detail under the account.
+- **Ready:** signed in as whom, the models now in the tier picker (sources are re-read), Done.
+- **Token pool:** each API provider: works (with a key set here or by the router's own setup,
+  or without one), needs a key, its models and tiers; Add key / Change opens password fields for
+  its variables, Save sends them to the router (`PUT /pool/keys/{id}`), which keeps them in its
+  home readable by you only and never sends them back; Remove key (`DELETE`).
+- Browser not ready: a strip with Set it up and its stage and progress (`POST /web/browser/prepare`).
   Router down: a page state with Start it (app) / Try again. A router without `/web/*`: a page
   state asking to update it.
 
-The UI server proxies `/api/web/<route>` to provenance-core's `/web/<route>` (only the seven
-routes the dialog uses; writes need our own Origin and a JSON body) with the router's status
-and body as-is. `scripts/mock-router.ts` implements the same API with its state transitions
-(`MOCK_SCENARIO=fresh|signed|nobrowser`, `MOCK_AUTO=1` finishes a sign-in by itself after 4 s):
-`npm run mock:router`, then `TIERLM_URL=http://127.0.0.1:4199 npm run dev`.
+Code: `SetupDialog.tsx` (the dialog, its steps and polling), `SiteSteps.tsx` (Site, Account,
+the site switches), `SignInSteps.tsx` (Sign in, Ready), `KeysStep.tsx` (Token pool), `parts.tsx`
+(status lines, the browser strip, page states, icons), `web.ts` (the API client), `open.ts` (open
+state, first run). The router's wire shapes live once, in `shared/router-api.ts`, for the page,
+the UI server, the desktop shell and the mock router.
+
+The UI server proxies `/api/web/<route>` and `/api/pool/<route>` to provenance-core (only the
+routes in `ROUTER_ROUTES`; writes need our own Origin and a JSON body; bodies are never logged)
+with the router's status and body as-is. `scripts/mock-router.ts` implements the same API with
+its state transitions (`MOCK_SCENARIO=fresh|signed|nobrowser`, `MOCK_AUTO=1` finishes a sign-in
+by itself after 4 s): `npm run mock:router`, then `TIERLM_URL=http://127.0.0.1:4199 npm run dev`.
 
 ## Tool runs and model attribution
 
@@ -284,8 +361,10 @@ id>&since&until` once a turn completes (and for history turns as they render). A
   provenance-core's `GET /v1/sources` (via `/api/sources`, re-read each time the picker opens,
   never polled): **Auto** sends the plain tier (`solstice`, the router picks), a source sends
   its `model` (`luna/solstice`, that source pinned), with the share of today's usage it has
-  left and, when non-zero, how many requests it is serving. Sources with `pinnable: false`
-  are left out (Auto can still use them); unavailable ones show greyed out. A pinned source's
+  left and, when non-zero, how many requests it is serving. Sources that need something first
+  (`needs`: API keys, a sign-in) are listed after them with "Add API keys…" / "Sign in…" and open
+  Models & accounts there; other sources with `pinnable: false` are left out (Auto can still use
+  them); unavailable ones show greyed out. A pinned source's
   label follows the tier name in the picker button and the tier badges ("solstice · GPT-6
   Luna"). Router down or without `/v1/sources`: no submenu, plain tiers as before. Keys:
   ↑/↓ tiers, → into the submenu, ← back, Enter picks (Enter on a tier row = Auto).
