@@ -94,6 +94,7 @@
         "to": "agent",
         "filter": [
           "provenance",
+          "codex-code-mode-host",
           "VERSION.json"
         ]
       }
