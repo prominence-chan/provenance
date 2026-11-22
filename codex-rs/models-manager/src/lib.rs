@@ -25,8 +25,8 @@ pub fn tierlm_models_response() -> codex_protocol::openai_models::ModelsResponse
     const TIERS: [(&str, &str, &str); 4] = [
         ("nova", "Nova", "Hyperfrontier: strongest pooled models"),
         ("solstice", "Solstice", "Frontier: default for everyday coding"),
-        ("spark", "Spark", "Strong mid tier: capable, plentiful"),
-        ("ember", "Ember", "Fast: small models for quick tasks"),
+        ("ember", "Ember", "Strong mid tier: capable, plentiful"),
+        ("spark", "Spark", "Fast: small models for quick tasks"),
     ];
     let models = TIERS
         .into_iter()

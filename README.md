@@ -28,7 +28,7 @@ tiers of a dozen LLM providers and sorts them into four tiers.
 | `nova`     | hyperfrontier               |
 | `solstice` | frontier (default)          |
 | `spark`    | strong mid-size             |
-| `ember`    | fast / small                |
+| `spark` | fast / small |
 
 No ChatGPT login, no `OPENAI_API_KEY`.
 
