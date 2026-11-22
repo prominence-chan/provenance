@@ -4,8 +4,10 @@
 // Three ways a thread can run on a fallback (the "model" a thread is started with says which):
 //   claude:<model>    the `claude` CLI runs the turn (claude -p, stream-json), in the thread's folder
 //   codex:<model>     the stock `codex` CLI runs the turn (codex exec --json)
-//   codex-pv:<model>  the provenance binary runs the turn itself, with its own harness, but its model
-//                     requests go to OpenAI with your Codex ChatGPT login instead of to provenance-core
+//   codex-pv:<model>  the provenance binary runs the turn itself, with its own harness, on your Codex
+//                     ChatGPT login: its model requests go through provenance-core's pass-through
+//                     (history pruning, usage ledger) on to OpenAI, never to the tiers
+//                     (server/fallback/codex-route.ts)
 // <model> is empty for the CLI's own default.
 
 export type FallbackCli = "claude" | "codex";

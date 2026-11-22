@@ -35,11 +35,14 @@ export type BridgeStatus =
 
 export interface BridgeOptions {
   bin: string;
-  args?: string[];
+  /** Arguments after `app-server`, or a getter read at every start (they can name the router's URL). */
+  args?: string[] | (() => string[]);
   clientInfo: { name: string; title: string | null; version: string };
   /** Extra environment, read at every start (the router's URL can change between starts). */
   env?: () => NodeJS.ProcessEnv;
   log?: (...args: unknown[]) => void;
+  /** Applied to every line app-server prints (stdout and stderr) before it is read or logged. */
+  mask?: (line: string) => string;
 }
 
 interface PendingClientRequest {
@@ -66,6 +69,10 @@ export class AppServerBridge {
   constructor(opts: BridgeOptions) {
     this.opts = opts;
     this.log = opts.log ?? ((...a) => console.log("[bridge]", ...a));
+  }
+
+  private mask(line: string): string {
+    return this.opts.mask ? this.opts.mask(line) : line;
   }
 
   start(): void {
@@ -167,7 +174,8 @@ export class AppServerBridge {
       return;
     }
 
-    const child = spawn(this.opts.bin, ["app-server", ...(this.opts.args ?? [])], {
+    const args = typeof this.opts.args === "function" ? this.opts.args() : (this.opts.args ?? []);
+    const child = spawn(this.opts.bin, ["app-server", ...args], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...this.opts.env?.() },
     });
@@ -186,12 +194,13 @@ export class AppServerBridge {
       this.scheduleRetry(`app-server exited (code ${code ?? "null"}, signal ${signal ?? "none"})`);
     });
     child.stderr.on("data", (d: Buffer) => {
-      const text = d.toString().trimEnd();
+      const text = this.mask(d.toString().trimEnd());
       if (text) this.log("[app-server stderr]", text);
     });
 
-    readline.createInterface({ input: child.stdout }).on("line", (line) => {
-      if (!line.trim()) return;
+    readline.createInterface({ input: child.stdout }).on("line", (raw) => {
+      if (!raw.trim()) return;
+      const line = this.mask(raw);
       let msg: Json;
       try {
         msg = JSON.parse(line);

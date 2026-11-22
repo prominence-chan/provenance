@@ -7,10 +7,12 @@
 // Walks: first launch with nothing set up -> the welcome opens -> Models (a site row opens
 // Models & accounts there and comes back) -> Fallbacks (health, switches, Codex's two modes)
 // -> Done; it doesn't open again. The model picker's Fallbacks section and its model lists; a
-// Claude Code thread (streamed items, a resumed second turn); opening a tier thread points the
+// Claude Code thread (streamed items, a resumed second turn; "Ask every time" warns that it runs
+// without asking and runs it like Auto); opening a tier thread points the
 // picker back at its tier; a thread that has outgrown the free models shows the suggestion
 // (router flags + repeated commands + compactions), a calm one doesn't; "Continue in Codex"
-// carries a brief over to Codex through Provenance; dismissing it sticks. Then a Mac with
+// carries a brief over to Codex through Provenance (its app-server pointed at the router's
+// pass-through, the turn's saved history in the footer); dismissing it sticks. Then a Mac with
 // neither CLI: "Not installed" with how to get each, and the picker's muted rows.
 
 import {
@@ -152,6 +154,15 @@ try {
     await page.locator(`${welcome} .fallback-mode[data-mode="background"] input`).isEnabled(),
     "Codex in the background is the other choice",
   );
+  check(
+    /can't ask for approval/i.test(
+      await page.locator(`${welcome} .fallback-row[data-cli="claude"] .fallback-note`).innerText(),
+    ) &&
+      /can't ask for approval/i.test(
+        await page.locator(`${welcome} .fallback-mode[data-mode="background"]`).innerText(),
+      ),
+    "Claude Code and Codex in the background say they can't ask for approval",
+  );
   await layoutOk(page, "welcome fallbacks");
   await shot(page, "welcome-fallbacks");
   await page.locator(welcome).getByRole("button", { name: "Next" }).click();
@@ -209,6 +220,17 @@ try {
 
   // ---- 3. a Claude Code thread ---------------------------------------------------------
   log("claude thread");
+  const perms = page.locator(".composer .picker-wrap select.picker");
+  check((await page.locator(".composer-note").count()) === 0, "Auto: no note");
+  await perms.selectOption("ask");
+  const noAsk = await page.locator(".composer-note").innerText();
+  check(
+    /Claude Code can't ask for approval here: it will run without asking, like Auto/.test(noAsk),
+    `Ask every time: the composer warns it runs without asking (${noAsk})`,
+  );
+  check(await page.locator(".composer .send-btn").isVisible(), "and sending stays possible");
+  await layoutOk(page, "composer with the note");
+  await shot(page, "composer-no-ask");
   await page.fill(".composer textarea", "Fix the typo in a.txt");
   await page.keyboard.press("Enter");
   await page.waitForSelector('.turn .agent-message:has-text("Done (new session).")', {
@@ -231,6 +253,10 @@ try {
   check(
     r.stdin === "Fix the typo in a.txt" && r.argv.includes("opus"),
     "claude ran with the prompt on stdin and --model opus",
+  );
+  check(
+    r.argv.includes("acceptEdits") && !r.argv.includes("dontAsk"),
+    "Ask every time ran it like Auto (acceptEdits), not read only",
   );
   await page.fill(".composer textarea", "Now the other one");
   await page.keyboard.press("Enter");
@@ -274,6 +300,11 @@ try {
   check((await page.locator(".strain-note").count()) === 0, "a calm thread shows nothing");
   await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
   await page.waitForSelector(".strain-note");
+  await fetch(`${mock.url}/mock/usage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ pruned: { before: 50_000, after: 30_000 } }),
+  });
   await page.locator(".strain-note").getByRole("button", { name: "Continue in Codex" }).click();
   await page.waitForSelector('.agent-message:has-text("ok from openai")', { timeout: 30_000 });
   const pv = runs()
@@ -283,6 +314,22 @@ try {
     pv.argv.join(" ").includes('model_provider="openai"') &&
       pv.home === path.join(dataDir, "codex-home"),
     "it ran on the second app-server: OpenAI provider, its own home",
+  );
+  check(
+    pv.argv.join(" ").includes(`openai_base_url="${mock.url}/codex-sub/open/backend-api/codex"`) &&
+      pv.argv.includes("features.enable_request_compression=false"),
+    "its model requests go to the router's pass-through, not straight to OpenAI",
+  );
+  await page.waitForSelector(".turn-footer .turn-saved", { timeout: 15_000 });
+  const saved = await page.locator(".turn-footer .turn-saved").last();
+  check(
+    (await saved.innerText()) === "history 40% smaller" &&
+      /30,000 of 50,000 characters/.test((await saved.getAttribute("title")) ?? ""),
+    "the turn's footer says how much smaller the router made its history",
+  );
+  check(
+    (await page.locator(".composer-note").count()) === 0,
+    "through Provenance asks for approval itself: no note there",
   );
   check(
     /^\[Continued from the Provenance thread "Refactor the parser/.test(pv.text ?? ""),

@@ -574,12 +574,14 @@ const usageInFlight = new Set<string>();
 
 /**
  * Which concrete models served a finished turn, from provenance-core's usage ledger (via
- * /api/usage). Requests are keyed by thread id + turn id (Codex's client_metadata); the turn's
+ * /api/usage), and what its history pruning saved. Requests are keyed by thread id + turn id
+ * (Codex's client_metadata); the turn's
  * time window catches entries without a turn id. A turn the ledger doesn't know (older than the
  * ledger, or another router) stores an empty result and shows nothing.
  */
 export async function loadTurnUsage(threadId: string, turn: TurnView, retry = true): Promise<void> {
-  if (usageInFlight.has(turn.id) || backendOf(threadId) !== "main") return; // only the tiers' router knows
+  // The router knows the tiers' turns and Codex-through-Provenance ones (its pass-through), not the CLIs'.
+  if (usageInFlight.has(turn.id) || backendOf(threadId) === "fallback") return;
 
   usageInFlight.add(turn.id);
   const q = new URLSearchParams({ key: threadId, turn: turn.id });
@@ -594,6 +596,7 @@ export async function loadTurnUsage(threadId: string, turn: TurnView, retry = tr
       output_tokens: r.output_tokens ?? 0,
       models: r.models ?? [],
       ...(r.context ? { context: r.context } : {}),
+      ...(r.pruned ? { pruned: r.pruned } : {}),
     };
   } catch {
     // leave it empty

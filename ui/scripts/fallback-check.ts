@@ -6,9 +6,11 @@
 //
 // Covers: health for installed / signed out / missing CLIs and the "through Provenance" home;
 // a Claude Code thread (streamed text, a command, an edit, sub-agent rows left out), its second
-// turn resuming the CLI's session, the permission preset on the command line; a Codex thread
-// (exec --json, then exec resume); interrupt; a failed turn; a CLI that went missing; threads
-// read back from disk by a new backend.
+// turn resuming the CLI's session, the permission preset on the command line ("Ask every time"
+// runs like Auto); a Codex thread (exec --json, then exec resume); interrupt; a failed turn; a CLI
+// that went missing; threads read back from disk by a new backend. "Through Provenance": the
+// router pass-through's key (the same as provenance-core's), its arguments, and the check that
+// the router's pass-through answers.
 
 import {
   appendFileSync,
@@ -24,6 +26,13 @@ import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { FallbackBackend } from "../server/fallback/backend.ts";
 import { checkClaude, checkCodex, checkThroughProvenance } from "../server/fallback/health.ts";
+import {
+  checkCodexRoute,
+  codexPvArgs,
+  codexSubKey,
+  maskCodexSubKey,
+} from "../server/fallback/codex-route.ts";
+import http from "node:http";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const log = (...a: unknown[]) => console.log("[fallback-check]", ...a);
@@ -128,6 +137,48 @@ check(
   "no provenance binary: not ready, says why",
 );
 
+// ---- through Provenance: the router's pass-through --------------------------------------------
+log("through the router");
+check(
+  codexSubKey("t0k-example") === "6f627cf214b49ef8ff5c3a507c87e31a" && codexSubKey() === "open",
+  "the path key is provenance-core's codex_sub.path_key (a hash of the token; open without one)",
+);
+const pvArgs = codexPvArgs({ url: "http://127.0.0.1:4141/", token: "t0k-example" });
+check(
+  pvArgs.join(" ") ===
+    '-c model_provider="openai" -c openai_base_url="http://127.0.0.1:4141/codex-sub/6f627cf214b49ef8ff5c3a507c87e31a/backend-api/codex" -c features.enable_request_compression=false',
+  "app-server args: OpenAI provider, its base at the router's pass-through, no request compression",
+);
+check(
+  !pvArgs.join(" ").includes("t0k-example") && !pvArgs.join(" ").includes("chatgpt_base_url"),
+  "the token itself is never on the command line, and chatgpt_base_url is left alone",
+);
+check(
+  maskCodexSubKey(
+    "error sending request for url (http://x/codex-sub/6f627cf2/backend-api/codex)",
+  ) === "error sending request for url (http://x/codex-sub/***/backend-api/codex)",
+  "the key is masked in what app-server prints",
+);
+const fakeRouter = http.createServer((req, res) => {
+  const ok = req.url === `/codex-sub/${codexSubKey("good")}/_health`;
+  res.writeHead(ok ? 200 : req.url?.endsWith("/_health") ? 401 : 404).end(ok ? '{"ok":true}' : "");
+});
+await new Promise<void>((r) => fakeRouter.listen(0, "127.0.0.1", r));
+const fr = `http://127.0.0.1:${(fakeRouter.address() as { port: number }).port}`;
+check(
+  (await checkCodexRoute({ url: fr, token: "good" })) === null,
+  "a router with the pass-through: ok",
+);
+check(
+  /didn't accept/.test((await checkCodexRoute({ url: fr, token: "other" })) ?? ""),
+  "a wrong key: says so",
+);
+fakeRouter.close();
+check(
+  /isn't running/.test((await checkCodexRoute({ url: fr, token: "good" })) ?? ""),
+  "no router: says it isn't running (never goes direct)",
+);
+
 // ---- the backend over a real WebSocket ----------------------------------------------------------
 const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
 await new Promise((r) => wss.once("listening", r));
@@ -193,6 +244,7 @@ check(
   "the page gets a ready status on connect",
 );
 const text = (s: string) => [{ type: "text", text: s, text_elements: [] }];
+const backendArchive = (threadId: string) => c.call("thread/archive", { threadId });
 
 log("claude thread");
 const started = await c.call("thread/start", {
@@ -267,6 +319,20 @@ check(
   (turn.items.at(-1) as { text: string }).text === "Done (resumed session).",
   "the resumed answer",
 );
+await c.call("turn/start", {
+  threadId: th.id,
+  input: text("Ask me first"),
+  sandboxPolicy: { type: "workspaceWrite" },
+  approvalPolicy: "untrusted",
+});
+turn = await c.turnDone(th.id);
+r = runs().at(-1)!;
+check(
+  r.argv.includes("acceptEdits") &&
+    !r.argv.includes("dontAsk") &&
+    !r.argv.includes("--dangerously-skip-permissions"),
+  "Ask every time: Claude Code runs like Auto (acceptEdits), not read only, not full access",
+);
 const list = (await c.call("thread/list", { limit: 10 })).result as {
   data: { id: string; preview: string }[];
 };
@@ -278,8 +344,8 @@ const turns = (
   await c.call("thread/turns/list", { threadId: th.id, limit: 50, sortDirection: "desc" })
 ).result as { data: { items: unknown[] }[] };
 check(
-  turns.data.length === 2 && turns.data[0].items.length === 5,
-  "thread/turns/list: both turns, newest first, items kept",
+  turns.data.length === 3 && turns.data[0].items.length === 5,
+  "thread/turns/list: all turns, newest first, items kept",
 );
 const wrong = await c.call("turn/start", {
   threadId: th.id,
@@ -324,6 +390,22 @@ check(
   (turn.items.at(-1) as { text: string }).text === "Done (resumed session).",
   "the resumed answer",
 );
+const ask = (
+  await c.call("thread/start", {
+    model: "codex:",
+    cwd: work,
+    sandbox: "workspace-write",
+    approvalPolicy: "untrusted",
+  })
+).result as { thread: { id: string } };
+await c.call("turn/start", { threadId: ask.thread.id, input: text("Ask first") });
+turn = await c.turnDone(ask.thread.id);
+r = runs().at(-1)!;
+check(
+  r.argv.slice(0, 5).join(" ") === "exec --json --skip-git-repo-check -s workspace-write",
+  "Ask every time: Codex runs with workspace-write, like Auto",
+);
+await backendArchive(ask.thread.id);
 
 log("interrupt, failure, missing CLI");
 process.env.FAKE_SLOW = "1";

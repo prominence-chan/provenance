@@ -17,6 +17,7 @@
 //   POST /mock/down     {"down": true}   every other route then drops the connection
 //   POST /mock/legacy   {"legacy": true} /web/* 404s, like a router from before the API
 //   POST /mock/usage    {"turn", "context": {"trimmed": 2}}  what /v1/pcore/usage says of a turn
+//                       ({"pruned": {before, after}} alone: what it says of every turn's pruning)
 //   GET  /mock/state    the whole state, for assertions
 //
 // The router API it mirrors (provenance-core's server.py; shapes in shared/router-api.ts):
@@ -29,6 +30,7 @@
 //   POST /web/browser/prepare
 //   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}
 //   GET  /health, /v1/models, /v1/sources, /v1/pcore/usage
+//   GET  /codex-sub/open/_health  the Codex pass-through is there (this mock has no token: key "open")
 // Everything a real router has that matters to the screen; what a real one does beyond it
 // (the window, the cookie, the check) is in provenance-core's own tests and router-e2e.ts.
 
@@ -257,6 +259,8 @@ function scenario(name: string): State {
 let state = scenario(process.env.MOCK_SCENARIO ?? "fresh");
 /** Per turn id: the "context" flags /v1/pcore/usage reports (POST /mock/usage). */
 const usage: Record<string, Record<string, number>> = {};
+/** What /v1/pcore/usage says every turn's history pruning saved (POST /mock/usage {pruned}). */
+let pruned: { before: number; after: number } | null = null;
 /** Bumped on every reset so timers from an earlier scenario do nothing. */
 let epoch = 0;
 let prepareProgress = 0;
@@ -484,7 +488,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     if (p === "/mock/usage") {
       // what /v1/pcore/usage says about one turn's context (provenance-core context_signal.py)
-      usage[String(body.turn)] = (body.context ?? {}) as Record<string, number>;
+      if (body.pruned) pruned = body.pruned as { before: number; after: number };
+      if (body.turn) usage[String(body.turn)] = (body.context ?? {}) as Record<string, number>;
       return send(res, 200, { ok: true });
     }
     if (p === "/mock/state") return send(res, 200, state);
@@ -516,8 +521,21 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       output_tokens: 3,
       models: [one],
       context: usage[turn] ?? {},
+      ...(pruned
+        ? {
+            pruned: {
+              requests: 2,
+              ...pruned,
+              saved: pruned.before - pruned.after,
+            },
+          }
+        : {}),
     });
   }
+  if (p.startsWith("/codex-sub/") && p.endsWith("/_health") && m === "GET")
+    return p === "/codex-sub/open/_health"
+      ? send(res, 200, { ok: true, upstream: "https://chatgpt.com", prune: true })
+      : send(res, 401, { error: { message: "bad pass-through key" } });
 
   if (p === "/web/accounts" && m === "GET") return send(res, 200, accountsBody());
   if (p === "/web/accounts" && m === "POST") {

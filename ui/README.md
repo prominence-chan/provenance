@@ -383,14 +383,32 @@ one-line install command) or Not signed in (with the command to run), and a swit
 two modes:
 
 - **Run Codex through Provenance:** the provenance binary runs the turn, as any thread here
-  (approvals, live edits, interrupt), but on OpenAI with your Codex ChatGPT sign-in instead of
-  provenance-core. A second `provenance app-server` (`-c model_provider="openai"`) on its own home
-  (`<data>/codex-home`) whose `auth.json` and `auth.lock` are symlinks to Codex's
-  (`$CODEX_HOME` or `~/.codex`): the fork's credential store reads through the link and writes a
-  refresh to its target, and both lock the same file, so the two share one login and no token is
-  copied or read by the app (`server/fallback/codex-home.ts`). No Rust change. Its models are the
-  binary's own catalog for that provider. Note: provenance-core's pruning and compaction don't
-  apply on this path (its requests don't go through the router); Codex's own compaction does.
+  (approvals, live edits, interrupt), on your Codex ChatGPT sign-in, with its model requests going
+  through provenance-core's pass-through to OpenAI, so the router's history pruning applies. A
+  second `provenance app-server` on its own home (`<data>/codex-home`) whose `auth.json` and
+  `auth.lock` are symlinks to Codex's (`$CODEX_HOME` or `~/.codex`): the fork's credential store
+  reads through the link and writes a refresh to its target, and both lock the same file, so the
+  two share one login and no token is copied or read by the app (`server/fallback/codex-home.ts`).
+  It starts with (`server/fallback/codex-route.ts`)
+
+  ```
+  -c model_provider="openai"
+  -c openai_base_url="<router>/codex-sub/<key>/backend-api/codex"
+  -c features.enable_request_compression=false
+  ```
+
+  The binary keeps doing its own auth (its Authorization and account headers go through the
+  router untouched, never stored or logged); `<key>` is derived from the router's token (a hash:
+  it opens only the pass-through and never gives the token away; `open` for a router without
+  one), and masked in what app-server prints. The router forwards to
+  `https://chatgpt.com/backend-api/codex/…` and prunes old tool output in the request in its
+  stable mode, so OpenAI's prompt cache keeps hitting (provenance-core `docs/TECHNICAL.md`,
+  "Codex on your own sign-in"); Codex's own compaction handles overflow. A finished turn's footer
+  says how much smaller its history went out ("history 31% smaller", from the router's usage
+  ledger). If the router or its pass-through isn't there, the mode is not ready and says why
+  ("Provenance's router isn't running"); it never goes to OpenAI directly. No Rust change. Its
+  models are the binary's own catalog for that provider.
+
 - **Codex in the background:** the stock `codex` CLI runs each turn (`codex exec --json`, then
   `codex exec resume <id>`), like Claude Code below.
 
@@ -402,8 +420,9 @@ app-server's own items (messages streaming, commands, edits with a diff, tool ca
 methods and notifications, so the thread view renders them unchanged. Permissions follow the
 composer: Read only → `--permission-mode dontAsk` / `-s read-only`; Auto → `acceptEdits` /
 `workspace-write`; Full access → `--dangerously-skip-permissions` / `danger-full-access`;
-"Ask every time" runs as read only (the CLIs can't ask the page; what they would ask about is
-declined and shows as a failed row). Threads are JSON files in `<data>/fallback/threads`
+"Ask every time" runs like Auto, without asking: the CLIs can't ask the page, so the composer
+(under the bar) and the Fallbacks page say so; what the CLI itself still declines shows as a
+failed row. Threads are JSON files in `<data>/fallback/threads`
 (`<data>` = the app's Application Support folder, or `~/.provenance-ui` / `PROVENANCE_UI_DATA`
 for `npm run dev`).
 

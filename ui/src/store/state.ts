@@ -58,6 +58,11 @@ export interface TurnUsage {
    * an older router.
    */
   context?: Record<string, number>;
+  /**
+   * How much the router's history pruning took out of the turn's requests, in characters
+   * (provenance-core ledger "pruned"; Codex through Provenance). Absent when nothing was looked at.
+   */
+  pruned?: { requests: number; before: number; after: number; saved: number };
 }
 
 export interface ThreadView {

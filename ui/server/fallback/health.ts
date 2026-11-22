@@ -1,12 +1,14 @@
 // Health checks for the fallbacks (GET /api/fallbacks): is the CLI there, does it run, is it
 // signed in, and which models it offers. Every check is local and spends no usage: `--version`,
 // `claude auth status --json`, `codex login status`, `codex debug models`, and the provenance
-// binary's `login status` / `debug models` on the "through Provenance" home. A missing CLI is a
-// normal state ("not installed" + how to get it), never an error.
+// binary's `login status` / `debug models` on the "through Provenance" home, and the router's
+// pass-through answering (its /_health, nothing forwarded). A missing CLI is a normal state ("not
+// installed" + how to get it), never an error.
 
 import type { CliHealth, FallbackModel, FallbacksInfo } from "../../shared/fallback-api.ts";
 import { findCli, run } from "./cli.ts";
 import { codexHomeEnv, codexLoginHome, prepareCodexHome } from "./codex-home.ts";
+import { checkCodexRoute, type RouterRef } from "./codex-route.ts";
 import { CLAUDE_MODELS, CODEX_MODELS } from "./known-models.ts";
 
 export interface FallbackEnv {
@@ -18,6 +20,8 @@ export interface FallbackEnv {
   codexHome: string;
   /** Where Codex keeps its login (default $CODEX_HOME or ~/.codex). */
   codexLoginHome?: string;
+  /** The router "through Provenance" sends its model requests to (codex-route.ts); unset: not checked. */
+  router?: RouterRef;
 }
 
 const DEFAULT: FallbackModel = { id: "", label: "Default" };
@@ -188,15 +192,18 @@ export async function checkThroughProvenance(
   if (linked === "none")
     return { ready: false, problem: "Needs Codex signed in with ChatGPT", models: fallback };
   const opts = { env: codexHomeEnv(env.codexHome), timeoutMs: 15_000 };
-  const [status, models] = await Promise.all([
+  const [status, models, route] = await Promise.all([
     run(env.provenanceBin, ["login", "status"], opts),
     run(env.provenanceBin, ["debug", "models", "-c", 'model_provider="openai"'], opts),
+    env.router ? checkCodexRoute(env.router) : Promise.resolve(null),
   ]);
   if (status.failed === "ENOENT")
     return { ready: false, problem: "The provenance binary is missing", models: fallback };
   const kind = loginKind(`${status.stdout}\n${status.stderr}`);
   if (status.code !== 0 || kind !== "ChatGPT")
     return { ready: false, problem: "Needs Codex signed in with ChatGPT", models: fallback };
+  // Its model requests go through the router: without it there, it doesn't run (never direct).
+  if (route) return { ready: false, problem: route, models: fallback };
   return { ready: true, problem: null, models: catalogModels(models.stdout) ?? fallback };
 }
 

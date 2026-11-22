@@ -11,7 +11,8 @@
 //                        per-site settings, API keys); the routes are shared/router-api.ts's table
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
 //   - WS  /rpc/codex   -> a second `provenance app-server` for "Run Codex through Provenance": its
-//                        own home, linked to your Codex login, OpenAI provider (fallback/codex-home.ts);
+//                        own home, linked to your Codex login, OpenAI provider (fallback/codex-home.ts),
+//                        model requests through the router's pass-through (fallback/codex-route.ts);
 //                        started on first use
 //   - WS  /rpc/fallback -> threads run by the claude / codex CLIs, same protocol (fallback/backend.ts)
 //
@@ -33,6 +34,7 @@ import { AppServerBridge } from "./bridge.ts";
 import { FallbackBackend } from "./fallback/backend.ts";
 import { defaultSearchPath } from "./fallback/cli.ts";
 import { codexHomeEnv, prepareCodexHome } from "./fallback/codex-home.ts";
+import { codexPvArgs, maskCodexSubKey } from "./fallback/codex-route.ts";
 import { getFallbacks, type FallbackEnv } from "./fallback/health.ts";
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
@@ -124,6 +126,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     provenanceBin: opts.bin,
     codexHome,
     codexLoginHome: opts.codexLoginHome,
+    router: conn(),
   });
   const fallback = new FallbackBackend({
     dir: path.join(dataDir, "fallback"),
@@ -140,7 +143,9 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     }
     codexBridge = new AppServerBridge({
       bin: opts.bin,
-      args: ["-c", 'model_provider="openai"'],
+      // read at every start: the app's own router can come back on another port
+      args: () => codexPvArgs(conn()),
+      mask: maskCodexSubKey,
       clientInfo: {
         name: "provenance_ui",
         title: opts.clientTitle ?? "Provenance UI",

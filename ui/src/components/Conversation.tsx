@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { loadTurnUsage, openThread } from "../store/actions";
-import type { TurnView } from "../store/state";
+import { backendOf, loadTurnUsage, openThread } from "../store/actions";
+import type { TurnUsage, TurnView } from "../store/state";
 import { useAppState } from "../store/store";
 import { Approvals } from "./Approvals";
 import { DiffView } from "./DiffView";
@@ -140,11 +140,29 @@ function Turn({
       {showFooter && (
         <div className="turn-footer">
           <TierBadge model={model} />
-          {usage && usage.models.length > 0 && <TurnModels usage={usage} />}
+          {usage && usage.models.length > 0 && backendOf(threadId) === "main" && (
+            <TurnModels usage={usage} />
+          )}
+          {usage?.pruned && <TurnSaved pruned={usage.pruned} />}
           <span className="turn-dur">Worked for {formatDuration(turn.durationMs!)}</span>
         </div>
       )}
     </section>
+  );
+}
+
+/** "history 31% smaller": what the router's pruning took out of the turn's requests. */
+function TurnSaved({ pruned }: { pruned: NonNullable<TurnUsage["pruned"]> }) {
+  const pct = pruned.before > 0 ? Math.round((100 * pruned.saved) / pruned.before) : 0;
+  if (pct < 1) return null;
+  const n = (x: number) => x.toLocaleString("en-US");
+  return (
+    <span
+      className="turn-saved"
+      title={`Provenance shortened old tool output before sending: ${n(pruned.after)} of ${n(pruned.before)} characters sent, over ${pruned.requests} request${pruned.requests === 1 ? "" : "s"}`}
+    >
+      history {pct}% smaller
+    </span>
   );
 }
 
