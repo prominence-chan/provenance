@@ -9,17 +9,16 @@
 // Bundled by esbuild (scripts/build-electron.mjs) into build-electron/main.cjs.
 //
 // Settings: ~/Library/Application Support/Provenance/settings.json (Preferences…).
+//
+// provenance-core: electron/router.ts (one that already answers, else the app's own copy).
+//
+// Test switches (scripts/app-router-check.ts): PROVENANCE_USER_DATA=<dir> keeps every file
+// (settings, logs, the router's home) there instead of Application Support, so a check never
+// meets the installed app's state or its single-instance lock; PROVENANCE_HEADLESS=1 opens no
+// window and no Dock icon, and prints one "PROVENANCE_READY {json}" line once it is serving.
 
-import { execFile, spawn } from "node:child_process";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  watch,
-  writeFileSync,
-} from "node:fs";
+import { execFile } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -33,12 +32,16 @@ import {
   shell,
   type MenuItemConstructorOptions,
 } from "electron";
-import { startUiServer, type RouterStatus, type UiServer } from "../server/app.ts";
+import { startUiServer, type UiServer } from "../server/app.ts";
+import { RouterSupervisor, type RouterPolicy } from "./router.ts";
 
 app.setName("Provenance");
 
 const isDev = !app.isPackaged;
 const devVite = isDev && process.env.PROVENANCE_APP_VITE === "1";
+const headless = process.env.PROVENANCE_HEADLESS === "1";
+if (process.env.PROVENANCE_USER_DATA) app.setPath("userData", process.env.PROVENANCE_USER_DATA);
+if (headless) app.setActivationPolicy?.("accessory"); // no Dock icon, never the active app
 const userData = app.getPath("userData");
 const settingsPath = path.join(userData, "settings.json");
 const windowStatePath = path.join(userData, "window-state.json");
@@ -68,14 +71,15 @@ for (const level of ["log", "warn", "error"] as const) {
 interface Settings {
   /** The provenance binary (`provenance app-server` is spawned from it). */
   provenanceBin: string;
-  /** provenance-core (tierlm) router. */
+  /** Where your own provenance-core (tierlm) router answers, if you run one. */
   routerUrl: string;
-  /** Start provenance-core on launch if it isn't answering. */
-  autoStartRouter: boolean;
-  /** launchd agent to kickstart first (empty to skip). */
+  /**
+   * auto: use the router at routerUrl when it answers at launch, else the app's own;
+   * external: only routerUrl (never start one); bundled: always the app's own.
+   */
+  router: RouterPolicy;
+  /** A launchd agent that runs your own router: waited for at launch, never started by the app. */
   routerLaunchdLabel: string;
-  /** Script to run if there's no launchd agent (empty to skip). */
-  routerStartScript: string;
   /** Default working directory for new threads (empty: last used, else home). */
   defaultCwd: string;
   /** Local port for the UI server (127.0.0.1 only). */
@@ -85,9 +89,8 @@ interface Settings {
 const DEFAULT_SETTINGS: Settings = {
   provenanceBin: "~/.local/bin/provenance",
   routerUrl: "http://127.0.0.1:4141",
-  autoStartRouter: true,
-  routerLaunchdLabel: "com.yufan.tierlm",
-  routerStartScript: "~/.tierlm/serve.sh",
+  router: "auto",
+  routerLaunchdLabel: "",
   defaultCwd: "",
   port: 41730,
 };
@@ -105,10 +108,16 @@ function loadSettings(): Settings {
       console.error("settings.json unreadable, using defaults:", String(e));
   }
   const s = { ...DEFAULT_SETTINGS, ...raw };
+  // From before the app had its own router: autoStartRouter false meant "never start one".
+  const old = raw as { autoStartRouter?: boolean };
+  if (raw.router === undefined && old.autoStartRouter === false) s.router = "external";
+  if (!["auto", "external", "bundled"].includes(s.router)) s.router = "auto";
   // Env still wins, like the CLI server.
   if (process.env.PROVENANCE_BIN) s.provenanceBin = process.env.PROVENANCE_BIN;
   if (process.env.TIERLM_URL) s.routerUrl = process.env.TIERLM_URL;
-  if (process.env.PROVENANCE_ROUTER_AUTOSTART === "0") s.autoStartRouter = false;
+  if (process.env.PROVENANCE_ROUTER_AUTOSTART === "0") s.router = "external";
+  const r = process.env.PROVENANCE_ROUTER as RouterPolicy | undefined;
+  if (r && ["auto", "external", "bundled"].includes(r)) s.router = r;
   return s;
 }
 
@@ -197,90 +206,19 @@ async function fixPath(): Promise<void> {
   console.log(`PATH from ${fromShell ? "login shell" : "fallback"}`);
 }
 
-// ---- provenance-core -----------------------------------------------------------
+// ---- provenance-core (electron/router.ts) --------------------------------------
 
-const routerUrl = settings.routerUrl.replace(/\/$/, "");
-let routerStatus: RouterStatus = { up: false, message: "checking provenance-core…" };
-let routerStarting: Promise<RouterStatus> | null = null;
-
-async function routerUp(): Promise<boolean> {
-  try {
-    const res = await fetch(`${routerUrl}/v1/models`, { signal: AbortSignal.timeout(1500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-function run(cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
-  return new Promise((resolve) =>
-    execFile(cmd, args, { timeout: 10_000 }, (err, stdout, stderr) =>
-      resolve({ ok: !err, out: `${stdout}${stderr}`.trim() }),
-    ),
-  );
-}
-
-async function tryStartRouter(): Promise<string[]> {
-  const tried: string[] = [];
-  const uid = process.getuid?.() ?? 501;
-  const label = settings.routerLaunchdLabel.trim();
-  if (label) {
-    const target = `gui/${uid}/${label}`;
-    const plist = path.join(homedir(), "Library/LaunchAgents", `${label}.plist`);
-    if ((await run("/bin/launchctl", ["print", target])).ok) {
-      const r = await run("/bin/launchctl", ["kickstart", "-k", target]);
-      tried.push(`launchctl kickstart ${label}${r.ok ? "" : ` (failed: ${r.out})`}`);
-      if (r.ok) return tried;
-    } else if (existsSync(plist)) {
-      const r = await run("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist]);
-      tried.push(`launchctl bootstrap ${label}${r.ok ? "" : ` (failed: ${r.out})`}`);
-      if (r.ok) return tried;
-    }
-  }
-  const script = expandHome(settings.routerStartScript.trim());
-  if (script && existsSync(script)) {
-    const out = openSync(path.join(logDir, "provenance-core.log"), "a");
-    const child = spawn("/bin/sh", [script], { detached: true, stdio: ["ignore", out, out] });
-    child.on("error", (e) => console.error("router script failed:", e.message));
-    child.unref();
-    tried.push(script.replace(homedir(), "~"));
-  }
-  return tried;
-}
-
-/** Make sure provenance-core answers; start it if allowed. Shared by launch and the banner's button. */
-function ensureRouter(): Promise<RouterStatus> {
-  routerStarting ??= (async () => {
-    if (await routerUp()) return (routerStatus = { up: true });
-    if (!settings.autoStartRouter && routerStatus.message !== "manual") {
-      return (routerStatus = {
-        up: false,
-        message: "Auto-start is off (autoStartRouter in Preferences).",
-      });
-    }
-    routerStatus = { up: false, message: "Starting provenance-core…" };
-    const tried = await tryStartRouter();
-    if (!tried.length) {
-      return (routerStatus = {
-        up: false,
-        message:
-          "No launchd agent or start script found to start it. Set routerLaunchdLabel / routerStartScript in Preferences.",
-      });
-    }
-    console.log("router: tried", tried.join("; "));
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      if (await routerUp()) return (routerStatus = { up: true });
-    }
-    return (routerStatus = {
-      up: false,
-      message: `Tried ${tried.join(", ")}; still not answering after 20 s. Log: ${path.join(logDir, "provenance-core.log").replace(homedir(), "~")}`,
-    });
-  })().finally(() => {
-    routerStarting = null;
-  });
-  return routerStarting;
-}
+const router = new RouterSupervisor({
+  policy: settings.router,
+  configuredUrl: settings.routerUrl,
+  launchdLabel: settings.routerLaunchdLabel.trim() || undefined,
+  // Contents/Resources holds router/ and browser/; a checkout has them in vendor/.
+  resources: app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), "vendor"),
+  home: path.join(userData, "router"),
+  logFile: path.join(logDir, "provenance-core.log"),
+  // A new URL (the app's own router took over, or its port was taken): app-server reads it at start.
+  onUrlChange: () => ui?.bridge.restart(),
+});
 
 // ---- window --------------------------------------------------------------------
 
@@ -329,7 +267,7 @@ function isAppUrl(url: string): boolean {
 }
 
 function createWindow(): void {
-  if (!ui) return;
+  if (!ui || headless) return;
   const state = loadWindowState();
   const w = new BrowserWindow({
     ...state,
@@ -480,11 +418,7 @@ function buildMenu(): void {
 // ---- IPC -----------------------------------------------------------------------
 
 ipcMain.handle("app:pick-directory", (_e, defaultPath?: string) => pickDirectory(defaultPath));
-ipcMain.handle("app:start-router", async () => {
-  if (routerStatus.message?.startsWith("Auto-start is off"))
-    routerStatus = { up: false, message: "manual" };
-  return ensureRouter();
-});
+ipcMain.handle("app:start-router", () => router.ensure());
 ipcMain.handle("app:open-preferences", () => openPreferences());
 
 // ---- lifecycle -----------------------------------------------------------------
@@ -532,7 +466,7 @@ app
   .whenReady()
   .then(async () => {
     console.log(
-      `launch ${app.getVersion()} packaged=${app.isPackaged} bin=${bin} router=${routerUrl}`,
+      `launch ${app.getVersion()} packaged=${app.isPackaged} bin=${bin} router=${settings.router} (${settings.routerUrl})`,
     );
     if (isDev && process.platform === "darwin") {
       const icon = nativeImage.createFromPath(
@@ -540,9 +474,12 @@ app
       );
       if (!icon.isEmpty()) app.dock?.setIcon(icon);
     }
+    if (headless) app.dock?.hide();
     buildMenu();
-    const routerReady = ensureRouter(); // runs alongside; the UI polls /api/health for the banner
-    await fixPath();
+    await fixPath(); // before the router starts: it runs osascript, open, codesign from PATH
+    // Decides which router (a quick check of routerUrl) and starts the app's own if needed;
+    // it comes up meanwhile, and the UI polls /api/health for the banner.
+    await router.start();
 
     const root = app.getAppPath();
     const opts = {
@@ -550,9 +487,9 @@ app
       prod: !devVite,
       host: "127.0.0.1",
       bin,
-      tierlmUrl: routerUrl,
+      router: () => router.connection(),
       cwd: currentCwd,
-      routerStatus: () => routerStatus,
+      routerStatus: () => router.status(),
       clientTitle: "Provenance",
     };
     try {
@@ -566,8 +503,11 @@ app
     }
     console.log(`ui server on ${ui.url}`);
     createWindow();
-    watchSettings();
-    void routerReady.then((s) => console.log("router:", s.up ? "up" : s.message));
+    if (!headless) watchSettings();
+    else
+      process.stdout.write(
+        `PROVENANCE_READY ${JSON.stringify({ ui: ui.url, router: router.connection().url, mode: router.status().mode, routerPid: router.pid ?? null })}\n`,
+      );
   })
   .catch((e) => {
     console.error("startup failed:", e);
@@ -584,14 +524,20 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
+// Quit: the UI server and app-server, then the app's own router (it closes its browsers and
+// any sign-in window). A kill or crash skips this; the router then stops by itself
+// (--watch-stdin), and "exit" is the last chance to make sure.
 let quitting = false;
 app.on("before-quit", (e) => {
-  if (quitting || !ui) return;
+  if (quitting) return;
   quitting = true;
   e.preventDefault();
   const server = ui;
   ui = null;
-  void Promise.race([server.close(), new Promise((r) => setTimeout(r, 1500))]).finally(() =>
-    app.quit(),
-  );
+  const uiClosed = server
+    ? Promise.race([server.close(), new Promise((r) => setTimeout(r, 1500))])
+    : Promise.resolve();
+  void Promise.all([uiClosed, router.stop()]).finally(() => app.quit());
 });
+process.on("exit", () => router.killNow());
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => app.quit());
