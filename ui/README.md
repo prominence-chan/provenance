@@ -116,7 +116,7 @@ from the preload), which sets `html[data-shell="darwin"]` for the window-chrome 
 ui/
 ├── server/
 │   ├── app.ts         startUiServer(): Vite middleware (dev) or dist/ (prod), /api/info, /api/tiers,
-│   │                  /api/health, /api/usage, WS /rpc (same-origin only)
+│   │                  /api/sources, /api/health, /api/usage, WS /rpc (same-origin only)
 │   ├── main.ts        CLI for `npm run dev` / `npm start`
 │   └── bridge.ts      AppServerBridge: spawns `provenance app-server`, relays JSON-RPC
 ├── electron/
@@ -231,6 +231,15 @@ id>&since&until` once a turn completes (and for history turns as they render). A
 - **Tiers:** the picker lists tierlm's own models (`/v1/models` where `owned_by ==
 "tierlm"`), falling back to `nova / solstice / ember / spark` (`server/main.ts`). Default
   is `solstice`.
+- **Sources:** hovering or arrowing onto a tier opens its source submenu, from
+  provenance-core's `GET /v1/sources` (via `/api/sources`, re-read each time the picker opens,
+  never polled): **Auto** sends the plain tier (`solstice`, the router picks), a source sends
+  its `model` (`luna/solstice`, that source pinned), with the share of today's usage it has
+  left and, when non-zero, how many requests it is serving. Sources with `pinnable: false`
+  are left out (Auto can still use them); unavailable ones show greyed out. A pinned source's
+  label follows the tier name in the picker button and the tier badges ("solstice · GPT-6
+  Luna"). Router down or without `/v1/sources`: no submenu, plain tiers as before. Keys:
+  ↑/↓ tiers, → into the submenu, ← back, Enter picks (Enter on a tier row = Auto).
 
 ## Theme
 
@@ -252,9 +261,12 @@ a 40 px header, 13.5 px body text, tool calls as one-line rows that open on clic
   sidebar (remembered). Below 860 px it becomes a drawer that starts closed and closes after
   you pick a thread. The state lives in `src/theme/ui.ts`.
 - **Tiers:** `src/theme/tiers.ts` holds the order (spark < ember < solstice < nova) and the
-  blurbs shown in the picker. Any element with `data-tier="..."` gets `--tier-color` /
-  `--tier-grad` for its subtree. `TierBadge` appears in the header, on the "Working…" line and
-  in each turn's footer; `TierPicker` is the composer dropdown.
+  blurbs and effort words (Low / Medium / High / Max) shown in the picker. Any element with
+  `data-tier="..."` gets `--tier-color` / `--tier-grad` for its subtree. `TierBadge` appears
+  on the "Working…" line and in each turn's footer; `TierPicker` is the composer dropdown.
+- **Small secondary text** (tier blurbs, effort, source usage, the header's context use) uses
+  the one `.meta` class in `styles.css`: `--fs-xs`, weight 400, `--muted`, sentence case, no
+  letter-spacing. Reuse it rather than styling such text per component.
 - **Effects** (always on for the selected tier), all in one WebGL2 canvas behind the main
   column, `src/components/effects/FlameFx.tsx`. Three states, eased into each other: a
   **flare** when the tier changes (and on first load), an almost-still **idle**, and an
