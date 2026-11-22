@@ -24,9 +24,6 @@ pub const HOOK_TAG: &str = "PROVENANCE-HOOK";
 /// The harness settings source, as compiled in.
 pub const HARNESS_TOML: &str = include_str!("../harness.toml");
 
-/// The hook manifest: every upstream file the fork edits and its hook count.
-pub const HOOKS_TOML: &str = include_str!("../hooks.toml");
-
 /// harness.toml, parsed.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,8 +86,7 @@ pub struct CatalogEntry {
 
 /// Parse a harness file. `harness()` is this applied to the compiled-in harness.toml.
 pub fn parse_harness(source: &str) -> Result<Harness, String> {
-    let harness: Harness =
-        toml::from_str(source).map_err(|err| format!("harness.toml: {err}"))?;
+    let harness: Harness = toml::from_str(source).map_err(|err| format!("harness.toml: {err}"))?;
     if harness.tiers.is_empty() {
         return Err("harness.toml: [[tiers]] is empty".to_string());
     }
@@ -244,18 +240,19 @@ pub fn catalog_entries_for(harness: &Harness) -> Vec<CatalogEntry> {
             metadata: fields,
         });
     }
-    let tier_count = entries.len();
+    let mut pinned = Vec::new();
     for (source, source_fields) in &harness.sources {
-        for tier_entry in entries[..tier_count].to_vec() {
-            let mut fields = tier_entry.metadata;
+        for tier_entry in &entries {
+            let mut fields = tier_entry.metadata.clone();
             fields.insert("visibility".into(), Value::from("none"));
             merge_json_map(&mut fields, &metadata(source_fields));
-            entries.push(CatalogEntry {
+            pinned.push(CatalogEntry {
                 slug: format!("{source}/{}", tier_entry.slug),
                 metadata: fields,
             });
         }
     }
+    entries.extend(pinned);
     entries
 }
 
@@ -289,7 +286,9 @@ fn metadata_json(table: &toml::Table) -> Result<Map<String, Value>, String> {
             .as_str()
             .ok_or_else(|| "harness.toml: instructions_file must be a string".to_string())?;
         let text = prompt_file(name).ok_or_else(|| {
-            format!("harness.toml: instructions_file {name:?} is not in codex-rs/provenance/prompts/")
+            format!(
+                "harness.toml: instructions_file {name:?} is not in codex-rs/provenance/prompts/"
+            )
         })?;
         let mut messages = Map::new();
         messages.insert("instructions_template".into(), Value::from(text));
@@ -350,7 +349,8 @@ mod tests {
             "default_model = \"no-such-tier\"",
         );
         assert!(parse_harness(&bad_default).is_err());
-        let bad_prompt = format!("{HARNESS_TOML}\n[sources.x]\ninstructions_file = \"missing.md\"\n");
+        let bad_prompt =
+            format!("{HARNESS_TOML}\n[sources.x]\ninstructions_file = \"missing.md\"\n");
         assert!(parse_harness(&bad_prompt).is_err());
     }
 
@@ -365,7 +365,10 @@ mod tests {
         assert_eq!(pinned.slug, format!("luna/{}", harness.tiers[0].slug));
         assert_eq!(pinned.metadata["context_window"], Value::from(64000));
         assert_eq!(pinned.metadata["visibility"], Value::from("none"));
-        assert_eq!(pinned.metadata["display_name"], entries[0].metadata["display_name"]);
+        assert_eq!(
+            pinned.metadata["display_name"],
+            entries[0].metadata["display_name"]
+        );
     }
 
     #[test]

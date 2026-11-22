@@ -36,7 +36,10 @@ pub fn catalog_for_provider(provider_id: &str) -> Option<ModelsResponse> {
 /// Metadata for a model no catalog describes: upstream's fallback with the harness's
 /// [model_defaults] layered on (128k context, no reasoning-summary parameter).
 pub fn fallback_model_info(slug: &str) -> ModelInfo {
-    with_metadata(model_info_from_slug(slug), codex_provenance::model_defaults())
+    with_metadata(
+        model_info_from_slug(slug),
+        codex_provenance::model_defaults(),
+    )
 }
 
 /// Layer harness metadata (ModelInfo fields in JSON form) over `base`. Panics on a field
@@ -52,8 +55,9 @@ pub fn with_metadata(base: ModelInfo, metadata: &Map<String, Value>) -> ModelInf
         other => panic!("ModelInfo for {slug} did not serialize to an object: {other:?}"),
     };
     codex_provenance::merge_json_map(&mut fields, metadata);
-    serde_json::from_value(Value::Object(fields))
-        .unwrap_or_else(|err| panic!("harness.toml metadata for {slug} does not fit ModelInfo: {err}"))
+    serde_json::from_value(Value::Object(fields)).unwrap_or_else(|err| {
+        panic!("harness.toml metadata for {slug} does not fit ModelInfo: {err}")
+    })
 }
 
 /// Run `f` without emitting tracing events: building the catalog goes through upstream's

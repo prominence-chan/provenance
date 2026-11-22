@@ -23,7 +23,11 @@ fn main() {
     for name in &names {
         let path = dir.join(name);
         println!("cargo:rerun-if-changed={}", path.display());
-        let _ = writeln!(out, "    ({name:?}, include_str!({:?})),", path.display().to_string());
+        let _ = writeln!(
+            out,
+            "    ({name:?}, include_str!({:?})),",
+            path.display().to_string()
+        );
     }
     out.push_str("];\n");
 

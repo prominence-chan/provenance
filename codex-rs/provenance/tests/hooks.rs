@@ -45,7 +45,10 @@ struct Owned {
 }
 
 fn manifest() -> Manifest {
-    toml::from_str(codex_provenance::HOOKS_TOML).unwrap_or_else(|err| panic!("hooks.toml: {err}"))
+    // Read at test time (not compiled into the crate), so editing it rebuilds nothing.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("hooks.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("hooks.toml: {err}"));
+    toml::from_str(&text).unwrap_or_else(|err| panic!("hooks.toml: {err}"))
 }
 
 /// `pattern` from hooks.toml [owned]: `*` matches one path segment, trailing `/` a tree.
@@ -54,7 +57,8 @@ fn owned(path: &str, patterns: &[String]) -> bool {
         if let Some(dir) = pattern.strip_suffix('/') {
             return path.starts_with(&format!("{dir}/"));
         }
-        let (pat, p): (Vec<&str>, Vec<&str>) = (pattern.split('/').collect(), path.split('/').collect());
+        let (pat, p): (Vec<&str>, Vec<&str>) =
+            (pattern.split('/').collect(), path.split('/').collect());
         pat.len() == p.len() && pat.iter().zip(&p).all(|(a, b)| *a == "*" || a == b)
     })
 }
@@ -112,8 +116,13 @@ fn hook_manifest_matches_tree() {
         let Ok(bytes) = std::fs::read(root.join(&file)) else {
             continue;
         };
-        if bytes.windows(HOOK_TAG.len()).any(|w| w == HOOK_TAG.as_bytes()) {
-            problems.push(format!("{file}: has a {HOOK_TAG} tag but is not in hooks.toml"));
+        if bytes
+            .windows(HOOK_TAG.len())
+            .any(|w| w == HOOK_TAG.as_bytes())
+        {
+            problems.push(format!(
+                "{file}: has a {HOOK_TAG} tag but is not in hooks.toml"
+            ));
         }
     }
     assert!(
@@ -172,7 +181,10 @@ fn cli_binary_is_named_after_branding() {
     assert_eq!(cargo["package"]["default-run"].as_str(), Some(bin));
     let main_bin = cargo["bin"]
         .as_array()
-        .and_then(|bins| bins.iter().find(|b| b["path"].as_str() == Some("src/main.rs")))
+        .and_then(|bins| {
+            bins.iter()
+                .find(|b| b["path"].as_str() == Some("src/main.rs"))
+        })
         .unwrap_or_else(|| panic!("cli/Cargo.toml has no [[bin]] for src/main.rs"));
     assert_eq!(main_bin["name"].as_str(), Some(bin));
 }
@@ -204,7 +216,10 @@ fn tier_catalog_comes_from_harness() {
     assert_eq!(&slugs[..tiers.len()], tiers.as_slice());
     for (i, (model, tier)) in catalog.models.iter().zip(&harness().tiers).enumerate() {
         let expected_name = tier.metadata.get("display_name").and_then(|v| v.as_str());
-        assert_eq!(Some(model.display_name.as_str()), expected_name.or(Some(&tier.slug)));
+        assert_eq!(
+            Some(model.display_name.as_str()),
+            expected_name.or(Some(&tier.slug))
+        );
         assert_eq!(model.priority, i as i32 + 1);
         assert_eq!(
             model.visibility,
@@ -243,7 +258,10 @@ async fn unknown_and_pinned_models_resolve() {
     assert_eq!(resolved.model.slug, pinned);
     let tier_info = manager.get_model_info(tier, &config).await;
     assert_eq!(resolved.model.display_name, tier_info.model.display_name);
-    assert_eq!(resolved.model.context_window, tier_info.model.context_window);
+    assert_eq!(
+        resolved.model.context_window,
+        tier_info.model.context_window
+    );
 
     // A model no catalog knows gets upstream's fallback plus [model_defaults].
     let unknown = manager.get_model_info("no-such-model", &config).await;
@@ -287,12 +305,16 @@ async fn config_defaults_to_the_fork() {
     let catalog = config
         .model_catalog
         .unwrap_or_else(|| panic!("no tier catalog in config"));
-    assert_eq!(catalog.models.len(), codex_provenance::catalog_entries().len());
+    assert_eq!(
+        catalog.models.len(),
+        codex_provenance::catalog_entries().len()
+    );
 }
 
 #[tokio::test]
 async fn other_providers_keep_upstream_defaults() {
-    let config = load_config("model_provider = \"openai\"\ncheck_for_update_on_startup = true\n").await;
+    let config =
+        load_config("model_provider = \"openai\"\ncheck_for_update_on_startup = true\n").await;
     assert_eq!(config.model_provider_id, "openai");
     assert_eq!(config.model, None);
     assert_eq!(config.model_catalog, None);
