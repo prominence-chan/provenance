@@ -15,6 +15,7 @@
 //   POST /mock/finish   {"provider", "account", "ok": true | false, "reason"?}  the user
 //                       finishes (or gives up on) signing in inside the window
 //   POST /mock/down     {"down": true}   every other route then drops the connection
+//   POST /mock/legacy   {"legacy": true} /web/* 404s, like a router from before the API
 //   GET  /mock/state    the whole state, for assertions
 //
 // The router API it mirrors (built in provenance-core separately):
@@ -141,6 +142,8 @@ interface State {
   /** provider id -> account id -> account */
   accounts: Record<string, Record<string, Account>>;
   down: boolean;
+  /** An older router without the /web API (every /web route 404s). */
+  legacy: boolean;
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -163,6 +166,7 @@ function scenario(name: string): State {
     accountIds: ["main"],
     accounts: {},
     down: false,
+    legacy: false,
   };
   for (const p of PROVIDERS) st.accounts[p.id] = { main: blank(p.cap) };
   if (name === "nobrowser") {
@@ -349,6 +353,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       state = scenario(String(body.scenario ?? "fresh"));
       return send(res, 200, { ok: true });
     }
+    if (p === "/mock/legacy") {
+      state.legacy = body.legacy !== false;
+      return send(res, 200, { legacy: state.legacy });
+    }
     if (p === "/mock/down") {
       state.down = body.down !== false;
       return send(res, 200, { down: state.down });
@@ -367,6 +375,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return;
   }
 
+  if (state.legacy && p.startsWith("/web/")) return send(res, 404, { detail: "Not Found" });
   if (p === "/v1/models" && m === "GET") {
     return send(res, 200, {
       data: ["nova", "solstice", "ember", "spark"].map((id) => ({ id, owned_by: "tierlm" })),

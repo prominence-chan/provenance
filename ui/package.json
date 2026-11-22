@@ -15,6 +15,8 @@
     "gen:protocol": "node scripts/gen-protocol.ts",
     "smoke": "node scripts/smoke.ts",
     "e2e": "node scripts/e2e.ts",
+    "e2e:setup": "node scripts/setup-e2e.ts",
+    "mock:router": "node scripts/mock-router.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build:electron": "node scripts/build-electron.mjs",

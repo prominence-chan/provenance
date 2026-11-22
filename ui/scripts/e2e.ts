@@ -12,31 +12,15 @@
 // chromium`), otherwise falls back to any cached headless shell in
 // ~/Library/Caches/ms-playwright, or CHROMIUM_PATH.
 
-import { existsSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import path from "node:path";
+import { existsSync } from "node:fs";
 import { chromium } from "playwright";
+import { findChromium } from "./chromium.ts";
 
 const port = Number(process.env.PORT ?? 5173);
 const model = process.env.MODEL ?? "spark";
 const shot = process.env.SHOT ?? "/tmp/provenance-ui-e2e.png";
 const prompt = "reply with just ok";
 const log = (...a: unknown[]) => console.log("[e2e]", ...a);
-
-function findChromium(): string | undefined {
-  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
-  if (existsSync(chromium.executablePath())) return undefined; // Playwright's own
-  const cache = path.join(homedir(), "Library/Caches/ms-playwright");
-  if (!existsSync(cache)) return undefined;
-  for (const dir of readdirSync(cache)
-    .filter((d) => d.startsWith("chromium_headless_shell-"))
-    .sort()
-    .reverse()) {
-    const bin = path.join(cache, dir, "chrome-headless-shell-mac-arm64/chrome-headless-shell");
-    if (existsSync(bin)) return bin;
-  }
-  return undefined;
-}
 
 const executablePath = findChromium();
 const browser = await chromium.launch({ headless: true, executablePath });
