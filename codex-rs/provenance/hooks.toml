@@ -65,8 +65,8 @@ why = "`pub mod provenance` (tier catalog, fallback metadata)"
 
 [[hook]]
 file = "codex-rs/models-manager/src/manager.rs"
-count = 1
-why = "unknown models get the harness's [model_defaults] over upstream's fallback"
+count = 2
+why = "unknown models get the harness's [model_defaults] over upstream's fallback; model/list's default is the harness's default tier"
 
 [[hook]]
 file = "codex-rs/app-server/src/config_manager.rs"

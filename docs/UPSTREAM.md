@@ -47,7 +47,7 @@ disagree with the tree.
 | `codex-rs/core/src/config/mod.rs` | 4 | default provider `tierlm`; default model = default tier for that provider; update check off unless config sets it; tier catalog unless `model_catalog_json` is set | config resolution is one big upstream function |
 | `codex-rs/model-provider-info/src/lib.rs` | 2 | the `tierlm` entry in `built_in_model_providers`; `pub mod provenance` | the built-in list is a literal array |
 | `codex-rs/models-manager/src/lib.rs` | 1 | `pub mod provenance` | |
-| `codex-rs/models-manager/src/manager.rs` | 1 | models with no catalog entry get `[model_defaults]` layered over upstream's fallback | the fallback is built inside `construct_model_info` |
+| `codex-rs/models-manager/src/manager.rs` | 2 | models with no catalog entry get `[model_defaults]` layered over upstream's fallback; the model list's default (`model/list` `isDefault`) is `[provider] default_model`, not the first tier | the fallback is built inside `construct_model_info`; the default is marked inside `build_available_models` |
 | `codex-rs/app-server/src/config_manager.rs` | 1 | default provider when validating a saved route | upstream falls back to `"openai"` here |
 | `codex-rs/app-server/src/config_manager_service_model_providers.rs` | 1 | default provider reported to clients | same |
 | `codex-rs/tui/src/app/agents_overview.rs` | 1 | default provider for embedded `thread/start` | same |

@@ -235,6 +235,24 @@ fn tier_catalog_comes_from_harness() {
 }
 
 #[test]
+fn model_list_default_is_the_default_tier() {
+    // Upstream marks the first picker-visible model (the strongest tier) as the default.
+    let catalog = codex_models_manager::provenance::tier_catalog();
+    let manager = StaticModelsManager::new(None, catalog, ModelOrigin::ExplicitConfig);
+    let presets = manager
+        .try_list_models()
+        .unwrap_or_else(|_| panic!("models lock"));
+    let defaults: Vec<&str> = presets
+        .iter()
+        .filter(|preset| preset.is_default)
+        .map(|preset| preset.model.as_str())
+        .collect();
+    assert_eq!(defaults, vec![harness().provider.default_model.as_str()]);
+    // The order stays the tiers' (strongest first).
+    assert_eq!(presets[0].model, harness().tiers[0].slug);
+}
+
+#[test]
 fn model_info_round_trips_through_json() {
     // The harness layers its metadata over ModelInfo as JSON; that must be lossless.
     let info = codex_models_manager::model_info::model_info_from_slug("round-trip");

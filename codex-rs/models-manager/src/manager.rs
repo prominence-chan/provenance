@@ -288,6 +288,7 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         presets = ModelPreset::filter_by_auth(presets, uses_codex_backend);
 
         ModelPreset::mark_default_by_picker_visibility(&mut presets);
+        crate::provenance::mark_default_tier(&mut presets); // PROVENANCE-HOOK
 
         presets
     }
