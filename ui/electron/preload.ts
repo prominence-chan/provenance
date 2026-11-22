@@ -18,4 +18,5 @@ contextBridge.exposeInMainWorld("provenanceApp", {
   onSetCwd: (cb: (cwd: string) => void) => on("app:set-cwd", (cwd) => cb(String(cwd))),
   onNewThread: (cb: () => void) => on("app:new-thread", () => cb()),
   onOpenAccounts: (cb: () => void) => on("app:open-accounts", () => cb()),
+  onOpenWelcome: (cb: () => void) => on("app:open-welcome", () => cb()),
 });

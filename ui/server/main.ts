@@ -12,6 +12,7 @@
 //   TIERLM_URL        default http://127.0.0.1:4141
 //   PCORE_TOKEN       the router's bearer token, if it has one (TIERLM_TOKEN also works)
 //   NO_OPEN=1         don't open a browser even with --open
+//   PROVENANCE_UI_DATA where fallback threads (Claude Code / Codex) live (default ~/.provenance-ui)
 
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -38,6 +39,7 @@ try {
       token: process.env.PCORE_TOKEN || process.env.TIERLM_TOKEN || undefined,
     },
     cwd: () => ({ defaultCwd, fromLauncher: !!process.env.PROVENANCE_UI_CWD }),
+    dataDir: process.env.PROVENANCE_UI_DATA || undefined,
   });
 } catch (e) {
   console.error(e instanceof Error ? e.message : e);
@@ -49,7 +51,7 @@ if (args.has("--open") && !process.env.NO_OPEN) execFile("open", [ui.url], () =>
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
-    ui.bridge.stop();
-    process.exit(0);
+    const timeout = new Promise((r) => setTimeout(r, 1500));
+    void Promise.race([ui.close(), timeout]).finally(() => process.exit(0));
   });
 }

@@ -4,16 +4,23 @@
 //   - GET /api/tiers   -> tier list from tierlm (/v1/models, owned_by=tierlm)
 //   - GET /api/sources -> each tier's sources and usage left (provenance-core /v1/sources)
 //   - GET /api/health  -> is the provenance binary there, is provenance-core up (and whose it is)
-//   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage)
+//   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage), and what
+//                        fitting its history took (its "context" flags)
+//   - GET /api/fallbacks -> Claude Code / Codex health and models (fallback/health.ts; ?refresh=1)
 //   - /api/web/*, /api/pool/* -> provenance-core's setup API (accounts, sign-in window, browser,
 //                        per-site settings, API keys); the routes are shared/router-api.ts's table
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
+//   - WS  /rpc/codex   -> a second `provenance app-server` for "Run Codex through Provenance": its
+//                        own home, linked to your Codex login, OpenAI provider (fallback/codex-home.ts);
+//                        started on first use
+//   - WS  /rpc/fallback -> threads run by the claude / codex CLIs, same protocol (fallback/backend.ts)
 //
 // Used by server/main.ts (the `npm run dev` / `npm start` CLI) and by the desktop
 // app (electron/main.ts), which runs it inside Electron's own Node.
 
 import { createReadStream, existsSync, statSync } from "node:fs";
 import http from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 import {
@@ -23,6 +30,10 @@ import {
   type WireHealth,
 } from "../shared/router-api.ts";
 import { AppServerBridge } from "./bridge.ts";
+import { FallbackBackend } from "./fallback/backend.ts";
+import { defaultSearchPath } from "./fallback/cli.ts";
+import { codexHomeEnv, prepareCodexHome } from "./fallback/codex-home.ts";
+import { getFallbacks, type FallbackEnv } from "./fallback/health.ts";
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
 const FALLBACK_TIERS = ["nova", "solstice", "ember", "spark"];
@@ -54,6 +65,15 @@ export interface UiServerOptions {
   /** Extra router state from the host (e.g. the app trying to start it). */
   routerStatus?: () => RouterStatus | undefined;
   clientTitle?: string;
+  /**
+   * Where fallback threads (Claude Code / Codex CLI) and the "through Provenance" home live.
+   * Default ~/.provenance-ui; the desktop app passes its Application Support folder.
+   */
+  dataDir?: string;
+  /** Where to look for claude / codex (PATH-style); default PATH plus the usual install folders. */
+  fallbackSearchPath?: string;
+  /** Where stock Codex keeps its login (default $CODEX_HOME or ~/.codex). */
+  codexLoginHome?: string;
 }
 
 export interface UiServer {
@@ -95,6 +115,43 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     },
   });
   bridge.start();
+
+  // ---- fallbacks: Claude Code, Codex in the background, Codex through Provenance ----------
+  const dataDir = opts.dataDir ?? path.join(homedir(), ".provenance-ui");
+  const codexHome = path.join(dataDir, "codex-home");
+  const fallbackEnv = (): FallbackEnv => ({
+    searchPath: opts.fallbackSearchPath ?? defaultSearchPath(),
+    provenanceBin: opts.bin,
+    codexHome,
+    codexLoginHome: opts.codexLoginHome,
+  });
+  const fallback = new FallbackBackend({
+    dir: path.join(dataDir, "fallback"),
+    searchPath: () => fallbackEnv().searchPath,
+  });
+  /** The second app-server, started when the page first opens /rpc/codex. */
+  let codexBridge: AppServerBridge | null = null;
+  const codexServer = (): AppServerBridge => {
+    if (codexBridge) return codexBridge;
+    try {
+      prepareCodexHome(codexHome, opts.codexLoginHome);
+    } catch (e) {
+      console.warn("[codex-home]", String(e));
+    }
+    codexBridge = new AppServerBridge({
+      bin: opts.bin,
+      args: ["-c", 'model_provider="openai"'],
+      clientInfo: {
+        name: "provenance_ui",
+        title: opts.clientTitle ?? "Provenance UI",
+        version: "0.1.0",
+      },
+      env: () => codexHomeEnv(codexHome),
+      log: (...a) => console.log("[codex-bridge]", ...a),
+    });
+    codexBridge.start();
+    return codexBridge;
+  };
 
   async function fetchTiers(): Promise<{ tiers: string[]; source: string }> {
     try {
@@ -241,6 +298,10 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       sendJson(res, body);
       return true;
     }
+    if (url.pathname === "/api/fallbacks") {
+      sendJson(res, await getFallbacks(fallbackEnv(), url.searchParams.has("refresh")));
+      return true;
+    }
     if (url.pathname === "/api/usage") {
       // key = thread id, turn = turn id, since/until = the turn's window (unix s)
       const q = new URLSearchParams();
@@ -333,12 +394,17 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
 
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
-    if (new URL(req.url ?? "/", "http://localhost").pathname !== "/rpc") return; // Vite HMR handles its own
+    const where = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (where !== "/rpc" && where !== "/rpc/codex" && where !== "/rpc/fallback") return; // Vite HMR handles its own
     if (!sameOrigin(req)) {
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => bridge.attach(ws));
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      if (where === "/rpc/fallback") fallback.attach(ws);
+      else if (where === "/rpc/codex") codexServer().attach(ws);
+      else bridge.attach(ws);
+    });
   });
 
   let actualPort = opts.port;
@@ -358,6 +424,8 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     bridge,
     close: async () => {
       bridge.stop();
+      codexBridge?.stop();
+      fallback.stop();
       wss.close();
       await closeVite?.();
       const closed = new Promise<void>((r) => server.close(() => r()));

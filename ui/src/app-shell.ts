@@ -10,6 +10,8 @@ export interface AppShell {
   onNewThread(cb: () => void): () => void;
   /** App menu -> Models & Accounts… (absent in builds from before it). */
   onOpenAccounts?(cb: () => void): () => void;
+  /** App menu -> Welcome… (absent in builds from before it). */
+  onOpenWelcome?(cb: () => void): () => void;
 }
 
 export const appShell: AppShell | undefined = (window as { provenanceApp?: AppShell })

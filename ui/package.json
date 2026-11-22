@@ -17,6 +17,7 @@
     "e2e": "node scripts/e2e.ts",
     "e2e:setup": "node scripts/setup-e2e.ts",
     "e2e:router": "node scripts/router-e2e.ts",
+    "check:fallback": "node scripts/fallback-check.ts",
     "mock:router": "node scripts/mock-router.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

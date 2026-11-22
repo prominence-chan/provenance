@@ -385,6 +385,7 @@ function buildMenu(): void {
         { type: "separator" },
         { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: openPreferences },
         { label: "Models & Accounts…", click: () => send("app:open-accounts") },
+        { label: "Welcome…", click: () => send("app:open-welcome") },
         { type: "separator" },
         { role: "services" },
         { type: "separator" },
@@ -525,6 +526,8 @@ app
       cwd: currentCwd,
       routerStatus: () => router.status(),
       clientTitle: "Provenance",
+      // Fallback threads (Claude Code / Codex) and the "through Provenance" Codex home.
+      dataDir: userData,
     };
     try {
       ui = await startUiServer({ ...opts, port: settings.port });

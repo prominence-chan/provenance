@@ -1,0 +1,568 @@
+// FallbackBackend: threads that run on Claude Code (`claude -p`) or stock Codex (`codex exec`)
+// instead of provenance app-server, served to the page over WebSocket /rpc/fallback with the same
+// JSON-RPC methods and notifications app-server uses, so the page's store, reducer and thread view
+// handle them unchanged.
+//
+//   requests:      initialize, thread/list, thread/start, thread/resume, thread/turns/list,
+//                  thread/archive, turn/start, turn/interrupt
+//   notifications: thread/started, thread/status/changed, thread/archived, turn/started,
+//                  item/started, item/agentMessage/delta, item/completed, error, turn/completed
+//
+// A turn is one CLI run in the thread's folder, with the prompt on stdin; the CLI's session id is
+// kept, and the next turn resumes it (claude --resume <id>, codex exec resume <id>). Permissions
+// follow the composer's preset: read only -> claude dontAsk / codex -s read-only; auto ->
+// acceptEdits / workspace-write; full access -> --dangerously-skip-permissions /
+// danger-full-access. The CLIs can't ask the page for approval, so anything they would ask
+// about is declined by the CLI itself (and shows as a failed tool row).
+//
+// Threads are JSON files in <dir>/threads, written when a turn starts and ends. Ids start with
+// "fb-" so the page can tell where a thread lives before the lists have loaded.
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
+import type { WebSocket } from "ws";
+import { parseFallbackModel } from "../../shared/fallback-api.ts";
+import { ClaudeStream } from "./claude-stream.ts";
+import { findCli } from "./cli.ts";
+import { CodexStream } from "./codex-stream.ts";
+import { userMessage, type Item, type Sink } from "./items.ts";
+
+type Json = Record<string, unknown>;
+type Mode = "claude" | "codex";
+type Sandbox = "read-only" | "workspace-write" | "danger-full-access";
+
+interface TurnRecord {
+  id: string;
+  rootTurnId: null;
+  items: Item[];
+  itemsView: "full";
+  status: "inProgress" | "completed" | "failed" | "interrupted";
+  error: {
+    message: string;
+    codexErrorInfo: null;
+    additionalDetails: null;
+    misalignment: null;
+  } | null;
+  startedAt: number;
+  completedAt: number | null;
+  durationMs: number | null;
+}
+
+interface ThreadRecord {
+  thread: Json & { id: string; cwd: string; turns: [] };
+  mode: Mode;
+  /** The CLI's --model ("" = its default). */
+  model: string;
+  /** The CLI's own session / thread id (claude session_id, codex thread_id). */
+  session: string | null;
+  sandbox: Sandbox;
+  turns: TurnRecord[];
+  archived?: boolean;
+}
+
+interface Running {
+  child: ChildProcess | null;
+  turn: TurnRecord;
+  interrupted: boolean;
+}
+
+export interface FallbackBackendOptions {
+  /** Where the threads are kept. */
+  dir: string;
+  /** PATH-style list of folders to find claude / codex in. */
+  searchPath: () => string;
+  log?: (...a: unknown[]) => void;
+}
+
+const PROVIDER: Record<Mode, string> = { claude: "claude-code", codex: "codex-cli" };
+
+export class FallbackBackend {
+  private opts: FallbackBackendOptions;
+  private clients = new Set<WebSocket>();
+  private threads = new Map<string, ThreadRecord>();
+  private running = new Map<string, Running>();
+  private loaded = false;
+  private log: (...a: unknown[]) => void;
+
+  constructor(opts: FallbackBackendOptions) {
+    this.opts = opts;
+    this.log = opts.log ?? ((...a) => console.log("[fallback]", ...a));
+  }
+
+  private get threadDir(): string {
+    return path.join(this.opts.dir, "threads");
+  }
+
+  attach(ws: WebSocket): void {
+    this.clients.add(ws);
+    this.send(ws, {
+      method: "bridge/status",
+      params: {
+        state: "ready",
+        initializeResult: { userAgent: "provenance-fallback" },
+        generation: 1,
+      },
+    });
+    ws.on("message", (data) => {
+      let msg: Json;
+      try {
+        msg = JSON.parse(String(data));
+      } catch {
+        return;
+      }
+      if (typeof msg.method !== "string" || msg.id === undefined || msg.id === null) return;
+      const id = msg.id;
+      this.handle(msg.method, (msg.params ?? {}) as Json)
+        .then((result) => this.send(ws, { id, result }))
+        .catch((e: unknown) =>
+          this.send(ws, {
+            id,
+            error: { code: -32000, message: e instanceof Error ? e.message : String(e) },
+          }),
+        );
+    });
+    ws.on("close", () => this.clients.delete(ws));
+  }
+
+  /** Stop every running turn (the app is quitting). */
+  stop(): void {
+    for (const r of this.running.values()) r.child?.kill("SIGTERM");
+  }
+
+  // ---- requests --------------------------------------------------------------------
+
+  async handle(method: string, p: Json): Promise<unknown> {
+    this.load();
+    switch (method) {
+      case "initialize":
+        return { userAgent: "provenance-fallback" };
+      case "thread/list": {
+        const data = [...this.threads.values()]
+          .filter((t) => !t.archived)
+          .map((t) => this.threadView(t))
+          .sort((a, b) => Number(b.updatedAt) - Number(a.updatedAt))
+          .slice(0, typeof p.limit === "number" ? p.limit : 100);
+        return { data, nextCursor: null, backwardsCursor: null, readStates: null };
+      }
+      case "thread/start":
+        return this.startThread(p);
+      case "thread/resume": {
+        const t = this.get(p.threadId);
+        return this.threadResponse(t);
+      }
+      case "thread/read":
+        return { thread: this.threadView(this.get(p.threadId)) };
+      case "thread/turns/list": {
+        const t = this.get(p.threadId);
+        const turns = p.sortDirection === "asc" ? t.turns : t.turns.slice().reverse();
+        const limit = typeof p.limit === "number" ? p.limit : 50;
+        return { data: turns.slice(0, limit), nextCursor: null, backwardsCursor: null };
+      }
+      case "thread/archive": {
+        const t = this.get(p.threadId);
+        t.archived = true;
+        this.save(t);
+        this.broadcast("thread/archived", { threadId: t.thread.id });
+        return {};
+      }
+      case "turn/start":
+        return this.startTurn(p);
+      case "turn/interrupt": {
+        const r = this.running.get(String(p.threadId));
+        if (r) {
+          r.interrupted = true;
+          killGently(r.child);
+        }
+        return {};
+      }
+      default:
+        throw new Error(`${method} is not available for Claude Code / Codex threads`);
+    }
+  }
+
+  private get(id: unknown): ThreadRecord {
+    const t = typeof id === "string" ? this.threads.get(id) : undefined;
+    if (!t) throw new Error(`no fallback thread ${String(id)}`);
+    return t;
+  }
+
+  private startThread(p: Json): unknown {
+    const parsed = parseFallbackModel(typeof p.model === "string" ? p.model : null);
+    if (!parsed || parsed.mode === "codex-pv")
+      throw new Error("A fallback thread needs a claude:<model> or codex:<model> model");
+    const cwd = typeof p.cwd === "string" && p.cwd ? p.cwd : process.env.HOME || "/";
+    if (!isDir(cwd)) throw new Error(`The folder ${cwd} doesn't exist`);
+    const now = Math.floor(Date.now() / 1000);
+    const id = `fb-${randomUUID()}`;
+    const mode = parsed.mode as Mode;
+    const rec: ThreadRecord = {
+      thread: {
+        id,
+        sessionId: id,
+        forkedFromId: null,
+        attachedToThreadId: null,
+        parentThreadId: null,
+        preview: "",
+        ephemeral: false,
+        section: null,
+        sectionEnteredAt: null,
+        projectId: null,
+        historyMode: "legacy",
+        environments: null,
+        extra: null,
+        modelProvider: PROVIDER[mode],
+        model: `${mode}:${parsed.model}`,
+        reasoningEffort: null,
+        createdAt: now,
+        updatedAt: now,
+        recencyAt: null,
+        status: { type: "idle" },
+        path: null,
+        cwd,
+        cliVersion: "",
+        originator: "provenance-ui",
+        source: "unknown",
+        canAcceptDirectInput: null,
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: null,
+        daybreakEnabled: null,
+        daybreakProgramPropagationEnrolled: null,
+        turns: [],
+      },
+      mode,
+      model: parsed.model,
+      session: null,
+      sandbox: sandboxFrom(p.sandbox, p.approvalPolicy),
+      turns: [],
+    };
+    this.threads.set(id, rec);
+    this.save(rec);
+    this.broadcast("thread/started", { thread: this.threadView(rec) });
+    return this.threadResponse(rec);
+  }
+
+  private threadView(t: ThreadRecord): Json {
+    const status = this.running.has(t.thread.id)
+      ? { type: "active", activeFlags: [] }
+      : { type: "idle" };
+    return { ...t.thread, status, turns: [] };
+  }
+
+  private threadResponse(t: ThreadRecord): Json {
+    return {
+      thread: this.threadView(t),
+      model: t.thread.model,
+      modelProvider: t.thread.modelProvider,
+      cwd: t.thread.cwd,
+      serviceTier: null,
+      disabledPluginIds: [],
+      runtimeWorkspaceRoots: [],
+      instructionSources: [],
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandbox: { type: "workspaceWrite" },
+      activePermissionProfile: null,
+      reasoningEffort: null,
+      multiAgentMode: "explicitRequestOnly",
+    };
+  }
+
+  private startTurn(p: Json): unknown {
+    const t = this.get(p.threadId);
+    if (this.running.has(t.thread.id)) throw new Error("A turn is already running in this thread");
+    const text = inputText(p.input);
+    if (!text.trim()) throw new Error("Nothing to send");
+    if (typeof p.model === "string" && p.model) {
+      const m = parseFallbackModel(p.model);
+      if (!m || m.mode !== t.mode)
+        throw new Error(`This thread runs on ${t.mode === "claude" ? "Claude Code" : "Codex"}`);
+      t.model = m.model;
+      t.thread.model = `${t.mode}:${m.model}`;
+    }
+    if (typeof p.cwd === "string" && p.cwd && isDir(p.cwd)) t.thread.cwd = p.cwd;
+    if (p.sandboxPolicy || p.approvalPolicy)
+      t.sandbox = sandboxFrom(policyMode(p.sandboxPolicy) ?? t.sandbox, p.approvalPolicy);
+
+    const now = Math.floor(Date.now() / 1000);
+    const turn: TurnRecord = {
+      id: `fbt-${randomUUID()}`,
+      rootTurnId: null,
+      items: [],
+      itemsView: "full",
+      status: "inProgress",
+      error: null,
+      startedAt: now,
+      completedAt: null,
+      durationMs: null,
+    };
+    t.turns.push(turn);
+    if (!t.thread.preview) t.thread.preview = text.slice(0, 400);
+    t.thread.updatedAt = now;
+    const run: Running = { child: null, turn, interrupted: false };
+    this.running.set(t.thread.id, run);
+    this.save(t);
+
+    const threadId = t.thread.id;
+    this.broadcast("thread/status/changed", {
+      threadId,
+      status: { type: "active", activeFlags: [] },
+    });
+    this.broadcast("turn/started", { threadId, turn: { ...turn, items: [] } });
+    const user = userMessage(`${turn.id}-user`, text);
+    this.upsert(turn, user);
+    this.broadcast("item/started", { threadId, turnId: turn.id, item: user });
+    this.broadcast("item/completed", { threadId, turnId: turn.id, item: user });
+    // Answer turn/start first, then run (a spawn error still ends the turn the usual way).
+    setImmediate(() => this.runTurn(t, run, text));
+    return { turn: { ...turn, items: [user] } };
+  }
+
+  private runTurn(t: ThreadRecord, run: Running, prompt: string): void {
+    const threadId = t.thread.id;
+    const turn = run.turn;
+    const t0 = Date.now();
+    let failure: string | null = null;
+    let ended = false;
+    const sink: Sink = {
+      started: (item) => {
+        this.upsert(turn, item);
+        this.broadcast("item/started", { threadId, turnId: turn.id, item });
+      },
+      delta: (itemId, delta) => {
+        const it = turn.items.find((i) => i.id === itemId);
+        if (it && typeof it.text === "string") it.text += delta;
+        this.broadcast("item/agentMessage/delta", { threadId, turnId: turn.id, itemId, delta });
+      },
+      completed: (item) => {
+        this.upsert(turn, item);
+        this.broadcast("item/completed", { threadId, turnId: turn.id, item });
+      },
+      session: (id) => {
+        if (t.session !== id) {
+          t.session = id;
+          this.save(t);
+        }
+      },
+      error: (message, fatal) => {
+        if (fatal) failure = message;
+        this.broadcast("error", {
+          threadId,
+          turnId: turn.id,
+          error: { message, codexErrorInfo: null, additionalDetails: null },
+          willRetry: !fatal,
+        });
+      },
+      done: (status, message) => {
+        if (status === "failed") failure = message ?? "failed";
+      },
+    };
+    const searchPath = this.opts.searchPath();
+    const bin = findCli(t.mode, searchPath);
+    const finish = () => {
+      if (ended) return;
+      ended = true;
+      this.running.delete(threadId);
+      turn.completedAt = Math.floor(Date.now() / 1000);
+      turn.durationMs = Date.now() - t0;
+      turn.status = run.interrupted ? "interrupted" : failure ? "failed" : "completed";
+      turn.error =
+        failure && !run.interrupted
+          ? { message: failure, codexErrorInfo: null, additionalDetails: null, misalignment: null }
+          : null;
+      t.thread.updatedAt = turn.completedAt;
+      this.save(t);
+      this.broadcast("turn/completed", { threadId, turn });
+      this.broadcast("thread/status/changed", { threadId, status: { type: "idle" } });
+    };
+    if (!bin) {
+      failure = `${t.mode === "claude" ? "Claude Code" : "Codex"} isn't installed (no \`${t.mode}\` found)`;
+      return finish();
+    }
+    const cwd = isDir(t.thread.cwd) ? t.thread.cwd : process.env.HOME || "/";
+    const args = t.mode === "claude" ? claudeArgs(t) : codexArgs(t, cwd);
+    const parser =
+      t.mode === "claude"
+        ? new ClaudeStream(sink, cwd, turn.id)
+        : new CodexStream(sink, cwd, turn.id);
+    const env: NodeJS.ProcessEnv = { ...process.env, PATH: searchPath };
+    // A nested Claude Code session (the app started from one) would refuse to run.
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+    this.log(`${t.mode} turn in ${cwd}: ${path.basename(bin)} ${args.join(" ")}`);
+    let child: ChildProcess;
+    try {
+      child = spawn(bin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (e) {
+      failure = `Couldn't start ${t.mode}: ${String(e)}`;
+      return finish();
+    }
+    run.child = child;
+    let stderr = "";
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr = (stderr + d.toString()).slice(-4000);
+    });
+    child.on("error", (e) => {
+      failure = `Couldn't start ${t.mode}: ${e.message}`;
+      finish();
+    });
+    const lines = readline.createInterface({ input: child.stdout! });
+    lines.on("line", (l) => {
+      if (l.trim()) parser.line(l);
+    });
+    child.on("close", (code, signal) => {
+      parser.end();
+      if (!parser.done && !run.interrupted && !failure) {
+        const tail = stderr.trim().split("\n").filter(Boolean).slice(-3).join(" · ");
+        failure = `${t.mode} stopped (${signal ?? `exit ${code}`})${tail ? `: ${tail.slice(0, 400)}` : ""}`;
+      }
+      finish();
+    });
+    child.stdin?.on("error", () => {}); // it may exit before reading everything
+    child.stdin?.end(prompt);
+  }
+
+  private upsert(turn: TurnRecord, item: Item): void {
+    const i = turn.items.findIndex((x) => x.id === item.id);
+    if (i === -1) turn.items.push(item);
+    else turn.items[i] = item;
+  }
+
+  // ---- store -----------------------------------------------------------------------
+
+  private load(): void {
+    if (this.loaded) return;
+    this.loaded = true;
+    mkdirSync(this.threadDir, { recursive: true });
+    for (const f of readdirSync(this.threadDir)) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const rec = JSON.parse(readFileSync(path.join(this.threadDir, f), "utf8")) as ThreadRecord;
+        if (!rec?.thread?.id) continue;
+        // A turn left running by a quit or crash didn't finish.
+        for (const turn of rec.turns)
+          if (turn.status === "inProgress") {
+            turn.status = "interrupted";
+            turn.completedAt ??= turn.startedAt;
+          }
+        this.threads.set(rec.thread.id, rec);
+      } catch (e) {
+        this.log(`skipped unreadable thread file ${f}: ${String(e)}`);
+      }
+    }
+  }
+
+  private save(t: ThreadRecord): void {
+    try {
+      mkdirSync(this.threadDir, { recursive: true });
+      const file = path.join(this.threadDir, `${t.thread.id}.json`);
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify(t));
+      renameSync(tmp, file);
+    } catch (e) {
+      this.log(`couldn't save thread ${t.thread.id}: ${String(e)}`);
+    }
+  }
+
+  // ---- wire ------------------------------------------------------------------------
+
+  private broadcast(method: string, params: unknown): void {
+    const text = JSON.stringify({ method, params });
+    for (const ws of this.clients) if (ws.readyState === ws.OPEN) ws.send(text);
+  }
+
+  private send(ws: WebSocket, msg: unknown): void {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+  }
+}
+
+// ---- argv --------------------------------------------------------------------------
+
+export function claudeArgs(t: {
+  model: string;
+  session: string | null;
+  sandbox: Sandbox;
+}): string[] {
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
+  if (t.sandbox === "danger-full-access") args.push("--dangerously-skip-permissions");
+  else args.push("--permission-mode", t.sandbox === "read-only" ? "dontAsk" : "acceptEdits");
+  if (t.model) args.push("--model", t.model);
+  if (t.session) args.push("--resume", t.session);
+  return args;
+}
+
+export function codexArgs(
+  t: { model: string; session: string | null; sandbox: Sandbox },
+  cwd: string,
+): string[] {
+  const model = t.model ? ["-m", t.model] : [];
+  if (t.session)
+    return [
+      "exec",
+      "resume",
+      "--json",
+      "--skip-git-repo-check",
+      "-c",
+      `sandbox_mode="${t.sandbox}"`,
+      ...model,
+      t.session,
+      "-",
+    ];
+  return ["exec", "--json", "--skip-git-repo-check", "-s", t.sandbox, ...model, "-C", cwd, "-"];
+}
+
+function sandboxFrom(sandbox: unknown, approval: unknown): Sandbox {
+  const s: Sandbox =
+    sandbox === "read-only" || sandbox === "danger-full-access" ? sandbox : "workspace-write";
+  // "Ask every time" can't ask here: it runs like read only (nothing unapproved happens).
+  return approval === "untrusted" ? "read-only" : s;
+}
+
+function policyMode(p: unknown): Sandbox | null {
+  const type = (p as { type?: string } | null)?.type;
+  if (type === "readOnly") return "read-only";
+  if (type === "dangerFullAccess") return "danger-full-access";
+  if (type === "workspaceWrite") return "workspace-write";
+  return null;
+}
+
+function inputText(input: unknown): string {
+  if (!Array.isArray(input)) return "";
+  return (input as Json[])
+    .filter((x) => x?.type === "text" && typeof x.text === "string")
+    .map((x) => x.text as string)
+    .join("\n\n");
+}
+
+function isDir(p: string): boolean {
+  try {
+    return existsSync(p) && statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** SIGINT first (both CLIs stop cleanly on it), then SIGTERM, then SIGKILL. */
+function killGently(child: ChildProcess | null): void {
+  if (!child || child.exitCode !== null) return;
+  child.kill("SIGINT");
+  const term = setTimeout(() => child.exitCode === null && child.kill("SIGTERM"), 2500);
+  const kill = setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 6000);
+  child.once("close", () => {
+    clearTimeout(term);
+    clearTimeout(kill);
+  });
+}
