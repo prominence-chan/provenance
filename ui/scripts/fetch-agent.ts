@@ -92,6 +92,37 @@ if (old.sourceSha256 === srcSha && existsSync(bin)) {
   );
 }
 
+// The code-mode host: a second program the binary starts to run tools for models that only take "code mode"
+// (every model of a Codex sign-in). It is looked for next to the binary, so it ships there.
+//   AGENT_HOST=/path/to/codex-code-mode-host   # default: next to AGENT_BIN, else this checkout's release build
+const hostName = "codex-code-mode-host";
+const hostSrc = [
+  process.env.AGENT_HOST,
+  path.join(path.dirname(src), hostName),
+  path.join(root, "../codex-rs/target/release", hostName),
+].find((p): p is string => !!p && existsSync(p));
+const hostBin = path.join(dest, hostName);
+if (!hostSrc) {
+  console.error(
+    `[fetch-agent] ${hostName} not found (set AGENT_HOST, or cargo build --release -p codex-code-mode-host): ` +
+      `"Run Codex through Provenance" cannot run tools without it.`,
+  );
+  process.exit(1);
+}
+const hostStamp = path.join(dest, "HOST.sha256");
+const hostSha = sha256(hostSrc);
+if (!existsSync(hostBin) || !existsSync(hostStamp) || readFileSync(hostStamp, "utf8").trim() !== hostSha) {
+  const tmp = `${hostBin}.tmp`;
+  copyFileSync(hostSrc, tmp);
+  execFileSync("strip", [tmp]);
+  execFileSync("codesign", ["--force", "--sign", "-", "--timestamp=none", tmp]);
+  renameSync(tmp, hostBin);
+  writeFileSync(hostStamp, hostSha + "\n");
+  log(`${hostName}: ${(statSync(hostBin).size / 1e6).toFixed(0)} MB stripped, from ${path.basename(path.dirname(hostSrc))}`);
+} else {
+  log(`${hostName} is up to date`);
+}
+
 // The app's protocol types should be the ones this binary speaks.
 const gen = mkdtempSync(path.join(tmpdir(), "provenance-agent-types-"));
 try {
