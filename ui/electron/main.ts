@@ -412,6 +412,7 @@ function buildMenu(): void {
         { role: "about" },
         { type: "separator" },
         { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: openPreferences },
+        { label: "Models & Accounts…", click: () => send("app:open-accounts") },
         { type: "separator" },
         { role: "services" },
         { type: "separator" },

@@ -18,6 +18,8 @@ import {
   IconSun,
 } from "./icons";
 import { SolarMark } from "./SolarMark";
+import { openSetup } from "../setup/open";
+import { IconAccounts } from "../setup/SetupDialog";
 
 const GROUPS_KEY = "provenance-ui.collapsed-projects";
 
@@ -161,6 +163,14 @@ export function Sidebar() {
         </nav>
         <div className="sidebar-foot">
           <ConnectionStatus />
+          <button
+            className="icon-btn"
+            title="Models & accounts"
+            aria-label="Models & accounts"
+            onClick={() => openSetup()}
+          >
+            <IconAccounts size={14} />
+          </button>
           <ThemeToggle />
         </div>
       </aside>

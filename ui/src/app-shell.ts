@@ -8,6 +8,8 @@ export interface AppShell {
   openPreferences(): Promise<void>;
   onSetCwd(cb: (cwd: string) => void): () => void;
   onNewThread(cb: () => void): () => void;
+  /** App menu -> Models & Accounts… (absent in builds from before it). */
+  onOpenAccounts?(cb: () => void): () => void;
 }
 
 export const appShell: AppShell | undefined = (window as { provenanceApp?: AppShell })

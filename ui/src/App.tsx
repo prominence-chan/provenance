@@ -7,6 +7,7 @@ import { useFx } from "./components/effects/useFx";
 import { Notices } from "./components/Notices";
 import { Sidebar } from "./components/Sidebar";
 import { ThreadHeader } from "./components/ThreadHeader";
+import { SetupDialog } from "./setup/SetupDialog";
 import { useAppState } from "./store/store";
 import { useSidebar } from "./theme/ui";
 
@@ -29,6 +30,7 @@ export function App() {
         <Composer />
       </main>
       <Notices />
+      <SetupDialog />
     </div>
   );
 }

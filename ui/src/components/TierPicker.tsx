@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { openSetup } from "../setup/open";
 import { refreshSources, updateSettings } from "../store/actions";
 import type { Source } from "../store/state";
 import { useAppState } from "../store/store";
@@ -239,6 +240,20 @@ export function TierPicker() {
               </div>
             );
           })}
+          <button
+            type="button"
+            className="tier-setup"
+            onPointerEnter={() => {
+              window.clearTimeout(switchTimer.current);
+              setSubOpen(false);
+            }}
+            onClick={() => {
+              setOpen(false);
+              openSetup();
+            }}
+          >
+            Models &amp; accounts…
+          </button>
           {subItems.length > 0 && (
             <div
               className="tier-sub"
