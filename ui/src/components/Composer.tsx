@@ -60,7 +60,6 @@ export function Composer() {
       <div
         className="composer-shell"
         data-tier={fx.tier?.id}
-        data-effect={fx.tier?.effect ?? "none"}
         data-streaming={fx.streaming ? "" : undefined}
       >
         <div className="composer">

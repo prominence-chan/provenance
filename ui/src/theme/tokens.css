@@ -74,7 +74,15 @@
   --tier-nova-grad: linear-gradient(135deg, #ffe3f1, #ff4fa3 45%, #c2185b 80%, #7a1fa2);
 
   /* ---- effects (see src/theme/effects.css + src/components/effects/) ---- */
-  /* Flame colour ramps, coolest to hottest (deep -> mid -> hot -> core). */
+  /* Per-tier effect ramps, coolest to hottest (deep -> mid -> hot -> core). */
+  --fx-ember-deep: #3d1308;
+  --fx-ember-mid: #a8441f;
+  --fx-ember-hot: #e8834c;
+  --fx-ember-core: #ffd0a6;
+  --fx-spark-deep: #4a2a08;
+  --fx-spark-mid: #ff9a2e;
+  --fx-spark-hot: #ffd27a;
+  --fx-spark-core: #fffaf0;
   --fx-solstice-deep: #5c0e08;
   --fx-solstice-mid: #d8391b;
   --fx-solstice-hot: #ff9b3d;
@@ -171,6 +179,14 @@
   --tier-nova: #d6307f;
 
   /* On paper the ramp runs the other way: pale tips, deep saturated base. */
+  --fx-ember-deep: #fed7aa;
+  --fx-ember-mid: #e47a43;
+  --fx-ember-hot: #b4471f;
+  --fx-ember-core: #7c2d12;
+  --fx-spark-deep: #fde68a;
+  --fx-spark-mid: #f59e0b;
+  --fx-spark-hot: #d97706;
+  --fx-spark-core: #92400e;
   --fx-solstice-deep: #fdba74;
   --fx-solstice-mid: #f97316;
   --fx-solstice-hot: #dc2626;

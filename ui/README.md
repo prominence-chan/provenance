@@ -71,7 +71,7 @@ ui/
     │   ├── Approvals.tsx      command / file-change approval cards
     │   ├── Composer.tsx       prompt box, tier picker, permissions preset, cwd, send/stop
     │   ├── Markdown.tsx, DiffView.tsx, Notices.tsx, icons.tsx, format.ts
-    ├── components/effects/  FlameFx.tsx (WebGL2 flames, filament, embers), useFx.ts
+    ├── components/effects/  FlameFx.tsx (WebGL2 tier effects), useFx.ts
     ├── components/TierPicker.tsx, TierBadge.tsx, SolarMark.tsx
     ├── theme/           tokens.css, effects.css, tiers.ts, theme.ts, ui.ts (see "Theme" below)
     ├── App.tsx, main.tsx
@@ -157,33 +157,38 @@ a 40 px header, 13.5 px body text, tool calls as one-line rows that open on clic
   project's header collapses it (remembered). `⌘B` / `Ctrl+B` or the panel button hides the
   sidebar (remembered). Below 860 px it becomes a drawer that starts closed and closes after
   you pick a thread. The state lives in `src/theme/ui.ts`.
-- **Tiers:** `src/theme/tiers.ts` holds the order (ember < spark < solstice < nova), the blurbs
-  shown in the picker, and which effect each tier gets (`none` / `warm` / `plasma`). Any element
-  with `data-tier="..."` gets `--tier-color` / `--tier-grad` for its subtree. `TierBadge`
-  appears in the header, on the "Working…" line and in each turn's footer; `TierPicker` is the
-  composer dropdown.
-- **Effects** (only while a turn streams on the selected thread), all in one WebGL2 canvas
-  behind the main column, `src/components/effects/FlameFx.tsx`:
-  - flames: domain-warped fbm noise licking up off the composer's top edge (tallest in the
-    middle, low on the sides), a living rim that replaces the composer's border, a soft
-    corona, and faint heat-haze wisps;
-  - a thin plasma filament under the header;
-  - embers: GL points with buoyancy that fades as they cool, drag and a swirling turbulence
-    field, coloured by temperature;
-  - solstice kindles gently in gold and crimson; nova ignites: a shockwave ring, a flash, the
-    filament lighting from the centre outwards and an ember burst, settling into a breathing
-    magenta corona.
+- **Tiers:** `src/theme/tiers.ts` holds the order (ember < spark < solstice < nova) and the
+  blurbs shown in the picker. Any element with `data-tier="..."` gets `--tier-color` /
+  `--tier-grad` for its subtree. `TierBadge` appears in the header, on the "Working…" line and
+  in each turn's footer; `TierPicker` is the composer dropdown.
+- **Effects** (always on for the selected tier), all in one WebGL2 canvas behind the main
+  column, `src/components/effects/FlameFx.tsx`. Three states, eased into each other: a short
+  **flare** when the tier changes (and on first load), an almost-still **idle**, and an
+  **active** state while a turn streams (above idle, well below the flare). Each tier has its
+  own style and ramp (`--fx-<tier>-deep/mid/hot/core`):
+  - ember: a warm glow breathing round the composer; on switch hairline heat cracks spread out
+    from its edge and cool; while active, warm patches drift along the rim and cracks flicker
+    up here and there;
+  - spark: electric crackle; on switch two bright heads race round the edge in opposite
+    directions trailing a jagged arc and shedding falling sparks; while active, quick flicks
+    skip along the edge; idle is a tiny flick every few seconds;
+  - solstice: warm flame off the top edge; on switch a sunrise (golden bloom and rays rising
+    off the edge, flames leaping); idle is a low, slow corona lick;
+  - nova: a shimmering plasma rim all round; on switch a stellar ignition (flash, shockwave
+    ring, ember burst, the header filament lighting outward); while active a breathing plasma
+    corona with flames, embers and the filament.
 
-  The shader is evaluated only in a band around the composer and a strip under the header,
-  DPR is capped at 1.5, the loop runs only while something is visible (it fades out, then
-  stops), pauses while the tab is hidden and drops to ~30 fps when the window is in the
-  background. The canvas is `pointer-events: none`. Under `prefers-reduced-motion`, or without
-  WebGL2, nothing animates: `src/theme/effects.css` draws a static tier-coloured border and
-  glow instead.
+  The shader runs only in a band around the composer (plus a strip under the header and, for
+  nova's ignition, the ring's box), DPR is capped at 1.5, idle draws at 20 fps, a background
+  window at 30 fps (idle stops after ~8 s unfocused and resumes on focus), and nothing runs
+  while the tab is hidden. The canvas is `pointer-events: none` and sits under the text.
+  Under `prefers-reduced-motion`, or without WebGL2, nothing animates:
+  `src/theme/effects.css` draws a static tier tint on the composer border instead.
 
-- **Preview without a turn (dev only):** open `http://localhost:5173/?fx=nova` (or
-  `solstice`), or run `__provenanceFx("nova")` / `__provenanceFx(null)` in the console.
-  Production builds strip this.
+- **Preview without a turn (dev only):** `http://localhost:5173/?fx=nova` (active),
+  `?fx=nova:idle` (load flare, then idle); in the console `__provenanceFx("spark", "flare")`
+  replays a tier's switch flare, `__provenanceFx("spark", "idle" | "active")` sets the state,
+  `__provenanceFx(null)` goes back to the real state. Production builds strip this.
 
 ## Not done yet (v1)
 

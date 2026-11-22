@@ -1,11 +1,11 @@
-/* Fire effects for the higher tiers while a turn streams.
+/* Tier effects around the composer.
 
-   The fire itself is drawn by components/effects/FlameFx.tsx (one WebGL2 canvas behind
-   the main column: shader flames off the composer's top edge, a living rim, heat haze,
-   a plasma filament under the header, embers). This file only places that canvas, plus
-   the static fallback that replaces it under prefers-reduced-motion or without WebGL2
-   (.main[data-fx="static"]).
-   The composer keeps its own hairline border; the fire sits on its top edge.
+   The effects themselves are drawn by components/effects/FlameFx.tsx: one WebGL2 canvas
+   behind the main column, a different style per tier (ember glow and heat cracks, spark
+   crackle, solstice flame, nova plasma), each in three states: a flare when the tier is
+   picked, a near-still idle, and a livelier state while a turn streams. This file only
+   places that canvas, plus the static fallback that replaces it under
+   prefers-reduced-motion or without WebGL2 (.main[data-fx="static"]).
 
    Colours: --fx-<tier>-deep/mid/hot/core in tokens.css. */
 
@@ -21,22 +21,34 @@
   z-index: 1;
 }
 
-.composer-shell {
+.composer-shell[data-tier="ember"] {
+  --fx-hot: var(--fx-ember-hot);
+  --fx-mid: var(--fx-ember-mid);
+}
+.composer-shell[data-tier="spark"] {
+  --fx-hot: var(--fx-spark-hot);
+  --fx-mid: var(--fx-spark-mid);
+}
+.composer-shell[data-tier="solstice"] {
   --fx-hot: var(--fx-solstice-hot);
   --fx-mid: var(--fx-solstice-mid);
 }
-.composer-shell[data-effect="plasma"] {
+.composer-shell[data-tier="nova"] {
   --fx-hot: var(--fx-nova-hot);
   --fx-mid: var(--fx-nova-mid);
 }
 
-/* Static fallback: a tier-coloured border and a still glow, no movement. */
-.main[data-fx="static"]
-  .composer-shell[data-streaming]:is([data-effect="warm"], [data-effect="plasma"])
-  .composer {
-  border-color: color-mix(in srgb, var(--fx-hot) 70%, transparent);
+/* Static fallback: a faint tier tint on the border, a little stronger while a turn
+   streams. No movement. */
+.main[data-fx="static"] .composer-shell[data-tier] .composer {
+  border-color: color-mix(in srgb, var(--fx-hot) 35%, var(--border-strong));
   box-shadow:
     var(--composer-shadow),
-    0 0 0 1px color-mix(in srgb, var(--fx-mid) 35%, transparent),
-    0 0 calc(28px * var(--fx-glow-strength)) color-mix(in srgb, var(--fx-mid) 30%, transparent);
+    0 0 calc(18px * var(--fx-glow-strength)) color-mix(in srgb, var(--fx-mid) 14%, transparent);
+}
+.main[data-fx="static"] .composer-shell[data-tier][data-streaming] .composer {
+  border-color: color-mix(in srgb, var(--fx-hot) 60%, var(--border-strong));
+  box-shadow:
+    var(--composer-shadow),
+    0 0 calc(26px * var(--fx-glow-strength)) color-mix(in srgb, var(--fx-mid) 26%, transparent);
 }
