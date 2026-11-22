@@ -18,26 +18,33 @@
 //   POST /mock/legacy   {"legacy": true} /web/* 404s, like a router from before the API
 //   GET  /mock/state    the whole state, for assertions
 //
-// The router API it mirrors (built in provenance-core separately):
+// The router API it mirrors (provenance-core's server.py; shapes in shared/router-api.ts):
 //   GET  /web/accounts, POST /web/accounts {account}, DELETE /web/accounts/{id}
-//   POST /web/login {provider, account} -> {state:"open"} | 409 {detail}
+//   PATCH /web/providers/{id} {enabled?, daily_cap?}
+//   POST /web/login {provider, account, bounds?} -> {state:"open"} | 409 {detail}
 //   GET  /web/login?provider&account     -> {state, reason}
 //   POST /web/login/cancel {provider, account} -> {state:"idle"}
+//   POST /web/login/show {provider, account}   -> {state, shown}
 //   POST /web/browser/prepare
+//   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}
+//   GET  /health, /v1/models, /v1/sources
+// Everything a real router has that matters to the screen; what a real one does beyond it
+// (the window, the cookie, the check) is in provenance-core's own tests and router-e2e.ts.
 
 import http from "node:http";
+import type {
+  LoginState,
+  WindowBounds,
+  WireAccount,
+  WireBrowser,
+  WireHealth,
+  WirePoolProvider,
+  WireProvider,
+  WireSource,
+  WireWebAccounts,
+} from "../shared/router-api.ts";
 
-type LoginState = "idle" | "preparing" | "open" | "verifying" | "signed_in" | "failed";
-
-interface Account {
-  signed_in: boolean | null;
-  checked_at: number | null;
-  blocked: boolean;
-  reason: string | null;
-  today: number;
-  daily_cap: number;
-  login: { state: LoginState; reason: string | null };
-}
+type Account = Omit<WireAccount, "id">;
 
 interface Model {
   id: string;
@@ -55,6 +62,33 @@ interface Provider {
   cap: number;
   models: Model[];
 }
+
+interface Settings {
+  enabled: boolean;
+  daily_cap: number;
+}
+
+/** The token pool's providers: one with a key from the router's setup, one anonymous, one without. */
+const POOL: Omit<WirePoolProvider, "usable">[] = [
+  {
+    id: "google",
+    anonymous: false,
+    vars: [{ name: "GEMINI_API_KEY", set: false, from: null }],
+    models: 7,
+    tiers: ["solstice", "ember"],
+  },
+  { id: "kilo", anonymous: true, vars: [], models: 10, tiers: ["solstice", "ember", "spark"] },
+  {
+    id: "cloudflare",
+    anonymous: false,
+    vars: [
+      { name: "CLOUDFLARE_API_TOKEN", set: false, from: null },
+      { name: "CLOUDFLARE_ACCOUNT_ID", set: false, from: null },
+    ],
+    models: 4,
+    tiers: ["solstice", "ember"],
+  },
+];
 
 const PROVIDERS: Provider[] = [
   {
@@ -125,22 +159,20 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
-const VERSION = "157.0.8103.78";
 const VERIFY_MS = Number(process.env.MOCK_VERIFY_MS ?? 1500);
 const PREPARE_MS = Number(process.env.MOCK_PREPARE_MS ?? 3000);
 const AUTO = process.env.MOCK_AUTO === "1";
 
 interface State {
-  browser: {
-    mode: string;
-    ready: boolean;
-    version: string | null;
-    preparing: boolean;
-    error: string | null;
-  };
+  browser: WireBrowser;
   accountIds: string[];
   /** provider id -> account id -> account */
   accounts: Record<string, Record<string, Account>>;
+  settings: Record<string, Settings>;
+  /** Variable name -> set (values are not kept, as the real router never sends them back). */
+  keys: Record<string, boolean>;
+  /** The bounds the last POST /web/login asked for. */
+  lastBounds: WindowBounds | null;
   down: boolean;
   /** An older router without the /web API (every /web route 404s). */
   legacy: boolean;
@@ -152,26 +184,45 @@ function blank(cap: number): Account {
   return {
     signed_in: null,
     checked_at: null,
+    email: null,
     blocked: false,
     reason: null,
+    blocked_for_s: 0,
     today: 0,
     daily_cap: cap,
+    signing_in: false,
+    window_open: false,
     login: { state: "idle", reason: null },
   };
 }
 
+const READY: WireBrowser = {
+  mode: "bundled",
+  source: "cft",
+  ready: true,
+  version: "157.0.8103.78",
+  preparing: false,
+  stage: null,
+  progress: null,
+  error: null,
+};
+
 function scenario(name: string): State {
   const st: State = {
-    browser: { mode: "bundled", ready: true, version: VERSION, preparing: false, error: null },
+    browser: { ...READY },
     accountIds: ["main"],
     accounts: {},
+    settings: {},
+    keys: {},
+    lastBounds: null,
     down: false,
     legacy: false,
   };
-  for (const p of PROVIDERS) st.accounts[p.id] = { main: blank(p.cap) };
-  if (name === "nobrowser") {
-    st.browser = { mode: "bundled", ready: false, version: null, preparing: false, error: null };
+  for (const p of PROVIDERS) {
+    st.accounts[p.id] = { main: blank(p.cap) };
+    st.settings[p.id] = { enabled: true, daily_cap: p.cap };
   }
+  if (name === "nobrowser") st.browser = { ...READY, ready: false, version: null };
   if (name === "signed") {
     st.accountIds = ["main", "b"];
     for (const p of PROVIDERS) st.accounts[p.id].b = blank(p.cap);
@@ -179,6 +230,7 @@ function scenario(name: string): State {
     Object.assign(st.accounts["chatgpt-web"].main, {
       signed_in: true,
       checked_at: t - 300,
+      email: "ada@example.com",
       today: 38,
     });
     Object.assign(st.accounts["chatgpt-web"].b, {
@@ -186,7 +238,8 @@ function scenario(name: string): State {
       checked_at: t - 5400,
       today: 500,
       blocked: true,
-      reason: "Daily limit reached; it resets at midnight.",
+      blocked_for_s: 4 * 3600,
+      reason: "Today's limit of 500 chats on this account is used up. It resets at midnight.",
     });
     Object.assign(st.accounts["qwen-web"].main, {
       signed_in: true,
@@ -195,6 +248,7 @@ function scenario(name: string): State {
     });
     Object.assign(st.accounts["gemini-web"].main, { signed_in: false, checked_at: t - 86400 });
     Object.assign(st.accounts["gemini-web"].b, { signed_in: true, checked_at: t - 900, today: 7 });
+    st.keys.GEMINI_API_KEY = true;
   }
   return st;
 }
@@ -214,6 +268,7 @@ function later(ms: number, fn: () => void): void {
 function startPrepare(): void {
   if (state.browser.ready || state.browser.preparing) return;
   state.browser.preparing = true;
+  state.browser.stage = "download";
   state.browser.error = null;
   prepareProgress = 0;
   const steps = 10;
@@ -223,16 +278,11 @@ function startPrepare(): void {
       if (i < steps) return;
       if (process.env.MOCK_PREPARE_FAIL === "1") {
         state.browser.preparing = false;
+        state.browser.stage = null;
         state.browser.error = "The download stopped: no internet connection.";
         return;
       }
-      state.browser = {
-        mode: "bundled",
-        ready: true,
-        version: VERSION,
-        preparing: false,
-        error: null,
-      };
+      state.browser = { ...READY };
       // A sign-in that was waiting for the browser opens its window now.
       for (const accs of Object.values(state.accounts))
         for (const a of Object.values(accs))
@@ -257,7 +307,13 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
     if (a.login.state !== "verifying") return;
     if (ok) {
       a.login = { state: "signed_in", reason: null };
-      Object.assign(a, { signed_in: true, checked_at: now(), blocked: false, reason: null });
+      Object.assign(a, {
+        signed_in: true,
+        checked_at: now(),
+        email: `${account}@example.com`,
+        blocked: false,
+        reason: null,
+      });
     } else {
       const why =
         reason ??
@@ -269,40 +325,77 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
   return true;
 }
 
-function accountsBody() {
+function providerBody(p: Provider): WireProvider {
+  const set = state.settings[p.id];
+  return {
+    id: p.id,
+    name: p.name,
+    url: p.url,
+    enabled: set.enabled,
+    enabled_by: "env",
+    daily_cap: set.daily_cap,
+    shares_browser_with: p.id === "chatgpt-web" ? null : "chatgpt-web",
+    models: p.models.map(({ id, label, tier, accounts }) => ({ id, label, tier, accounts })),
+    accounts: state.accountIds.map((id) => {
+      const a = state.accounts[p.id][id];
+      return {
+        id,
+        ...a,
+        daily_cap: set.daily_cap,
+        signing_in: ["preparing", "open", "verifying"].includes(a.login.state),
+      };
+    }),
+  };
+}
+
+function accountsBody(): WireWebAccounts {
   return {
     browser: state.browser.preparing
       ? { ...state.browser, progress: prepareProgress }
       : state.browser,
-    providers: PROVIDERS.map((p) => ({
-      id: p.id,
-      name: p.name,
-      url: p.url,
-      models: p.models.map(({ id, label, tier, accounts }) => ({ id, label, tier, accounts })),
-      accounts: state.accountIds.map((id) => ({ id, ...state.accounts[p.id][id] })),
-    })),
+    accounts: state.accountIds,
+    providers: PROVIDERS.map(providerBody),
   };
 }
 
+function poolBody(): WirePoolProvider[] {
+  return POOL.map((p) => {
+    const vars = p.vars.map((v) => ({
+      ...v,
+      set: !!state.keys[v.name],
+      from: state.keys[v.name] ? ("app" as const) : null,
+    }));
+    return { ...p, vars, usable: p.anonymous || (vars.length > 0 && vars.every((v) => v.set)) };
+  });
+}
+
 function sourcesBody() {
+  const keyed = poolBody().some((p) => p.usable && !p.anonymous);
   const tiers = ["nova", "solstice", "ember", "spark"].map((tier) => {
-    const sources: unknown[] = [
-      {
-        id: "pool",
-        label: "Token pool",
-        kind: "pool",
-        model: `pool/${tier}`,
-        remaining: 0.9,
-        busy: 0,
-        available: true,
-        pinnable: true,
-      },
-    ];
-    for (const p of PROVIDERS)
+    // nova has no API models (as in the real catalog); the others need a key here
+    const sources: WireSource[] =
+      tier === "nova"
+        ? []
+        : [
+            {
+              id: "pool",
+              label: "Token pool",
+              kind: "pool",
+              model: `pool/${tier}`,
+              remaining: keyed ? 0.9 : 0,
+              busy: 0,
+              available: keyed,
+              pinnable: keyed,
+              needs: keyed ? null : "keys",
+            },
+          ];
+    for (const p of PROVIDERS) {
+      if (!state.settings[p.id].enabled) continue;
       for (const m of p.models.filter((m) => m.tier === tier)) {
         const accs = Object.entries(state.accounts[p.id]).filter(
           ([id, a]) => a.signed_in && !a.blocked && (!m.accounts || m.accounts.includes(id)),
         );
+        const signed = Object.values(state.accounts[p.id]).some((a) => a.signed_in);
         sources.push({
           id: m.source,
           label: m.label,
@@ -312,11 +405,31 @@ function sourcesBody() {
           busy: 0,
           available: accs.length > 0,
           pinnable: accs.length > 0,
+          needs: signed ? null : "signin",
         });
       }
+    }
     return { tier, sources };
   });
   return { tiers };
+}
+
+const started = Date.now();
+function healthBody(): WireHealth {
+  return {
+    ok: true,
+    service: "provenance-core",
+    version: "mock",
+    pid: process.pid,
+    home: "(mock)",
+    uptime_s: Math.round((Date.now() - started) / 1000),
+    api: { providers: POOL.length, usable: poolBody().filter((p) => p.usable).length, models: 0 },
+    web: {
+      providers: PROVIDERS.length,
+      enabled: PROVIDERS.filter((p) => state.settings[p.id].enabled).map((p) => p.id),
+    },
+    tiers: ["nova", "solstice", "ember", "spark"],
+  };
 }
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
@@ -375,7 +488,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return;
   }
 
-  if (state.legacy && p.startsWith("/web/")) return send(res, 404, { detail: "Not Found" });
+  if (state.legacy && (p.startsWith("/web/") || p.startsWith("/pool/") || p === "/health"))
+    return send(res, 404, { detail: "Not Found" });
+  if (p === "/health" && m === "GET") return send(res, 200, healthBody());
   if (p === "/v1/models" && m === "GET") {
     return send(res, 200, {
       data: ["nova", "solstice", "ember", "spark"].map((id) => ({ id, owned_by: "tierlm" })),
@@ -412,8 +527,63 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (!a) return send(res, 404, { detail: "No such site or account." });
     return send(res, 200, a.login);
   }
+  const prov = /^\/web\/providers\/([^/]+)$/.exec(p);
+  if (prov && m === "PATCH") {
+    const pr = PROVIDERS.find((x) => x.id === decodeURIComponent(prov[1]));
+    if (!pr) return send(res, 404, { detail: "There is no web provider called that." });
+    const body = await readJson(req);
+    const set = state.settings[pr.id];
+    if ("daily_cap" in body) {
+      const n = body.daily_cap;
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 10000)
+        return send(res, 409, {
+          detail: "The daily cap is a whole number of chats from 1 to 10000.",
+        });
+      set.daily_cap = n;
+    }
+    if ("enabled" in body) {
+      if (typeof body.enabled !== "boolean")
+        return send(res, 409, { detail: "enabled is true or false." });
+      set.enabled = body.enabled;
+    }
+    return send(res, 200, { ...providerBody(pr), enabled_by: "app" });
+  }
+  if (p === "/pool/keys" && m === "GET") return send(res, 200, { providers: poolBody() });
+  const key = /^\/pool\/keys\/([^/]+)$/.exec(p);
+  if (key && (m === "PUT" || m === "DELETE")) {
+    const pp = POOL.find((x) => x.id === decodeURIComponent(key[1]));
+    if (!pp) return send(res, 404, { detail: "There is no API provider called that." });
+    if (m === "DELETE") for (const v of pp.vars) delete state.keys[v.name];
+    else {
+      const values = ((await readJson(req)).values ?? {}) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(values)) {
+        if (!pp.vars.some((x) => x.name === k))
+          return send(res, 409, { detail: `${pp.id} does not use ${k}.` });
+        if (typeof v !== "string" || !v.trim())
+          return send(res, 409, { detail: `${k} must be one line of text.` });
+        state.keys[k] = true;
+      }
+    }
+    return send(
+      res,
+      200,
+      poolBody().find((x) => x.id === pp.id),
+    );
+  }
+  if (p === "/web/login/show" && m === "POST") {
+    const { a } = target(await readJson(req));
+    if (!a) return send(res, 404, { detail: "No such site or account." });
+    if (a.login.state !== "open")
+      return send(res, 409, {
+        detail: "There is no sign-in window open for this account.",
+        state: a.login.state,
+      });
+    return send(res, 200, { ...a.login, shown: true });
+  }
   if (p === "/web/login" && m === "POST") {
-    const { provider, account, a } = target(await readJson(req));
+    const loginBody = await readJson(req);
+    state.lastBounds = (loginBody.bounds as WindowBounds | undefined) ?? null;
+    const { provider, account, a } = target(loginBody);
     if (!a) return send(res, 404, { detail: "No such site or account." });
     const busy = inProgress();
     if (busy && (busy.provider !== provider || busy.account !== account)) {

@@ -4,24 +4,35 @@
 //
 //   npm run build && npm run e2e:setup     # SHOTS=dir for the screenshots, DEV=1 for Vite
 //
-// Walks: first run with nothing signed in -> sign-in success -> the tier picker lists the
-// site's model; sign-in failure with retry; cancel; a 409 (another sign-in open), add and
-// remove an account; browser not ready -> download; sign-in while the browser is being
+// Walks: first run with nothing signed in (the tier picker points at what each source needs)
+// -> sign-in success (window placed beside the app, the e-mail shown, "Show the window") ->
+// the tier picker lists the site's model; sign-in failure with retry; cancel; a 409 (another
+// sign-in open), add and remove an account; a site turned off and its daily limit changed;
+// the token pool's API keys; browser not ready -> set up; sign-in while the browser is being
 // prepared; router down and back; a router without the API; phone width and light theme.
 
-import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
 import { startUiServer } from "../server/app.ts";
 import { findChromium } from "./chromium.ts";
+import {
+  account,
+  currentStep,
+  dialog,
+  kit,
+  layoutProblems,
+  pickSite,
+  waitTitle,
+} from "./e2e-kit.ts";
 import { startMockRouter } from "./mock-router.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const shots = process.env.SHOTS ?? path.join(tmpdir(), "provenance-setup-e2e");
-mkdirSync(shots, { recursive: true });
-const log = (...a: unknown[]) => console.log("[setup-e2e]", ...a);
+const { log, shot, check, shots } = kit(
+  "setup-e2e",
+  process.env.SHOTS ?? path.join(tmpdir(), "provenance-setup-e2e"),
+);
 
 const mock = await startMockRouter(0);
 const ui = await startUiServer({
@@ -30,7 +41,7 @@ const ui = await startUiServer({
   port: 0,
   host: "127.0.0.1",
   bin: "/nonexistent/provenance", // no app-server: this check never sends a turn
-  tierlmUrl: mock.url,
+  router: { url: mock.url },
   cwd: () => ({ defaultCwd: tmpdir(), fromLauncher: false }),
 });
 log(`mock router ${mock.url}, UI ${ui.url}, screenshots in ${shots}`);
@@ -46,64 +57,15 @@ async function control(route: string, body: unknown = {}): Promise<unknown> {
 async function mockState(): Promise<{
   accountIds: string[];
   accounts: Record<string, Record<string, { login: { state: string }; signed_in: unknown }>>;
+  settings: Record<string, { enabled: boolean; daily_cap: number }>;
+  keys: Record<string, boolean>;
+  lastBounds: { left: number; top: number; width: number; height: number } | null;
 }> {
   return (await fetch(`${mock.url}/mock/state`)).json() as never;
 }
 
-let n = 0;
-async function shot(page: Page, name: string): Promise<void> {
-  const file = path.join(shots, `${String(++n).padStart(2, "0")}-${name}.png`);
-  await page.screenshot({ path: file });
-  log(`  screenshot ${file}`);
-}
-
-function check(cond: unknown, what: string): void {
-  if (!cond) throw new Error(`expected: ${what}`);
-  log(`  ok: ${what}`);
-}
-
-const dialog = ".setup-dialog[open]";
-const title = (page: Page) => page.locator(`${dialog} .setup-title`).innerText();
-const currentStep = (page: Page) => page.locator(`${dialog} .setup-rail li.current`).innerText();
-
-async function waitTitle(page: Page, re: RegExp, timeout = 10_000): Promise<string> {
-  await page.waitForFunction(
-    ([src, flags]) => {
-      const el = document.querySelector(".setup-dialog[open] .setup-title");
-      return !!el && new RegExp(src, flags).test(el.textContent ?? "");
-    },
-    [re.source, re.flags] as const,
-    { timeout },
-  );
-  return title(page);
-}
-
-async function pickSite(page: Page, id: string): Promise<void> {
-  await page.click(`${dialog} .setup-site[data-provider="${id}"]`);
-  await page.waitForSelector(`${dialog} .setup-accounts`);
-}
-
-function account(page: Page, id: string) {
-  return page.locator(`${dialog} .setup-accounts li[data-account="${id}"]`);
-}
-
-/** No sideways scroll inside the panel, and no button label wrapping to two lines. */
 async function layoutOk(page: Page, where: string): Promise<void> {
-  const bad = await page.evaluate(() => {
-    const out: string[] = [];
-    const body = document.querySelector(".setup-dialog[open] .setup-body");
-    if (body && body.scrollWidth > body.clientWidth + 1) out.push("body scrolls sideways");
-    for (const b of document.querySelectorAll<HTMLElement>(".setup-dialog[open] button")) {
-      const lh = parseFloat(getComputedStyle(b).lineHeight) || 16;
-      if (
-        b.offsetParent &&
-        b.innerText.trim() &&
-        b.scrollHeight > Math.max(b.clientHeight, lh * 1.6)
-      )
-        out.push(`button wraps: ${b.innerText}`);
-    }
-    return out;
-  });
+  const bad = await layoutProblems(page);
   check(!bad.length, `layout at ${where}${bad.length ? ` (${bad.join("; ")})` : ""}`);
 }
 
@@ -124,15 +86,44 @@ try {
     "first-run lead",
   );
   check((await currentStep(page)).includes("Site"), "rail on step 1, Site");
-  check((await page.locator(`${dialog} .setup-site`).count()) === 3, "three sites listed");
   check(
-    (await page.locator(`${dialog} .setup-status`).allInnerTexts()).every(
+    (await page.locator(`${dialog} .setup-sites .setup-site`).count()) === 3,
+    "three sites listed",
+  );
+  check(
+    (await page.locator(`${dialog} .setup-sites .setup-status`).allInnerTexts()).every(
       (t) => t === "Not signed in",
     ),
     "every site reads Not signed in",
   );
+  check(
+    (await page.locator(`${dialog} .setup-pool .setup-status`).innerText()) === "Needs API keys",
+    "the token pool says it needs keys",
+  );
+  check(
+    /Provenance's own provenance-core mock|your provenance-core/.test(
+      await page.locator(`${dialog} .setup-router`).innerText(),
+    ),
+    "the router note says which router",
+  );
   await layoutOk(page, "first run");
   await shot(page, "first-run-sites");
+
+  // Before any sign-in, the tier picker says what each source needs.
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.click('button[title="Model tier"]');
+  await page.hover('.tier-menu [data-model="solstice"]');
+  await page.waitForSelector(".tier-sub");
+  const firstSub = await page.locator(".tier-sub").innerText();
+  check(
+    /Token pool\s*Add API keys/.test(firstSub) && /GPT-6 Luna\s*Sign in/.test(firstSub),
+    "tier picker: the pool needs keys, the sites a sign-in",
+  );
+  await page.click('.tier-sub [data-setup="keys"]');
+  await page.waitForSelector(`${dialog} .setup-keys`);
+  check(true, "a source that needs keys opens the token pool's keys");
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.waitForSelector(`${dialog} .setup-sites`);
 
   // ---- 2. sign-in success -----------------------------------------------------------
   log("sign-in success (ChatGPT, main)");
@@ -150,6 +141,17 @@ try {
     /new window/.test(await waitTitle(page, /Sign in to ChatGPT/)),
     "waiting state names the window",
   );
+  const bounds = (await mockState()).lastBounds;
+  check(
+    !!bounds && bounds.width >= 480 && bounds.height >= 480,
+    `the window is placed by the app (${JSON.stringify(bounds)})`,
+  );
+  await page.getByRole("button", { name: "Show the window" }).click();
+  await page.waitForTimeout(300);
+  check(
+    !/Couldn't bring it forward/.test(await page.locator(`${dialog} .setup-hint`).innerText()),
+    "Show the window asks the router",
+  );
   check((await currentStep(page)).includes("Sign in"), "rail on step 3, Sign in");
   check(
     /beside Provenance on chatgpt\.com/.test(
@@ -166,6 +168,10 @@ try {
   check(
     (await page.locator(`${dialog} .setup-models-ready`).innerText()).includes("GPT-6 Luna"),
     "ready step lists the model",
+  );
+  check(
+    (await page.locator(`${dialog} .setup-text`).innerText()).includes("main@example.com"),
+    "ready step names the account it signed in as",
   );
   await shot(page, "signin-ready");
   await page.getByRole("button", { name: "Done" }).click();
@@ -187,6 +193,11 @@ try {
       .locator(`${dialog} .setup-site[data-provider="chatgpt-web"] .setup-status`)
       .innerText()) === "Ready",
     "ChatGPT reads Ready in the site list (opened from the tier picker)",
+  );
+  await pickSite(page, "chatgpt-web");
+  check(
+    (await account(page, "main").innerText()).includes("main@example.com"),
+    "the account row shows who is signed in",
   );
   await page.getByRole("button", { name: "Close" }).click();
 
@@ -264,7 +275,82 @@ try {
   await account(page, "b").getByRole("button", { name: "Remove", exact: true }).click();
   await account(page, "b").waitFor({ state: "detached" });
   check(!(await mockState()).accountIds.includes("b"), "account b removed on the router");
+
+  // ---- 5b. the site's own settings: off, then on; a new daily limit ----------------
+  log("site settings (Qwen): off and on, daily limit");
+  await page.getByRole("switch").click();
+  await page.waitForFunction(() =>
+    /Off: Provenance won't send it anything/.test(
+      document.querySelector(".setup-settings")?.textContent ?? "",
+    ),
+  );
+  check(
+    (await mockState()).settings["qwen-web"].enabled === false,
+    "Qwen turned off on the router",
+  );
+  await page.getByRole("button", { name: "Back" }).click();
+  check(
+    (await page
+      .locator(`${dialog} .setup-site[data-provider="qwen-web"] .setup-status`)
+      .innerText()) === "Off",
+    "the site list says Off",
+  );
+  await pickSite(page, "qwen-web");
+  await page.getByRole("switch").click();
+  await page.waitForFunction(
+    () => (document.querySelector(".switch") as HTMLInputElement)?.checked,
+  );
+  check((await mockState()).settings["qwen-web"].enabled === true, "and on again");
+  await page.fill(`${dialog} .setup-input-num`, "0");
+  await page.keyboard.press("Enter");
+  await page.locator(`${dialog} .setup-settings .setup-row-msg`).waitFor();
+  check(true, "a daily limit of 0 is refused with a reason");
+  await page.fill(`${dialog} .setup-input-num`, "300");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => !document.querySelector(".setup-cap-field button"));
+  check(
+    (await mockState()).settings["qwen-web"].daily_cap === 300,
+    "daily limit saved on the router",
+  );
+  await layoutOk(page, "site settings");
+  await shot(page, "site-settings");
   await page.getByRole("button", { name: "Close" }).click();
+
+  // ---- 5c. the token pool's API keys -------------------------------------------------
+  log("token pool keys");
+  await page.getByRole("button", { name: "Models & accounts" }).click();
+  await page.click(`${dialog} .setup-pool`);
+  await page.waitForSelector(`${dialog} .setup-keys`);
+  const google = page.locator(`${dialog} .setup-keys li[data-pool="google"]`);
+  check((await google.innerText()).includes("Needs a key"), "Google needs a key");
+  check(
+    (await page.locator(`${dialog} .setup-keys li[data-pool="kilo"]`).innerText()).includes(
+      "Works without a key",
+    ),
+    "an anonymous provider says so",
+  );
+  await google.getByRole("button", { name: "Add key" }).click();
+  await google.locator('input[type="password"]').fill("AIza-test-key");
+  await shot(page, "keys-form");
+  await google.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() =>
+    /Key set/.test(document.querySelector('.setup-keys li[data-pool="google"]')?.textContent ?? ""),
+  );
+  check((await mockState()).keys.GEMINI_API_KEY === true, "key stored on the router");
+  check(!(await page.content()).includes("AIza-test-key"), "the key isn't left in the page");
+  await layoutOk(page, "keys");
+  await shot(page, "keys");
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.click('button[title="Model tier"]');
+  await page.hover('.tier-menu [data-model="ember"]');
+  await page.waitForSelector(".tier-sub");
+  check(
+    (await page
+      .locator('.tier-sub [data-source-model="pool/ember"]')
+      .getAttribute("data-setup")) === null,
+    "with a key the pool can be pinned",
+  );
+  await page.keyboard.press("Escape");
 
   // ---- 6. browser not ready -> download --------------------------------------------
   log("browser not ready -> download");
@@ -272,11 +358,11 @@ try {
   await page.getByRole("button", { name: "Models & accounts" }).click();
   await page.waitForSelector(`${dialog} .setup-browser`);
   check(
-    /one-time download/.test(await page.locator(`${dialog} .setup-browser`).innerText()),
-    "strip explains the download",
+    /needs setting up once/.test(await page.locator(`${dialog} .setup-browser`).innerText()),
+    "strip explains the set-up",
   );
   await shot(page, "browser-not-ready");
-  await page.locator(`${dialog} .setup-browser`).getByRole("button", { name: "Download" }).click();
+  await page.locator(`${dialog} .setup-browser`).getByRole("button", { name: "Set it up" }).click();
   await page.waitForFunction(
     () =>
       /Downloading the sign-in browser · [1-9]/.test(
@@ -294,7 +380,7 @@ try {
   await control("reset", { scenario: "nobrowser" });
   await pickSite(page, "chatgpt-web");
   await account(page, "main").getByRole("button", { name: "Sign in" }).click();
-  await waitTitle(page, /Getting the sign-in browser ready/);
+  await waitTitle(page, /Downloading the sign-in browser/);
   await page.waitForFunction(
     () => {
       const m = document.querySelector<HTMLElement>(".setup-meter.wide > span");
@@ -319,7 +405,7 @@ try {
   await page.getByRole("button", { name: "Models & accounts" }).click();
   await page.waitForSelector(`${dialog} .setup-sites`);
   await control("down", { down: true });
-  await waitTitle(page, /Can't reach provenance-core/, 10_000);
+  await waitTitle(page, /The model router isn't answering/, 10_000);
   check(true, "router down page state");
   await shot(page, "router-down");
   await control("down", { down: false });
@@ -329,7 +415,7 @@ try {
 
   log("router without the sign-in API");
   await control("legacy", { legacy: true });
-  await waitTitle(page, /can't sign in from the app/, 10_000);
+  await waitTitle(page, /can't set up sign-ins from the app/, 10_000);
   check(true, "older router page state");
   await shot(page, "router-unsupported");
   await control("legacy", { legacy: false });
@@ -339,7 +425,7 @@ try {
   // ---- 8. a signed-in mix, light theme, phone width -------------------------------
   await pickSite(page, "chatgpt-web");
   check(
-    (await account(page, "b").innerText()).includes("Blocked: Daily limit reached"),
+    (await account(page, "b").innerText()).includes("Today's limit of 500 chats"),
     "block reason shown",
   );
   check((await account(page, "main").innerText()).includes("38 of 500"), "usage against the cap");
