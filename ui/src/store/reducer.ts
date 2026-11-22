@@ -166,6 +166,8 @@ export function turnFromProtocol(turn: Turn): TurnView {
     error: turn.error,
     durationMs: turn.durationMs,
     items: turn.items,
+    startedAt: turn.startedAt,
+    completedAt: turn.completedAt,
   };
 }
 
@@ -180,6 +182,8 @@ function upsertTurn(v: ThreadView, turn: Turn): ThreadView {
     error: turn.error,
     durationMs: turn.durationMs,
     items: prev.items.length ? prev.items : turn.items,
+    startedAt: turn.startedAt ?? prev.startedAt,
+    completedAt: turn.completedAt ?? prev.completedAt,
   };
   return { ...v, turns: replaceAt(v.turns, idx, next) };
 }

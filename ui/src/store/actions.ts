@@ -11,7 +11,14 @@ import type {
 } from "../protocol";
 import { RpcClient } from "../rpc/client";
 import { applyNotification, turnFromProtocol, upsertThreadInList } from "./reducer";
-import { saveSettings, type AppState, type Settings, type ThreadView } from "./state";
+import {
+  saveSettings,
+  type AppState,
+  type Settings,
+  type ThreadView,
+  type TurnUsage,
+  type TurnView,
+} from "./state";
 import { getState, setState } from "./store";
 
 const HISTORY_TURNS = 50;
@@ -280,6 +287,45 @@ export async function interrupt(threadId: string): Promise<void> {
   } catch (e) {
     notify("error", `Interrupt failed: ${errText(e)}`);
   }
+}
+
+// ---- model attribution -----------------------------------------------------
+
+const usageInFlight = new Set<string>();
+
+/**
+ * Which concrete models served a finished turn, from provenance-core's usage ledger (via
+ * /api/usage). Requests are keyed by thread id + turn id (Codex's client_metadata); the turn's
+ * time window catches entries without a turn id. A turn the ledger doesn't know (older than the
+ * ledger, or another router) stores an empty result and shows nothing.
+ */
+export async function loadTurnUsage(threadId: string, turn: TurnView, retry = true): Promise<void> {
+  if (usageInFlight.has(turn.id)) return;
+  usageInFlight.add(turn.id);
+  const q = new URLSearchParams({ key: threadId, turn: turn.id });
+  if (turn.startedAt) q.set("since", String(turn.startedAt - 2));
+  if (turn.completedAt) q.set("until", String(turn.completedAt + 5));
+  let usage: TurnUsage = { requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
+  try {
+    const r = (await (await fetch(`/api/usage?${q}`)).json()) as Partial<TurnUsage>;
+    usage = {
+      requests: r.requests ?? 0,
+      input_tokens: r.input_tokens ?? 0,
+      output_tokens: r.output_tokens ?? 0,
+      models: r.models ?? [],
+    };
+  } catch {
+    // leave it empty
+  } finally {
+    usageInFlight.delete(turn.id);
+  }
+  // A turn that just finished may race the ledger write: look once more shortly after.
+  const fresh = turn.completedAt != null && Date.now() / 1000 - turn.completedAt < 30;
+  if (!usage.models.length && retry && fresh) {
+    setTimeout(() => void loadTurnUsage(threadId, turn, false), 1500);
+    return;
+  }
+  setState((s) => ({ ...s, usage: { ...s.usage, [turn.id]: usage } }));
 }
 
 // ---- approvals -------------------------------------------------------------

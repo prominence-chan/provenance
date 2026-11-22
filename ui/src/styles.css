@@ -859,6 +859,19 @@ select {
   flex-shrink: 0;
   color: var(--text-2);
 }
+/* A finished turn's run of tool rows, folded into one line (ToolGroup.tsx). */
+.tool-summary .tool-verb {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+.tool-summary-body {
+  margin: 0 0 2px 7px;
+  padding-left: 11px;
+  border-left: 1px solid var(--border-strong);
+}
 .tool-target {
   min-width: 0;
   flex: 0 1 auto;
@@ -1048,6 +1061,185 @@ select {
   gap: 8px;
   font-size: var(--fs-xs);
   color: var(--faint);
+  min-width: 0;
+}
+.turn-footer > .tier-badge,
+.turn-dur {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+/* Models that served the turn: one line, the rest behind "…" (TurnModels.tsx measures). */
+.turn-models {
+  position: relative;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.turn-models + .turn-dur::before {
+  content: "·";
+  margin-right: 8px;
+}
+.turn-models-ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.turn-models-list {
+  font: inherit;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0;
+  white-space: nowrap;
+}
+button.turn-models-list {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+button.turn-models-list:hover {
+  color: var(--text-2);
+}
+button.turn-models-list:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.turn-models-more {
+  padding: 0 1px 0 3px;
+  letter-spacing: 1px;
+}
+button.turn-models-list:hover .turn-models-more {
+  color: var(--text);
+}
+
+/* ---- usage dialog (models this turn) -------------------------------------- */
+.usage-dialog {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  max-width: calc(100vw - 32px);
+  width: 520px;
+  overflow: visible;
+}
+.usage-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+.usage-dialog[open],
+.usage-dialog[open]::backdrop {
+  animation: usage-in var(--dur) var(--ease-out);
+}
+@keyframes usage-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+.usage-panel {
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--overlay-shadow);
+  padding: 12px 14px 12px;
+}
+.usage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.usage-head h2 {
+  margin: 0;
+  font-size: var(--fs-base);
+  font-weight: 500;
+}
+.usage-total {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.usage-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--fs-md);
+}
+.usage-table thead th {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--faint);
+  text-align: left;
+  padding: 0 0 4px;
+  border-bottom: 1px solid var(--border);
+}
+.usage-table tbody th,
+.usage-table td {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.usage-table tbody tr:last-child > * {
+  border-bottom: none;
+}
+.usage-table tbody th {
+  text-align: left;
+  font-weight: 400;
+  min-width: 0;
+}
+.usage-table .num {
+  width: 84px;
+  text-align: right;
+  padding-left: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.usage-pct {
+  display: inline-block;
+  min-width: 3.2em;
+  color: var(--muted);
+}
+.usage-name {
+  display: block;
+  color: var(--text);
+}
+.usage-id {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+.usage-bar {
+  display: block;
+  height: 3px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+.usage-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--tier-color, var(--ember));
+}
+.usage-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-dialog[open],
+  .usage-dialog[open]::backdrop {
+    animation: none;
+  }
 }
 .error-card {
   background: var(--bad-bg);

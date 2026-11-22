@@ -116,7 +116,7 @@ from the preload), which sets `html[data-shell="darwin"]` for the window-chrome 
 ui/
 ├── server/
 │   ├── app.ts         startUiServer(): Vite middleware (dev) or dist/ (prod), /api/info, /api/tiers,
-│   │                  /api/health, WS /rpc (same-origin only)
+│   │                  /api/health, /api/usage, WS /rpc (same-origin only)
 │   ├── main.ts        CLI for `npm run dev` / `npm start`
 │   └── bridge.ts      AppServerBridge: spawns `provenance app-server`, relays JSON-RPC
 ├── electron/
@@ -142,7 +142,9 @@ ui/
     │   ├── ThreadHeader.tsx   slim bar: sidebar toggle (when hidden), title, cwd, tier, context ring
     │   ├── Conversation.tsx   centered transcript; turns -> items; auto-scroll
     │   ├── items/             one renderer per ThreadItem type (ItemView.tsx dispatches); tool
-    │   │                      items render as one-line rows, consecutive ones grouped
+    │   │                      items render as one-line rows, consecutive ones grouped (ToolGroup.tsx
+    │   │                      folds a finished turn's run into one summary line)
+    │   ├── TurnModels.tsx     the turn footer's served-model line and its breakdown dialog
     │   ├── Approvals.tsx      command / file-change approval cards
     │   ├── Composer.tsx       prompt box, tier picker, permissions preset, cwd, send/stop
     │   ├── Markdown.tsx, DiffView.tsx, Notices.tsx, HealthBanner.tsx, icons.tsx, format.ts
@@ -199,6 +201,23 @@ notifications go to everyone, and unanswered approvals are replayed to newly ope
 A page reload therefore doesn't kill a running turn. If the binary disappears (e.g. while
 a rebuild replaces it) or app-server exits, the bridge retries with backoff. The UI shows
 the state bottom-left and re-attaches to the open thread once app-server is back.
+
+## Tool runs and model attribution
+
+- **Folded tool runs:** while a turn runs, every tool row shows live. Once it finishes (and for
+  history), each run of consecutive tool items folds into one line, "Ran 6 commands, edited 3
+  files, read 2 files" (+ failures and the run's diffstat on the right); it opens back to the
+  rows, which open to output / diffs. Thinking stays in the rows but isn't counted; a run of one
+  row, or of thinking only, isn't folded (`items/ToolGroup.tsx`).
+- **Which models served a turn:** the footer shows, after the tier badge, the concrete models
+  provenance-core routed the turn's requests to, short names (`kilo/nvidia/nemotron-3-ultra-550b-a55b:free`
+  -> `nemotron-3-ultra`, `components/modelName.ts`), most requests first, on one line. Names that
+  don't fit become "…"; with more than one model the line opens a dialog with each model's
+  requests and tokens and their share. Data: provenance-core's usage ledger
+  (`GET /v1/pcore/usage`, `provenance_core/ledger.py`) records every Responses request under
+  Codex's `client_metadata.thread_id` + `turn_id`; the UI asks `/api/usage?key=<thread id>&turn=<turn
+id>&since&until` once a turn completes (and for history turns as they render). A turn the ledger
+  doesn't know (from before it existed) shows no models.
 
 ## Extending
 

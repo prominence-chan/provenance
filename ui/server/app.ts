@@ -3,6 +3,7 @@
 //   - GET /api/info    -> defaults for the UI (cwd, binary, tiers source)
 //   - GET /api/tiers   -> tier list from tierlm (/v1/models, owned_by=tierlm)
 //   - GET /api/health  -> is the provenance binary there, is provenance-core up
+//   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage)
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
 //
 // Used by server/main.ts (the `npm run dev` / `npm start` CLI) and by the desktop
@@ -109,6 +110,23 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         bin: { path: opts.bin, exists: existsSync(opts.bin) },
         router: { url: tierlmUrl, up, message: up ? undefined : extra?.message },
       });
+      return true;
+    }
+    if (url.pathname === "/api/usage") {
+      // key = thread id, turn = turn id, since/until = the turn's window (unix s)
+      const q = new URLSearchParams();
+      for (const k of ["key", "turn", "since", "until"]) {
+        const v = url.searchParams.get(k);
+        if (v) q.set(k, v);
+      }
+      try {
+        const r = await fetch(`${tierlmUrl}/v1/pcore/usage?${q}`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        sendJson(res, r.ok ? await r.json() : { models: [], unavailable: r.status });
+      } catch {
+        sendJson(res, { models: [], unavailable: true });
+      }
       return true;
     }
     return false;

@@ -29,6 +29,26 @@ export interface TurnView {
   plan: v2.TurnPlanStep[] | null;
   /** Model this UI started the turn with (unknown for history: use ThreadView.model). */
   model?: string | null;
+  /** Unix seconds, from app-server (null while unknown). */
+  startedAt?: number | null;
+  completedAt?: number | null;
+}
+
+/** One concrete model that served requests in a turn (provenance-core's usage ledger). */
+export interface ModelUsage {
+  model: string;
+  tier: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** What served a turn: models sorted by requests. Empty when the ledger has nothing for it. */
+export interface TurnUsage {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  models: ModelUsage[];
 }
 
 export interface ThreadView {
@@ -73,6 +93,8 @@ export interface AppState {
   settings: Settings;
   tiers: string[];
   notices: Notice[];
+  /** Per turn id: which models served it (absent = not fetched yet). */
+  usage: Record<string, TurnUsage>;
 }
 
 const SETTINGS_KEY = "provenance-ui.settings";
@@ -108,6 +130,7 @@ export function initialState(): AppState {
     },
     tiers: ["nova", "solstice", "ember", "spark"],
     notices: [],
+    usage: {},
   };
 }
 

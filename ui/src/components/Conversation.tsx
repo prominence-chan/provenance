@@ -1,15 +1,17 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { openThread } from "../store/actions";
+import { loadTurnUsage, openThread } from "../store/actions";
 import type { TurnView } from "../store/state";
 import { useAppState } from "../store/store";
 import { Approvals } from "./Approvals";
 import { DiffView } from "./DiffView";
 import { formatDuration } from "./format";
 import { isToolItem, ItemView } from "./items/ItemView";
+import { ToolGroup } from "./items/ToolGroup";
 import type { ThreadItem } from "../protocol";
 import { IconChevron, IconDiff } from "./icons";
 import { tierOf } from "../theme/tiers";
 import { TierBadge } from "./TierBadge";
+import { TurnModels } from "./TurnModels";
 
 /** Centered, scrolling transcript of one thread. */
 export function Conversation({ threadId }: { threadId: string }) {
@@ -56,7 +58,13 @@ export function Conversation({ threadId }: { threadId: string }) {
           </div>
         )}
         {view.turns.map((turn) => (
-          <Turn key={turn.id} turn={turn} model={turn.model ?? view.model} waiting={pending > 0} />
+          <Turn
+            key={turn.id}
+            threadId={threadId}
+            turn={turn}
+            model={turn.model ?? view.model}
+            waiting={pending > 0}
+          />
         ))}
         <Approvals threadId={threadId} />
       </div>
@@ -65,26 +73,30 @@ export function Conversation({ threadId }: { threadId: string }) {
 }
 
 function Turn({
+  threadId,
   turn,
   model,
   waiting,
 }: {
+  threadId: string;
   turn: TurnView;
   model: string | null;
   waiting: boolean;
 }) {
   const running = turn.status === "inProgress";
+  const usage = useAppState((s) => s.usage[turn.id]);
+  const showFooter = !running && turn.durationMs != null && turn.status === "completed";
+  useEffect(() => {
+    if (showFooter && !usage) void loadTurnUsage(threadId, turn);
+    // once per finished turn (loadTurnUsage reads the turn it is given)
+  }, [showFooter, threadId, turn.id]);
   const last = turn.items[turn.items.length - 1];
   const streamingText = running && last?.type === "agentMessage" && !last.completedAtMs;
   return (
     <section className="turn" data-tier={tierOf(model)?.id}>
       {groupItems(turn.items).map((g) =>
         Array.isArray(g) ? (
-          <div key={g[0].id} className="tool-group">
-            {g.map((item) => (
-              <ItemView key={item.id} item={item} />
-            ))}
-          </div>
+          <ToolGroup key={g[0].id} items={g} collapsed={!running} />
         ) : (
           <ItemView key={g.id} item={g} />
         ),
@@ -122,10 +134,11 @@ function Turn({
           </div>
         </details>
       )}
-      {!running && turn.durationMs != null && turn.status === "completed" && (
+      {showFooter && (
         <div className="turn-footer">
           <TierBadge model={model} />
-          <span>Worked for {formatDuration(turn.durationMs)}</span>
+          {usage && usage.models.length > 0 && <TurnModels usage={usage} />}
+          <span className="turn-dur">Worked for {formatDuration(turn.durationMs!)}</span>
         </div>
       )}
     </section>
