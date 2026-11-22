@@ -39,6 +39,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.resolve(
   process.env.AGENT_BIN ?? path.join(root, "../codex-rs/target/release/provenance"),
 );
+const repo = path.resolve(root, "..");
 const dest = path.join(root, "vendor/agent");
 const bin = path.join(dest, "provenance");
 const stamp = path.join(dest, "VERSION.json");
@@ -79,7 +80,8 @@ if (old.sourceSha256 === srcSha && existsSync(bin)) {
     version,
     size: statSync(bin).size,
     sha256: sha256(bin),
-    source: src,
+    // Shipped inside the app: no absolute path (it names the builder's home folder).
+    source: src.startsWith(repo + path.sep) ? path.relative(repo, src) : path.basename(src),
     sourceSize: statSync(src).size,
     sourceSha256: srcSha,
     built: new Date().toISOString(),
