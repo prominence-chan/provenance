@@ -20,7 +20,7 @@ export interface Plan {
 function strip(line: string): string {
   return line
     .replace(/^\s*(?:[-*•>]+\s+|#{1,6}\s*)*/, "")
-    .replace(/\*\*|__/g, "")
+    .replace(/\*\*/g, "") // bold only: "__" belongs to names like __init__.py
     .trim();
 }
 

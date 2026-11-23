@@ -137,7 +137,7 @@ async function workerTurn(threadId, turnId, brief) {
     while (!th.interrupted) await sleep(20);
     return finish("interrupted");
   }
-  const command = `echo ${task.replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 30)}`;
+  const command = `python3 check.py ${task.replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 30)}`;
   item("item/started", cmdItem(cid, command, th.cwd, "inProgress"));
   if (/ASKME/.test(task)) {
     const answer = await ask("item/commandExecution/requestApproval", {

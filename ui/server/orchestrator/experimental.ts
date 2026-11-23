@@ -37,11 +37,12 @@ import {
   addProblem,
   addRequest,
   clip,
+  clipMiddle,
   notesText,
   reportSections,
 } from "./notes.ts";
 import { parsePlan, parseReport, type MiniTask } from "./parse.ts";
-import { finalPrompt, plannerPrompt, revisePrompt, workerBrief } from "./prompts.ts";
+import { finalPrompt, plannerPrompt, revisePrompt, WORKER_BASE, workerBrief } from "./prompts.ts";
 import { routerProblem } from "./router.ts";
 
 type Json = Record<string, unknown>;
@@ -67,7 +68,12 @@ export interface WorkerResult {
   files: { path: string; kind: string }[];
   calls: number;
   maxInputTokens: number;
+  /** The last command, when it failed (what a worker that reports nothing was stuck on). */
+  lastFailure: { cmd: string; output: string } | null;
 }
+
+const LOOKING_RE =
+  /^\s*(?:ls|cat|find|sed -n|head|tail|pwd|rg|grep|wc|echo|printf|mkdir|touch|cd|tree|which|file|stat)\b/;
 
 export async function runExperimental(run: Run): Promise<void> {
   const notes = run.thread.notes;
@@ -176,7 +182,16 @@ export async function runExperimental(run: Run): Promise<void> {
     const why =
       res.status === "failed"
         ? `the worker stopped: ${res.error ?? "no reason given"}`
-        : sec.blockers || sec.result || "no reason given";
+        : sec.blockers ||
+          sec.result ||
+          `it ended without a report${res.lastFailure ? `; its last command failed: ${clip(res.lastFailure.cmd, 100)}` : ""}`;
+    // With no report to go on, the planner gets what the failed command printed.
+    const evidence =
+      res.report ||
+      res.error ||
+      (res.lastFailure
+        ? `(no report) The last command, ${clip(res.lastFailure.cmd, 160)}, failed with:\n${res.lastFailure.output}`
+        : "");
     addProblem(notes, `${clip(task.title, 80)}: ${why}`);
     if (rep.status === "partial" && sec.result)
       addDone(notes, `${task.title} (partly)`, sec.result);
@@ -188,10 +203,7 @@ export async function runExperimental(run: Run): Promise<void> {
       );
     replans++;
     const revised = parsePlan(
-      await run.model(
-        "revise",
-        revisePrompt(request, notesText(notes), task, res.report || res.error || "", queue),
-      ),
+      await run.model("revise", revisePrompt(request, notesText(notes), task, evidence, queue)),
       5,
     );
     if (!revised.tasks.length) {
@@ -240,6 +252,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
     files: [],
     calls: 0,
     maxInputTokens: 0,
+    lastFailure: null,
   };
   run.stats.workers++;
   let wid: string;
@@ -250,6 +263,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
       approvalPolicy: run.thread.approvalPolicy,
       sandbox: run.thread.sandbox,
       ephemeral: true, // never on disk, never in the page's thread list
+      ...(process.env.ORC_STOCK_BASE ? {} : { baseInstructions: WORKER_BASE }),
     });
     wid = String((started.thread as Json).id);
   } catch (e) {
@@ -309,11 +323,15 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
         }
         busy.delete(item.id);
         run.complete(shown);
-        if (item.type === "commandExecution" && typeof item.command === "string")
-          out.commands.push({
-            cmd: unwrap(item.command),
-            ok: item.status === "completed" && (item.exitCode ?? 0) === 0,
-          });
+        if (item.type === "commandExecution" && typeof item.command === "string") {
+          const cmd = unwrap(item.command);
+          const ok = item.status === "completed" && (item.exitCode ?? 0) === 0;
+          out.lastFailure = ok
+            ? null
+            : { cmd, output: clipMiddle(String(item.aggregatedOutput ?? "").trim(), 500) };
+          // Looking around and writing files (those are under FILES) are not worth a line of notes.
+          if (!ok || !LOOKING_RE.test(cmd)) out.commands.push({ cmd, ok });
+        }
         if (item.type === "fileChange" && item.status === "completed")
           for (const c of (item.changes ?? []) as { path: string; kind?: { type?: string } }[])
             out.files.push({ path: relative(run.cwd, c.path), kind: c.kind?.type ?? "update" });

@@ -103,6 +103,11 @@ Let me know if you want changes!`);
   const junk = parsePlan("I am not sure what you mean.");
   check(junk.tasks.length === 0 && junk.answer === null, "prose with no list: no tasks, no answer");
   check(parsePlan("1. a\n2. b\n3. c\n4. d", 2).tasks.length === 2, "the task limit holds");
+  check(
+    parsePlan("TASK 1: Create textkit/__init__.py and tests/__init__.py").tasks[0].title ===
+      "Create textkit/__init__.py and tests/__init__.py",
+    "names with double underscores survive",
+  );
 }
 
 log("action parser");
@@ -590,7 +595,7 @@ check(/tier/.test(refused2.error?.message ?? ""), "a fallback model is refused")
 log("experimental: a multi-task job");
 const ex = await start("experimental");
 check(
-  ex.id.startsWith("orc-") && ex.orchestrator === "experimental",
+  ex.id.startsWith("orc-experimental-") && ex.orchestrator === "experimental",
   "thread/start: an orc- thread that records its orchestrator",
 );
 await say(ex.id, "multi: make a tiny module with a test and run it");
@@ -614,7 +619,7 @@ check(
 );
 check(
   turn.items[3].id.startsWith(`${turn.id}-w1-`) &&
-    turn.items[3].command?.startsWith("/bin/zsh -lc 'echo Create mathxpy"),
+    turn.items[3].command?.startsWith("/bin/zsh -lc 'python3 check.py Create mathxpy"),
   "worker items keep their content under ids of this turn",
 );
 check(last(turn) === "All done: the tasks finished.", "the final answer comes from the final call");
@@ -658,7 +663,7 @@ check(
     briefs[1],
   ) &&
     /FILES CHANGED \(recorded\): f-\d+\.txt \(add\)/.test(briefs[1]) &&
-    /- ok: echo Create mathxpy/.test(briefs[1]),
+    /- ok: python3 check.py Create mathxpy/.test(briefs[1]),
   "the second brief carries the notes: what was reported, files and commands as recorded",
 );
 check(

@@ -31,7 +31,7 @@ DONE WHEN: ...`;
 
 export function plannerPrompt(request: string, folder: string, notes: string): Prompt {
   return {
-    instructions: `You split a coding request into a short ordered list of small tasks. Each task goes to a separate worker that has tools (shell, file edits) but no memory: it sees only its own task, a one-line goal and brief notes from earlier tasks. So make each task small and self-contained (one file or one concern), say which files it touches, and put running or testing the code in the task that writes it or in a last task. Use as few tasks as the job needs, 1 to 6; a simple job is ONE task. Do not write code and do not explain.
+    instructions: `You split a coding request into a short ordered list of small tasks. Each task goes to a separate worker that has tools (shell, file edits) but no memory: it sees only its own task, a one-line goal and brief notes from earlier tasks. So make each task small and self-contained: one concern, at most two files, about five tool calls of work. Say which files each task touches. A job that creates or changes more than two files is several tasks (up to 6); only a one-file or one-command job is a single task. Put running or testing the code in the task that writes it, and end with a task that runs the whole check when there is one. Do not write code and do not explain.
 
 Reply in plain text in exactly this form:
 ${PLAN_FORMAT}
@@ -83,7 +83,7 @@ DONE WHEN: ${a.task.done || "the task is complete and you have checked it"}${lat
 NOTES FROM EARLIER TASKS:
 ${a.notes || "(none: you are first)"}
 
-Rules: work in ${a.cwd}. Do not redo earlier tasks or start later ones. Look before you change things, and check your work (run it) before you report. If you cannot finish, stop and say why rather than guess.
+Rules: work in ${a.cwd}. Do not redo earlier tasks or start later ones. The notes are accurate: read only the files your task needs. Check your work (run it) before you report. If you cannot finish, stop and say why rather than guess.
 
 End with a short report in exactly this form:
 RESULT: one or two sentences on what is true now
@@ -143,3 +143,18 @@ export function summarizePrompt(a: {
     input: `GOAL: ${clip(a.goal, 500)}\n\nPREVIOUS SUMMARY:\n${a.summary || "(empty)"}\n\nLATEST STEP, WHAT WAS INTENDED:\n${clipMiddle(a.intent.trim(), 900)}\n\nLATEST STEP, ACTIONS AND RESULTS:\n${a.results}`,
   };
 }
+
+/**
+ * A worker's base instructions, in place of the stock harness prompt (about 18,000 characters,
+ * sent with every request of a thread): a worker has one small task and a brief that says the
+ * rest. Kept under the 3,000 characters above which the router's web path would swap it for its
+ * own prompt.
+ */
+export const WORKER_BASE = `You are a coding agent working in a terminal on the user's machine. You are given one small task: do it with your tools, check it, report, and stop.
+
+- Use the shell tool to look around and to run things. Keep commands short and non-interactive: no editors, no pagers, nothing that waits for input. Look with ls, rg or grep, and sed -n; read a file before you change it.
+- Create or change files with apply_patch when you have it, otherwise with a heredoc. Keep changes small and in the style of the code around them. Use exact names (for example __init__.py).
+- Stay inside the working folder. Do not commit, push, reset or discard with git, and do not install anything globally, unless the task says so.
+- When a command fails, read the error and fix the cause; never repeat the same command unchanged. If you are blocked (a missing tool, a refused permission, an unclear task), stop and say so.
+- Verify your work by running it whenever that is possible.
+- Do not ask questions: make the reasonable choice and mention it. No plans or narration between tool calls; end with one short report in the form the task asks for.`;

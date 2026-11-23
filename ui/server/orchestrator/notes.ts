@@ -142,7 +142,7 @@ export function reportSections(text: string): {
   let cur: keyof typeof out | null = null;
   const loose: string[] = [];
   for (const raw of text.split("\n")) {
-    const line = raw.replace(/^\s*(?:[-*#>]+\s*)*/, "").replace(/\*\*|__/g, "");
+    const line = raw.replace(/^\s*(?:[-*#>]+\s*)*/, "").replace(/\*\*/g, "");
     const m = /^(result|changes?|validation|verification|blockers?|status)\s*[:\-–—]\s*(.*)$/i.exec(
       line,
     );

@@ -330,7 +330,8 @@ export class OrchestratorBackend {
     const cwd = typeof p.cwd === "string" && p.cwd ? p.cwd : process.env.HOME || "/";
     if (!isDir(cwd)) throw new Error(`The folder ${cwd} doesn't exist`);
     const now = Math.floor(Date.now() / 1000);
-    const id = `${ORCHESTRATOR_ID_PREFIX}${randomUUID()}`;
+    // The id names the orchestrator: the page reads it there (src/orchestrator/thread.ts).
+    const id = `${ORCHESTRATOR_ID_PREFIX}${want}-${randomUUID()}`;
     const rec: ThreadRecord = {
       thread: {
         id,
@@ -345,7 +346,7 @@ export class OrchestratorBackend {
         projectId: null,
         historyMode: "legacy",
         environments: null,
-        extra: null,
+        extra: { orchestrator: want },
         modelProvider: "tierlm",
         model,
         reasoningEffort: null,
