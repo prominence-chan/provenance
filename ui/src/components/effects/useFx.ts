@@ -14,6 +14,9 @@
 //                       (seconds): for checking that nothing degrades over days
 //   &fxtrace            record every frame's layer state in window.__provenanceFxTrace (the
 //                       write head's place and speed, Codex's sweep), for checking motion headless
+//   &sunseed=7          the hero sun's nebulae use seeds 7, 8, ... (style and palette by seed)
+//   &sunstep            the hero sun's clock stands still; __provenanceSunStep(seconds) moves it
+//                       and returns the sequence state, for frame-by-frame checks headless
 //   ?fx=none:idle       no effect (then __provenanceFx(...) selects one from nothing)
 //   __provenanceFx("spark", "flare")   replay spark's switch flare, then idle
 //   __provenanceFx("spark", "active")  / "idle"
