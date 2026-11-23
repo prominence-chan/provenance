@@ -36,7 +36,7 @@ const early = new Map<string, StepReport>();
 const tracks = new Map<string, Set<string>>();
 
 const resultOf = (o: KeyOutcome): OutcomeResult | null =>
-  o.kind === "working"
+  o.kind === "working" || o.kind === "saved"
     ? "saved_working"
     : o.kind === "rejected"
       ? "saved_rejected"

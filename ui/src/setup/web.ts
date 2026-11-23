@@ -26,7 +26,6 @@ import type {
   WirePoolHelpProvider,
   WirePoolKey,
   WirePoolProvider,
-  WireRemovedProvider,
   WireProvider,
   WireWebModel,
 } from "../../shared/router-api";
@@ -41,8 +40,11 @@ export type WebAccount = Omit<Required<WireAccount>, "autologin"> & {
 export type Autologin = WireAutologin;
 export type PoolHelp = Omit<
   WirePoolHelpProvider,
-  "needs" | "recommended" | "multiple_keys" | "until" | "experience"
+  "needs" | "recommended" | "multiple_keys" | "until" | "experience" | "setup" | "why_person"
 > & {
+  /** The person does this one alone (`setup: person`), outside the assisted walk-through. */
+  person: boolean;
+  why_person: string | null;
   needs: string[];
   recommended: boolean;
   multiple_keys: MultipleKeys | null;
@@ -50,12 +52,26 @@ export type PoolHelp = Omit<
   experience: Experience | null;
 };
 export type MultipleKeys = WireMultipleKeys;
-export type RemovedProvider = WireRemovedProvider;
+/** A provider taken out of the pool: when (`date`), why, and whether a key is still saved for it. */
+export interface RemovedProvider {
+  id: string;
+  name: string;
+  reason: string;
+  date: string;
+  leftover: boolean;
+}
+export interface Considered {
+  name: string;
+  why_not: string;
+}
 export type KeyCheck = WireKeyCheck;
 export type PoolKey = Omit<Required<WirePoolKey>, "limits"> & { limits: unknown };
-/** Where people got stuck: at a step (1-based), or anywhere (null). */
+/** Where people got stuck: at a step (1-based; null: a step not among the written ones). */
 export interface Trouble {
   step: number | null;
+  /** How many reports said so. */
+  count: number;
+  /** What they said there (the first two), or the step's own text when it isn't a written one. */
   note: string;
 }
 export interface Experience {
@@ -71,12 +87,22 @@ export type WebProvider = Required<Omit<WireProvider, "accounts">> & {
   changeable: boolean;
 };
 export type BrowserStatus = Required<WireBrowser>;
-export type PoolProvider = Omit<WirePoolProvider, "keys" | "multiple_keys" | "until"> & {
+export type PoolProvider = Omit<
+  WirePoolProvider,
+  "keys" | "multiple_keys" | "until" | "expired" | "note"
+> & {
   /** null: a router from before several keys per provider (one key, set with PUT). */
   keys: PoolKey[] | null;
   multiple_keys: MultipleKeys | null;
   until: string | null;
+  expired: boolean;
 };
+
+/** "anon": the keyless slot of a provider that works without a key; not a key of the person's. */
+export const isAnon = (k: PoolKey) => k.id === "anon" || k.source === "anonymous";
+/** The person's own keys (never the keyless slot). */
+export const ownKeys = (p: PoolProvider): PoolKey[] | null =>
+  p.keys?.filter((k) => !isAnon(k)) ?? null;
 
 export interface WebAccounts {
   browser: BrowserStatus;
@@ -335,6 +361,8 @@ export interface PoolHelpData {
   notes: string[];
   providers: PoolHelp[];
   removed: RemovedProvider[];
+  /** Providers looked at and not added (for the assistant, to answer "why not X?"). */
+  considered: Considered[];
 }
 
 const ALLOWED = ["yes", "check_terms", "no"];
@@ -355,8 +383,15 @@ function parseRemoved(v: unknown): RemovedProvider[] {
     id: r.id as string,
     name: str(r.name, r.id as string),
     reason: str(r.reason),
-    date: str(r.date),
+    date: str(r.removed, str(r.date)),
+    leftover: r.leftover_key === true,
   }));
+}
+
+function parseConsidered(v: unknown): Considered[] {
+  return (Array.isArray(v) ? (v as Obj[]) : [])
+    .filter((c) => typeof c?.name === "string")
+    .map((c) => ({ name: c.name as string, why_not: str(c.why_not) }));
 }
 
 function parseExperience(v: unknown): Experience | null {
@@ -364,11 +399,15 @@ function parseExperience(v: unknown): Experience | null {
   const o = v as Obj;
   const trouble = (Array.isArray(o.common_trouble) ? o.common_trouble : [])
     .map((t): Trouble | null => {
-      if (typeof t === "string") return t.trim() ? { step: null, note: t.trim() } : null;
       const x = (t ?? {}) as Obj;
-      const note = str(x.note, str(x.text)).trim();
       const step = num(x.step);
-      return note ? { step: step && step >= 1 ? Math.round(step) : null, note } : null;
+      const n = step !== null && step >= 1 ? Math.round(step) : null;
+      const notes = strs(x.notes)
+        .map((y) => y.trim())
+        .filter(Boolean);
+      // A step that isn't a written one comes as its text: that text is what went wrong.
+      const note = notes.slice(0, 2).join("; ") || (n === null ? str(x.step).trim() : "");
+      return n !== null || note ? { step: n, count: num(x.count) ?? 1, note } : null;
     })
     .filter((t) => t !== null);
   return {
@@ -391,6 +430,7 @@ function parseKey(k: Obj): PoolKey {
     last4: strOrNull(k.last4)?.slice(-4) ?? null,
     limits: k.limits ?? null,
     enabled: k.enabled !== false,
+    source: k.source === "env" || k.source === "anonymous" ? k.source : "app",
   };
 }
 
@@ -400,6 +440,7 @@ function parsePoolProvider(p: Obj): PoolProvider {
     keys: Array.isArray(p.keys) ? objs(p.keys).map(parseKey) : null,
     multiple_keys: parseMultiple(p.multiple_keys),
     until: isoDate(p.until),
+    expired: p.expired === true,
   };
 }
 
@@ -444,12 +485,15 @@ export async function getPoolHelp(): Promise<PoolHelpData | null> {
     multiple_keys: parseMultiple(p.multiple_keys),
     until: isoDate(p.until),
     experience: parseExperience(p.experience),
+    person: p.setup === "person",
+    why_person: strOrNull(p.why_person),
   }));
   return {
     checked: str(r.value.checked),
     notes: strs(r.value.assistant_notes),
     providers,
     removed: parseRemoved(r.value.removed),
+    considered: parseConsidered(r.value.considered),
   };
 }
 
@@ -506,11 +550,15 @@ export async function getPoolKeys(): Promise<Result<PoolProvider[]>> {
   return r.ok ? { ok: true, value: r.value.providers } : r;
 }
 
-/** What a save answers: the provider as the router has it now (when it says), and its check. */
+/**
+ * What a save answers: the provider as the router has it now, the saved key's id and the check
+ * (null: a router from before checks; `ok: null` inside: this provider isn't checked).
+ */
 export interface SaveAnswer {
   provider: PoolProvider | null;
   check: KeyCheck | null;
-  /** The key's own answer to POST, when the router answers with the key. */
+  keyId: string | null;
+  /** The saved key as the provider's view lists it. */
   key: PoolKey | null;
 }
 
@@ -518,15 +566,16 @@ function saveAnswer(v: unknown): SaveAnswer {
   const o = (v ?? {}) as Obj;
   const c = (o.check ?? null) as Obj | null;
   const check =
-    c && typeof c === "object" && typeof c.ok === "boolean"
-      ? { ok: c.ok, detail: strOrNull(c.detail) }
+    c && typeof c === "object" && "ok" in c
+      ? { ok: typeof c.ok === "boolean" ? c.ok : null, detail: strOrNull(c.detail) }
       : null;
-  const isProvider = Array.isArray(o.vars);
-  const k = (o.key ?? (!isProvider && typeof o.id === "string" ? o : null)) as Obj | null;
+  const provider = Array.isArray(o.vars) && typeof o.id === "string" ? parsePoolProvider(o) : null;
+  const keyId = strOrNull(o.key_id);
   return {
-    provider: isProvider && typeof o.id === "string" ? parsePoolProvider(o) : null,
+    provider,
     check,
-    key: k && typeof k.id === "string" ? parseKey(k) : null,
+    keyId,
+    key: provider?.keys?.find((k) => k.id === keyId) ?? null,
   };
 }
 
@@ -562,7 +611,10 @@ export function clearPoolKeys(provider: string) {
   return call<unknown>("DELETE", `/pool/keys/${encodeURIComponent(provider)}`);
 }
 
-/** POST /pool/help/{provider}/outcome. false: this router doesn't take outcomes (an older one). */
+/**
+ * POST /pool/help/{provider}/outcome. false: this router doesn't take outcomes (an older one). A
+ * body it refuses (400: something in it looked like a key or an e-mail) is dropped, never resent.
+ */
 export async function postPoolOutcome(provider: string, body: OutcomePost): Promise<boolean> {
   const r = await call<unknown>("POST", `/pool/help/${encodeURIComponent(provider)}/outcome`, body);
   return r.ok || !(r.status === 404 || r.status === 405);
@@ -571,16 +623,29 @@ export async function postPoolOutcome(provider: string, body: OutcomePost): Prom
 /** "Key 1", "Key 2": a key's name when the person gave it none. */
 export const keyName = (k: PoolKey, i: number): string => k.label?.trim() || `Key ${i + 1}`;
 
-/** "Available until 28 Dec 2026" (the date's spaces bound). */
-export function untilText(iso: string): string {
+/** "28 Dec 2026", its spaces bound; the text as it came when it isn't a date. */
+export function dayText(iso: string): string {
   const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T00:00:00Z` : iso);
-  const day = d.toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    timeZone: "UTC",
-  });
-  return `Available until ${day.replace(/ /g, "\u00a0")}`;
+  if (Number.isNaN(d.getTime())) return iso;
+  return d
+    .toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    })
+    .replace(/ /g, "\u00a0");
+}
+
+/** "Available until 28 Dec 2026", or "Stopped on 28 Dec 2026" once past it. */
+export function untilText(iso: string, expired = false): string {
+  return `${expired ? "Stopped on" : "Available until"} ${dayText(iso)}`;
+}
+
+/** A removal's reason, short: its first sentence ("No free API tier any more"). */
+export function shortReason(reason: string): string {
+  const first = reason.split(/(?<=[.!?])\s+/)[0] ?? reason;
+  return first.replace(/[.!?]$/, "");
 }
 
 // ---- small helpers the screen shares -----------------------------------------------

@@ -19,7 +19,7 @@ export async function savePoolKey(
   provider: string,
   values: Record<string, string>,
   add?: AddKey,
-): Promise<{ outcome: KeyOutcome; provider: PoolProvider | null }> {
+): Promise<{ outcome: KeyOutcome; provider: PoolProvider | null; keyId: string | null }> {
   const secrets = Object.values(values);
   let r;
   if (add) {
@@ -34,31 +34,41 @@ export async function savePoolKey(
   // A reason never carries the value back, even if a router's message would quote it.
   if (!r.ok)
     return {
-      outcome: {
-        kind: "not_saved",
-        reason: redact(r.detail, secrets),
-      },
+      outcome: { kind: "not_saved", reason: redact(r.detail, secrets) },
       provider: null,
+      keyId: null,
     };
   const outcome = outcomeOf(r.value, secrets);
-  // "Groq key 2": which one this is, when it joins others.
-  const nth = add ? r.value.provider?.keys?.length : undefined;
-  if (nth && (outcome.kind === "working" || outcome.kind === "rejected")) outcome.nth = nth;
-  return { outcome, provider: r.value.provider };
+  // "Groq key 2": which one this is, when it joins others (the keyless slot isn't one).
+  if (
+    add &&
+    (outcome.kind === "working" || outcome.kind === "saved" || outcome.kind === "rejected")
+  ) {
+    const own = r.value.provider?.keys?.filter((k) => k.id !== "anon") ?? [];
+    const at = own.findIndex((k) => k.id === r.value.keyId);
+    outcome.nth = at >= 0 ? at + 1 : own.length || undefined;
+  }
+  return { outcome, provider: r.value.provider, keyId: r.value.keyId };
 }
 
 function outcomeOf(a: SaveAnswer, secrets: string[]): KeyOutcome {
   const p = a.provider;
   // The router tried the key with the provider: its answer is the outcome.
-  if (a.check)
+  if (a.check) {
+    if (a.check.ok === false)
+      return {
+        kind: "rejected",
+        by: "provider",
+        reason: redact(a.check.detail || "it refused the key", secrets),
+      };
+    const missing = missingOf(p, secrets);
+    if (missing) return missing;
+    // ok null: this provider has no free check (only a few do): saved, not "working".
     return a.check.ok
-      ? (missingOf(p, secrets) ?? { kind: "working" })
-      : {
-          kind: "rejected",
-          by: "provider",
-          reason: redact(a.check.detail || "it refused the key", secrets),
-        };
-  // An older router: what its state says.
+      ? { kind: "working" }
+      : { kind: "saved", detail: a.check.detail ? redact(a.check.detail, secrets) : null };
+  }
+  // A router from before checks: what its state says.
   if (a.key && !a.key.usable)
     return {
       kind: "rejected",

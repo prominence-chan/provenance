@@ -3316,6 +3316,19 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   color: var(--warn);
   border-color: var(--warn-border);
 }
+.key-badge[data-person] {
+  color: var(--text-2);
+}
+/* Why a provider needs the person: first in its open guide. */
+.key-person {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-wrap: pretty;
+}
 .key-badge[data-free="none"] {
   color: var(--muted);
 }
@@ -3488,9 +3501,12 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 }
 .key-item-state {
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 4px;
   min-width: 0;
+  max-width: 100%;
   margin-left: auto;
 }
 .key-item-state .setup-status {
@@ -3501,6 +3517,42 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 }
 .key-item .setup-confirm {
   margin-left: auto;
+}
+/* On/off, quiet until the row is pointed at (or it is off). */
+.key-item-switch {
+  margin-left: 4px;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.key-item-switch:checked {
+  background: color-mix(in srgb, var(--good) 45%, var(--panel-3));
+  border-color: transparent;
+}
+.key-item:hover .key-item-switch,
+.key-item-switch:focus-visible,
+.key-item-switch:not(:checked) {
+  opacity: 1;
+}
+@media (hover: none) {
+  .key-item-switch {
+    opacity: 1;
+  }
+}
+.key-item[data-off] .key-item-label,
+.key-item[data-off] .key-item-last4 {
+  color: var(--muted);
+}
+.key-item-retry {
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--fs-sm);
+}
+.key-item-env {
+  white-space: nowrap;
+}
+.key-item-name {
+  font-size: var(--fs-md);
+  color: var(--text-2);
 }
 .key-item-msg {
   flex-basis: 100%;

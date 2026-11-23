@@ -69,6 +69,16 @@ export function FreeBadge({ help }: { help: PoolHelp | undefined }) {
   );
 }
 
+/** "Set up yourself": a provider only the person can do (`setup: person`), outside the assistant's walk. */
+export function PersonBadge({ help }: { help: PoolHelp | undefined }) {
+  if (!help?.person) return null;
+  return (
+    <span className="setup-plan key-badge" data-person title={help.why_person ?? undefined}>
+      Set up yourself
+    </span>
+  );
+}
+
 export function GuideFacts({ help, time = true }: { help: PoolHelp; time?: boolean }) {
   const needs = help.needs.join(" ");
   if (!needs && !(time && help.time_minutes)) return null;
@@ -107,6 +117,9 @@ export function DataUse({ help }: { help: PoolHelp }) {
   );
 }
 
+/** "People often get stuck" only where more than one report says so. */
+const stuck = (count: number) => (count > 1 ? "People often get stuck" : "Someone got stuck");
+
 export function GuideSteps({ help }: { help: PoolHelp }) {
   if (!help.steps.length) return null;
   const name = shortName(help.name);
@@ -128,7 +141,8 @@ export function GuideSteps({ help }: { help: PoolHelp }) {
             <Inline text={s} />
             {at(i + 1).map((t, j) => (
               <span key={j} className="key-trouble" data-trouble-step={i + 1}>
-                People often get stuck here: <Inline text={t.note} />
+                {stuck(t.count)} here{t.note ? ": " : ""}
+                {t.note && <Inline text={t.note} />}
               </span>
             ))}
           </li>
@@ -136,7 +150,10 @@ export function GuideSteps({ help }: { help: PoolHelp }) {
       </ol>
       {loose.map((t, j) => (
         <p key={j} className="key-trouble">
-          People often get stuck{t.step ? ` at step ${t.step}` : ""}: <Inline text={t.note} />
+          {stuck(t.count)}
+          {t.step ? ` at step ${t.step}` : ""}
+          {t.note ? ": " : ""}
+          {t.note && <Inline text={t.note} />}
         </p>
       ))}
       {note && <p className="meta key-confidence">{note}</p>}
@@ -359,8 +376,8 @@ export function KeyForm({
   help?: PoolHelp;
   name: string;
   autoFocus?: boolean;
-  /** After a save (any outcome) or a removal. */
-  onDone: (o: KeyOutcome | "removed") => void;
+  /** After a save (any outcome, with the saved key's id) or a removal. */
+  onDone: (o: KeyOutcome | "removed", keyId?: string | null) => void;
   /** Beside Save (the key card's Skip). */
   extraActions?: React.ReactNode;
   showRemove?: boolean;
@@ -388,7 +405,7 @@ export function KeyForm({
     if (add && !vals[keyVar]) return setErr({ text: "Paste the key first.", tone: "bad" });
     setBusy(true);
     setErr(null);
-    const { outcome } = await savePoolKey(
+    const { outcome, keyId } = await savePoolKey(
       p.id,
       vals,
       add ? { keyVar, label: labelRef.current?.value, tier } : undefined,
@@ -402,7 +419,7 @@ export function KeyForm({
       setMisfit(false);
       if (outcome.kind === "rejected") setErr({ text: rejectedText(name, outcome), tone: "warn" });
     }
-    onDone(outcome);
+    onDone(outcome, keyId);
   };
   const remove = async () => {
     setBusy(true);
@@ -549,10 +566,11 @@ export function KeyGuide({
   pool: PoolProvider;
   help: PoolHelp;
   name: string;
-  onDone: (o: KeyOutcome | "removed") => void;
+  onDone: (o: KeyOutcome | "removed", keyId?: string | null) => void;
 }) {
   return (
     <div className="key-guide">
+      {help.person && help.why_person && <p className="key-person">{help.why_person}</p>}
       {help.what_you_get && (
         <p className="key-guide-get">
           <Inline text={help.what_you_get} />
