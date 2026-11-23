@@ -2104,6 +2104,11 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   place-items: center;
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
+  /* The inherited 1.55 line box (16px) is taller than the 14px inside the ring, and an
+     overflowing grid item is not centred: the digit hung 1.3px low. A line box of one cap
+     height centres the digit's ink, like the check beside it. */
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
   border: 1px solid var(--border-strong);
 }
 .setup-rail li.done {
