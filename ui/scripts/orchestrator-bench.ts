@@ -89,6 +89,9 @@ type Result = {
   maxInputTokens?: number;
   totalInputTokens?: number;
   servedBy: Record<string, number>;
+  /** The keys this run's requests have in the router's usage ledger: the stock thread, each
+   *  worker thread, each plain call's session. The caller checks who served them. */
+  ledgerKeys: string[];
   approvalsDeclined: string[];
   finalMessage: string;
 };
@@ -177,6 +180,7 @@ if (mode === "stock") {
     totalInputTokens: totalInput,
     threadId: tid,
     servedBy: {},
+    ledgerKeys: [tid],
     approvalsDeclined: approvals,
     finalMessage,
   });
@@ -184,7 +188,15 @@ if (mode === "stock") {
 
 // ---- the orchestrators -----------------------------------------------------------------
 const servedBy: Record<string, number> = {};
+const ledgerKeys = new Set<string>();
+// A worker cut off by the time limit never reaches its trace: take the thread id as it starts too.
+appServer.listen((m) => {
+  const id = m.method === "thread/started" && (m.params.thread as { id?: string } | undefined)?.id;
+  if (id) ledgerKeys.add(String(id));
+});
 const trace = (e: TraceEvent) => {
+  const key = e.type === "model" ? e.session : e.threadId;
+  if (key) ledgerKeys.add(key);
   appendFileSync(path.join(out, "traces.jsonl"), `${JSON.stringify({ at: Date.now(), ...e })}\n`);
   if (e.type === "model") servedBy[e.servedBy ?? "?"] = (servedBy[e.servedBy ?? "?"] ?? 0) + 1;
 };
@@ -292,6 +304,7 @@ finish({
   steps: o?.steps,
   retries: (o as { retries?: number } | undefined)?.retries,
   servedBy,
+  ledgerKeys: [...ledgerKeys],
   approvalsDeclined: approvals,
   finalMessage: [...turn.items].reverse().find((i) => i.type === "agentMessage")?.text ?? "",
 });

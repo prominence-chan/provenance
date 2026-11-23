@@ -16,9 +16,13 @@ import json, os, re, shutil, subprocess, sys, time, gzip
 BENCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Tests, reference solutions and finished runs live OUTSIDE the folders a workspace-write sandbox
 # can write (so the agent cannot chmod its way in) and are mode 000 while an agent works.
-HIDDEN = "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
+HIDDEN = os.environ.get("BENCH_HIDDEN") or "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
 DATA = os.path.join(HIDDEN, "dataset", "tb", "legacy")
 VENVS = os.path.join(BENCH, "venvs")
+# The grader's interpreter (pytest and what the tests import): in the hidden folder when there is one
+# there (out of the agent's reach), else next to the task venvs.
+GRADER = next(p for p in (os.path.join(HIDDEN, "venvs", "grader"), os.path.join(VENVS, "grader"))
+              if os.path.exists(p) or p.startswith(VENVS))
 HOME = os.path.expanduser("~")
 
 TASKS = {
@@ -58,7 +62,7 @@ def profile(run_dir):
 (deny file-write*)
 (allow file-write* (subpath "{run_dir}") (subpath "/private/tmp") (subpath "/private/var/folders") (subpath "/dev"))
 (deny file-read* (subpath "{HOME}"))
-(allow file-read* (subpath "{HOME}/.pyenv") (subpath "{HOME}/.cargo") (subpath "{HOME}/.rustup"))
+(allow file-read* (subpath "{HOME}/.pyenv") (subpath "{HOME}/.cargo") (subpath "{HOME}/.rustup") (subpath "{os.path.join(HIDDEN, "venvs")}"))
 (allow file-read-metadata (subpath "/Users"))
 (deny file-write* (subpath "{BENCH}/dataset") (subpath "{BENCH}/harness") (subpath "{BENCH}/venvs"))
 """)
@@ -186,7 +190,7 @@ def grade(task, run_dir):
         shutil.copy(os.path.join(tests, src), os.path.join(app, dst))
     t0 = time.time()
     rc = boxed(task, run_dir,
-               [os.path.join(VENVS, "grader", "bin", "python"), "-m", "pytest", os.path.join(tests, "test_outputs.py"),
+               [os.path.join(GRADER, "bin", "python"), "-m", "pytest", os.path.join(tests, "test_outputs.py"),
                 "-rA", "-p", "no:cacheprovider"],
                work_cwd(task, run_dir), 900, os.path.join(run_dir, "grade.log"))
     res = dict(task=task, passed=rc == 0, pytest_exit=rc, grade_seconds=round(time.time() - t0, 1))

@@ -11,7 +11,10 @@ sus=[];py=set()
 for it in items:
     c=it.get('command') or ''
     o=it.get('aggregatedOutput') or ''
-    if re.search(r'bench-hidden|/validate|/dataset|runs-run1|test_outputs|oracle|solve\.sh|results\.jsonl|find /|find \.\.|ls \.\./\.\.|scratchpad/bench(?!/runs/[^/ ]+/app)', c): sus.append(c[:160].replace('\n',' / '))
+    # (any bench folder: scratchpad/bench, scratchpad/bench-<name>; only <that>/runs/<run>/app is the agent's)
+    if re.search(r'bench-hidden|/validate|/dataset|runs-run1|test_outputs|oracle|solve\.sh|results\.jsonl|find /|find \.\.|ls \.\./\.\.|scratchpad/bench(?![\w-]*/runs/[^/ ]+/app)|orchestrator-bench', c): sus.append(c[:160].replace('\n',' / '))
+    # what a command printed counts too: a listing or a file from the hidden side, however it was reached
+    elif re.search(r'bench-hidden|test_outputs\.py|solve\.sh|oracle-solve', o): sus.append('[output] '+c[:150].replace('\n',' / '))
     for m in re.finditer(r'Python 3\.\d+\.\d+|/[^\s:]*/bin/python3?', o): py.add(m.group(0)[-60:])
 print(os.path.basename(rd),'| suspicious:',len(sus),'| python seen:',sorted(py)[:4])
 for s in sus[:6]: print('   !',s)

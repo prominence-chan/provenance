@@ -4,21 +4,31 @@
   driver.py <mode,mode,...> [task ...]     modes: experimental hyperexperimental stock
 
 Stops starting runs after CALL_BUDGET model calls or HOURS of wall clock since the first run
-(state in budget.json). A run whose turn failed on the router with almost nothing spent is retried
+(state in budget.json).
+
+Env (all optional): BENCH_UI (the ui folder of the worktree to run), BENCH_HIDDEN (tests, solutions,
+finished runs: outside every sandbox-writable root), BENCH_MODEL (the model name every arm is given:
+a tier, or a concrete id of the router's catalog such as chatgpt-web/luna, which the router serves
+strictly), BENCH_SERVED_BY (the one catalog id that may serve: every ledger entry of a run is checked
+against it and a run with any other is kept as invalid and awaits review; the call budget then counts
+that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS. A run whose turn failed on the router with almost nothing spent is retried
 after a pause (3 times), then once on pool/<tier>.
 """
 import collections, json, os, shutil, signal, subprocess, sys, time, urllib.request
 
 BENCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UI = "/Users/yufan/Desktop/Development/provenance-wt-bench/ui"
+UI = os.environ.get("BENCH_UI") or "/Users/yufan/Desktop/Development/provenance-wt-bench/ui"
 TASKS_PY = os.path.join(BENCH, "harness", "tasks.py")
 RUNS = os.path.join(BENCH, "runs")  # only the run in progress; finished runs move to HIDDEN/runs
-HIDDEN = "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
+HIDDEN = os.environ.get("BENCH_HIDDEN") or "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
+os.environ["BENCH_HIDDEN"] = HIDDEN  # tasks.py reads the same one
 LEDGER = os.path.expanduser("~/.tierlm/usage-ledger.jsonl")
-TIER = "solstice"
+TIER = os.environ.get("BENCH_MODEL") or "solstice"
+SERVED_BY = os.environ.get("BENCH_SERVED_BY") or None
 LIMIT_MIN = 25
-CALL_BUDGET = 1600
-HOURS = 8.0
+CALL_BUDGET = int(os.environ.get("BENCH_CALL_BUDGET") or 1600)
+HOURS = float(os.environ.get("BENCH_HOURS") or 8.0)
+ROUTER = "http://127.0.0.1:4141"
 ORDER = ["sqlite-db-truncate", "cancel-async-tasks", "modernize-scientific-stack", "db-wal-recovery",
          "model-extraction-relu-logits", "regex-log", "polyglot-c-py", "sparql-university",
          "constraints-scheduling", "large-scale-text-editing"]
@@ -57,6 +67,30 @@ def tier_available():
     except Exception as e:
         return None
     return []
+
+
+def web_gate():
+    """For a run that one web model must serve: ("ok" | "wait" | "signed-out" | "unknown", seconds, text).
+    Reads GET /web/accounts: the accounts of the provider that has the model."""
+    try:
+        d = json.load(urllib.request.urlopen(ROUTER + "/web/accounts", timeout=15))
+    except Exception as e:
+        return "unknown", 60, f"router not answering: {e}"
+    for p in d.get("providers", []):
+        if any(m.get("id") == SERVED_BY for m in p.get("models", [])):
+            accs = p.get("accounts", [])
+            brief = ", ".join(f"{a['id']}:{'in' if a.get('signed_in') else 'OUT'}"
+                              f"{' blocked ' + str(int(a.get('blocked_for_s') or 0)) + 's (' + str(a.get('reason')) + ')' if a.get('blocked') else ''}"
+                              f" {a.get('today')}/{a.get('daily_cap')}" for a in accs)
+            signed = [a for a in accs if a.get("signed_in")]
+            if not signed:
+                return "signed-out", 0, brief
+            free = [a for a in signed if not a.get("blocked") and (a.get("today") or 0) < (a.get("daily_cap") or 1e9)]
+            if free:
+                return "ok", 0, brief
+            waits = [a.get("blocked_for_s") or 0 for a in signed if a.get("blocked")]
+            return "wait", (min(waits) if waits else 1800), brief
+    return "unknown", 60, f"no web provider has {SERVED_BY}"
 
 
 def ledger_rows(t0, t1):
@@ -143,16 +177,39 @@ def one(mode, task, model, attempt):
     res["ledger_window_new_keys"] = dict(collections.Counter(r.get("model") for r in rows if r.get("key") not in old))
     res["ledger_new_key_calls"] = sum(1 for r in rows if r.get("key") not in old)
     res["wall_seconds"] = round((res.get("wallMs") or 0) / 1000, 1) or round(t1 - t0, 1)
+    # By key, not by time: the runner lists the keys its requests have in the ledger (the stock thread,
+    # each worker thread, each plain call's session), so other users of the router do not blur it.
+    keys = set(res.get("ledgerKeys") or [])
+    mine = [r for r in ledger_rows(t0 - 5, t1 + 30) if r.get("key") in keys]
+    res["ledger_calls"] = sum(1 for r in mine if r.get("model"))
+    res["ledger_served"] = dict(collections.Counter(r.get("model") or "(nothing)" for r in mine))
+    res["ledger_ctx"] = dict(collections.Counter(f for r in mine for f in (r.get("ctx") or [])))
+    res["ledger_pruned"] = sum(1 for r in mine if r.get("pruned"))
+    res["ledger_pruned_saved"] = sum(int((r.get("pruned") or {}).get("before") or 0) - int((r.get("pruned") or {}).get("after") or 0) for r in mine)
+    res["ledger_max_in"] = max([r.get("in") or 0 for r in mine] or [0])
+    res["ledger_sum_in"] = sum(r.get("in") or 0 for r in mine)
+    res["ledger_sum_out"] = sum(r.get("out") or 0 for r in mine)
+    res["invalid"] = None
+    if SERVED_BY:
+        other = {m: n for m, n in res["ledger_served"].items() if m not in (SERVED_BY, "(nothing)")}
+        hdr = {m: n for m, n in (res.get("servedBy") or {}).items() if m != SERVED_BY}
+        if other or hdr:
+            res["invalid"] = f"served elsewhere: ledger {other}, reply headers {hdr}"
+        elif not keys and res.get("status") != "runner-killed":
+            res["invalid"] = "the runner listed no ledger keys: who served is unverified"
     g = json.loads(tasks("grade", task, run_dir))
     rec = {"task": task, "mode": mode, "model": model, "attempt": attempt, "run_dir": run_dir, "passed": g["passed"],
            "grade_summary": g["summary"], **{k: res.get(k) for k in (
                "status", "timedOut", "error", "guard", "modelCalls", "roles", "workers", "workerCalls",
                "workerMaxInputTokens", "steps", "retries", "threadId", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
-               "ledger_window_all", "ledger_window_new_keys", "ledger_new_key_calls", "wall_seconds")}}
+               "ledger_window_all", "ledger_window_new_keys", "ledger_new_key_calls", "wall_seconds",
+               "ledgerKeys", "ledger_calls", "ledger_served", "ledger_ctx", "ledger_pruned", "ledger_pruned_saved",
+               "ledger_max_in", "ledger_sum_in", "ledger_sum_out", "invalid")}}
     # A timeout is a failure whatever the folder holds? No: the official harness grades what is there
     # after an agent timeout too; we do the same and flag it.
     b = budget()
-    b["calls"] += (res.get("modelCalls") or 0) or (res.get("ledger_new_key_calls") or 0)
+    b["calls"] += (res["ledger_calls"] if SERVED_BY else
+                   (res.get("modelCalls") or 0) or (res.get("ledger_new_key_calls") or 0))
     save_budget(b)
     # Finished: out of the agent's reach (its tests copy, grade log and transcript included).
     kept = os.path.join(HIDDEN, "runs", name)
@@ -164,7 +221,8 @@ def one(mode, task, model, attempt):
     rec["audit"] = au
     log("AUDIT " + au.replace("\n", " ;; ")[:400])
     log(f"{name}: {'PASS' if g['passed'] else 'FAIL'} status={res.get('status')} timedOut={res.get('timedOut')} "
-        f"calls={res.get('modelCalls')} wall={rec['wall_seconds']}s guard={res.get('guard')} err={(res.get('error') or '')[:120]} | budget calls={b['calls']}")
+        f"calls={res.get('modelCalls')} wall={rec['wall_seconds']}s guard={res.get('guard')} err={(res.get('error') or '')[:120]} | "
+        f"ledger {res['ledger_served']} ctx={res['ledger_ctx']} pruned={res['ledger_pruned']} maxIn={res['ledger_max_in']} retries={res.get('retries')} | budget calls={b['calls']}")
     return rec
 
 
@@ -216,8 +274,24 @@ def main():
                 if b["calls"] >= CALL_BUDGET or time.time() - b["first_run_at"] > HOURS * 3600:
                     log(f"budget reached (calls={b['calls']}, hours={(time.time() - b['first_run_at']) / 3600:.2f}): not starting {task} {mode}")
                     return
-                # The allowance is shared: when the tier is nearly used up, wait for it to recover.
-                for w in range(4):
+                # One web model must serve: wait while its accounts are blocked (at most 30 minutes a
+                # wait), stop when every account is signed out. Never another model.
+                waited = 0
+                while SERVED_BY:
+                    st, secs, brief = web_gate()
+                    if st == "ok":
+                        break
+                    if st == "signed-out":
+                        log(f"every account of {SERVED_BY} is signed out ({brief}): stopping")
+                        return
+                    if time.time() - b["first_run_at"] > HOURS * 3600:
+                        log(f"budget of hours reached while waiting ({brief})")
+                        return
+                    nap = max(60, min(int(secs) + 10, 1800))
+                    log(f"WAIT {nap}s before {task} {mode}: {st} ({brief})")
+                    time.sleep(nap)
+                    waited += nap
+                for w in range(0 if SERVED_BY else 4):
                     av = tier_available()
                     if av is None or any((r or 0) >= 0.08 for _, r, _ in av):
                         break
@@ -228,6 +302,10 @@ def main():
                 ran += 1
                 ok_end = rec["passed"] or rec.get("status") == "completed" or (rec.get("timedOut") and rec.get("status") != "runner-killed")
                 rec = dict(rec)
+                rec["waited_before_s"] = waited
+                if rec.get("invalid"):
+                    ok_end = False
+                    log(f"INVALID {task} {mode}: {rec['invalid']}")
                 if ok_end:
                     rec["final"] = True
                 else:

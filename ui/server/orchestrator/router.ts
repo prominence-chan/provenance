@@ -46,6 +46,8 @@ export interface ModelReply {
   promptChars: number;
   /** Which concrete model answered, when the router says (X-PCore-Model). */
   servedBy: string | null;
+  /** The X-PCore-Session this call went under: its key in the router's usage ledger. */
+  session: string;
   ms: number;
 }
 
@@ -104,10 +106,11 @@ export function makeCallModel(conn: () => RouterConn): CallModel {
     const t0 = mono.now();
     const timeout = AbortSignal.timeout(call.timeoutMs ?? CALL_TIMEOUT_MS);
     const signal = AbortSignal.any([call.signal, timeout]);
+    const session = `orc-${randomUUID()}`;
     const headers: Record<string, string> = {
       "content-type": "application/json",
       "accept": "text/event-stream",
-      "x-pcore-session": `orc-${randomUUID()}`,
+      "x-pcore-session": session,
     };
     if (token) headers.authorization = `Bearer ${token}`;
     let res: Response;
@@ -199,6 +202,7 @@ export function makeCallModel(conn: () => RouterConn): CallModel {
       text: reply,
       promptChars: call.instructions.length + call.input.length,
       servedBy: res.headers.get("x-pcore-model"),
+      session,
       ms: Math.round(mono.now() - t0),
     };
   };

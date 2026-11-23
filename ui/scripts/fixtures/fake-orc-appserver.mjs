@@ -271,7 +271,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "thread/start": {
       const id = randomUUID();
       threads.set(id, { cwd: p.cwd, interrupted: false, turnId: null });
-      log({ threadStart: p });
+      log({ threadStart: p, threadId: id });
       note("thread/started", { thread: { id } });
       return send({ id: m.id, result: { thread: { id }, model: p.model, cwd: p.cwd } });
     }

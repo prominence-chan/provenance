@@ -2213,6 +2213,44 @@ check(
   "archive hides a thread",
 );
 
+log("a concrete model name is passed through unchanged; every call can be found in the router's ledger");
+seen.length = 0;
+const tracesBefore = traces.length;
+const startsBefore = fake().filter((l) => l.threadStart).length;
+const named = await start("experimental", { model: "chatgpt-web/luna" });
+await say(named.id, "many parts");
+turn = await turnDone(named.id);
+const namedStarts = fake()
+  .filter((l) => l.threadStart)
+  .slice(startsBefore) as (LogLine & { threadId?: string })[];
+check(
+  seen.length > 0 && seen.every((s) => s.body.model === "chatgpt-web/luna"),
+  "plain calls name the model as the thread has it (a router's concrete model id, not only a tier)",
+);
+check(
+  namedStarts.length === 4 && namedStarts.every((l) => l.threadStart!.model === "chatgpt-web/luna"),
+  "worker threads are started with the same name",
+);
+const namedTraces = traces.slice(tracesBefore);
+const modelTraces = namedTraces.filter((t) => t.type === "model");
+check(
+  modelTraces.length === seen.length &&
+    modelTraces.every((t, i) => t.type === "model" && t.session === seen[i].session),
+  "each plain call's trace carries the session key the router saw (its key in the usage ledger)",
+);
+const workerTraces = namedTraces.filter((t) => t.type === "worker");
+check(
+  workerTraces.length === 4 &&
+    workerTraces.every((t, i) => t.type === "worker" && !!t.threadId && t.threadId === namedStarts[i].threadId),
+  "each worker's trace carries its harness thread id (the key of its requests in the ledger)",
+);
+const colon = await call("thread/start", {
+  model: "solstice:none",
+  cwd: work,
+  config: { orchestrator: "experimental" },
+});
+check(!!colon.error, "a model name with a fallback suffix is still refused");
+
 const roles = new Map<string, number>();
 for (const t of traces)
   if (t.type === "model") roles.set(t.role, Math.max(roles.get(t.role) ?? 0, t.promptChars));

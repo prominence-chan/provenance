@@ -114,6 +114,8 @@ export interface WorkerResult {
   budget: "calls" | "minutes" | null;
   /** Its turn failed in the harness (a model request that never got through), not at the task. */
   modelFailure: boolean;
+  /** The worker's harness thread id (null until it started). */
+  threadId: string | null;
 }
 
 const LOOKING_RE =
@@ -280,6 +282,7 @@ export async function runExperimental(run: Run): Promise<void> {
         calls: res.calls,
         maxInputTokens: res.maxInputTokens,
         status: res.budget ? `stopped (${res.budget})` : res.modelFailure ? "no model" : res.status,
+        threadId: res.threadId,
       });
       // Recorded facts first: they hold whatever the report says, and whatever stopped the worker.
       for (const c of res.commands) {
@@ -476,6 +479,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
     recent: [],
     budget: null,
     modelFailure: false,
+    threadId: null,
   };
   run.stats.workers++;
   let wid: string;
@@ -489,6 +493,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
       ...(process.env.ORC_STOCK_BASE ? {} : { baseInstructions: WORKER_BASE }),
     });
     wid = String((started.thread as Json).id);
+    out.threadId = wid;
   } catch (e) {
     throw new StopTurn("failed", `Couldn't start a worker: ${errText(e)}`);
   }
