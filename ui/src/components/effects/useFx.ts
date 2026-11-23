@@ -12,6 +12,9 @@
 //   &fxspeed=0.1        slow motion (every effect's clock runs at that rate)
 //   &fxuptime=86400     start every effect's clock as if the app had been open that long
 //                       (seconds): for checking that nothing degrades over days
+//   &fxtrace            record every frame's layer state in window.__provenanceFxTrace (the
+//                       write head's place and speed, Codex's sweep), for checking motion headless
+//   ?fx=none:idle       no effect (then __provenanceFx(...) selects one from nothing)
 //   __provenanceFx("spark", "flare")   replay spark's switch flare, then idle
 //   __provenanceFx("spark", "active")  / "idle"
 //   __provenanceFx(null)               back to the real state
