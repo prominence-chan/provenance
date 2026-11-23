@@ -1,0 +1,15 @@
+Luna run (every call served by chatgpt-web/luna, verified per run by ledger key), 2026-11-23 04:43 - 11:36 local.
+
+Fixes on orchestrator-bench-luna:
+1. [runner/driver] 1afba40a: the driver takes the model name, hidden folder and budget from the environment; a run is checked against the router's usage ledger by key (stock thread id, worker thread ids, plain calls' session keys, which the traces now carry) and is invalid when anything but the required model served; it waits while the web model's accounts are blocked and stops when all are signed out; the grader venv lives in the hidden folder; the audit also reads command output. check:orchestrator: a concrete model name passes through unchanged, traces carry the ledger keys.
+2. [orchestrator] 30813dba + 4b56ab0b: Experimental runs a task once more when its worker stopped having run no command and changed no file without reporting done (a web chat model that looks for the shell among its own tools: "Local terminal execution unavailable"), records that in the second brief and keeps the excuse out of the notes; the same twice reaches the planner as a record that nothing was tried. Found in modernize-scientific-stack / experimental (three such workers, the planner planned around "the inaccessible terminal" until the revision cap). check:orchestrator covers both cases. 4b56ab0b: the test counts every command (the notes' list leaves out looking around).
+3. [orchestrator] b34c74f3: a worker's trace keeps its report as written and the number of commands it ran.
+
+Bridge / router (not edited here; evidence sent to the coordinator, who fixed them in provenance-core):
+a. a reply with no tool block that is not an answer ended stock turns un-nudged (modernize / stock try0, try1); the request after a nudged turn opened a new chat.
+b. the notice scan read the sidebar ("Unable to load history") as ChatGPT turning chats away: all three accounts blocked in a one-minute loop around 05:46.
+c. workers' first replies shaped as a BLOCKED report ("tool-call interface rejected the command", "container ServerError") were not nudged.
+d. OPEN: text in curly braces is lost from plain (unfenced) Luna replies on the plain-call path (Hyperexperimental's translate role: set(x)=={"word","value"} arrived as set(x)==value); reproduced with one direct call.
+
+Not a software fault: from about 08:20 the Mac was asleep on battery (11-12 %), dark-waking ~20 s every ~17 min. Every Hyperexperimental attempt after sqlite-db-truncate is invalid for that reason and released for rerun; none could be rerun before the 8-hour limit.
+Resume: plug the Mac in, then `sh luna/start.sh` from a copy under scratchpad/bench-luna/harness (paths inside), or rerun driver.py with the same environment; released runs are picked up first.

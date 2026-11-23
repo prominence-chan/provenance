@@ -9,7 +9,7 @@ if os.path.exists(tp):
     for l in open(tp):
         d=json.loads(l)
         if d['type']=='model': print(' M',d['role'],d['promptChars'],(d['servedBy'] or '?').split('/')[-1],f"{d['ms']//1000}s |",short(d['reply'])[:W])
-        else: print(' WORKER',d['status'],'calls',d['calls'],'maxTok',d['maxInputTokens'],'|',short(d['task'])[:W])
+        else: print(' WORKER',d['status'],'calls',d['calls'],'maxTok',d['maxInputTokens'],'cmds',d.get('commands'),'|',short(d['task'])[:W//2],'|| REPORT:',short(d.get('report') or '')[-260:])
 t=json.load(open(rd+'/record/turn.json'))
 items=t.get('items',[])
 print('ITEMS',len(items))
