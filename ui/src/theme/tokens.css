@@ -35,7 +35,7 @@
   --crimson: #e23a52;
   --magenta: #ff4fa3; /* highlight, used sparingly */
   --corona: #ffc061; /* gold, sun-core */
-  --glint: #fff1f7; /* white-hot centre of the logo and the nova glyph */
+  --glint: #fff1f7; /* white-hot centre of the logo and of the tier glyphs drawn large */
   --accent: var(--ember);
   --accent-fg: #1c0e07; /* text on accent fills */
   --accent-grad: linear-gradient(135deg, var(--corona) 0%, var(--ember) 45%, var(--crimson) 100%);

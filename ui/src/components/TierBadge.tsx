@@ -1,63 +1,57 @@
+import { DETAIL_FROM, TIER_GLYPHS } from "../../shared/tier-glyphs";
 import { fallbackLabel, fallbackOf } from "../fallback/model";
 import { useAppState } from "../store/store";
 import { splitModel, tierOf, type TierId } from "../theme/tiers";
 import { IconTerminal } from "./icons";
 
 /**
- * Per-tier glyph, brighter as the tier rises: a small spark, a glowing coal (ember),
- * a sun (solstice), a starburst (nova). Colored via `color: var(--tier-<id>)`.
+ * Per-tier glyph, more points and reach as the tier rises: a spark, a glowing coal (ember),
+ * the sun (solstice), a stellar burst (nova); drawn in shared/tier-glyphs.ts. From DETAIL_FROM
+ * px up it adds a white-hot core. Colored via `color: var(--tier-<id>)`.
  */
 export function TierGlyph({ tier, size = 12 }: { tier: TierId | null; size?: number }) {
-  const common = {
-    "width": size,
-    "height": size,
-    "viewBox": "0 0 16 16",
-    "className": "tier-glyph",
-    "aria-hidden": true,
-  };
-  switch (tier) {
-    case "spark":
-      return (
-        <svg {...common}>
+  const g = tier ? TIER_GLYPHS[tier] : null;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      className="tier-glyph"
+      data-glyph={g ? tier : undefined}
+      aria-hidden
+    >
+      {g ? (
+        <>
           <path
-            d="M8 3l1.1 3.9 3.9 1.1-3.9 1.1-1.1 3.9-1.1-3.9-3.9-1.1 3.9-1.1z"
+            d={g.body}
             fill="currentColor"
+            stroke={g.soften ? "currentColor" : undefined}
+            strokeWidth={g.soften || undefined}
+            strokeLinejoin="round"
           />
-        </svg>
-      );
-    case "ember":
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="4" fill="currentColor" opacity="0.9" />
-          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" opacity="0.25" />
-        </svg>
-      );
-    case "solstice":
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="3.4" fill="currentColor" />
-          <g stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-            <path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1" />
-          </g>
-        </svg>
-      );
-    case "nova":
-      return (
-        <svg {...common}>
-          <path
-            d="M8 0.5l1.3 4.6 4.1-2.5-2.5 4.1L15.5 8l-4.6 1.3 2.5 4.1-4.1-2.5L8 15.5l-1.3-4.6-4.1 2.5 2.5-4.1L0.5 8l4.6-1.3-2.5-4.1 4.1 2.5z"
-            fill="currentColor"
-          />
-          <circle cx="8" cy="8" r="2" fill="var(--glint)" />
-        </svg>
-      );
-    default:
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="3.5" fill="currentColor" opacity="0.6" />
-        </svg>
-      );
-  }
+          {g.rays && (
+            <path
+              d={g.rays}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+            />
+          )}
+          {size >= DETAIL_FROM && (
+            <path
+              d={g.core}
+              className="tier-glyph-core"
+              strokeWidth={g.coreSoften || 0}
+              strokeLinejoin="round"
+            />
+          )}
+        </>
+      ) : (
+        <circle cx="12" cy="12" r="5" fill="currentColor" opacity="0.6" />
+      )}
+    </svg>
+  );
 }
 
 /**

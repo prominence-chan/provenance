@@ -581,9 +581,18 @@ select {
   font-weight: 400;
   color: var(--muted);
 }
-[data-tier="nova"] .tier-glyph,
-.tier-badge[data-tier="nova"] .tier-glyph {
-  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--tier-nova) 70%, transparent));
+/* The white-hot core a tier glyph draws from 32 px up (DETAIL_FROM, shared/tier-glyphs.ts). */
+.tier-glyph-core {
+  fill: color-mix(in srgb, currentColor 35%, var(--glint));
+  stroke: color-mix(in srgb, currentColor 35%, var(--glint));
+}
+/* Nova's burst glows faintly on the dark theme; tight, so its points stay sharp at 10-14 px. On
+   paper a glow reads as blur, and the drawing already says it is the brightest. */
+[data-tier="nova"] .tier-glyph {
+  filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--tier-nova) 55%, transparent));
+}
+[data-theme="light"] [data-tier="nova"] .tier-glyph {
+  filter: none;
 }
 
 /* ---- conversation ------------------------------------------------------ */
