@@ -11,6 +11,8 @@
 //   LOOPCALLS  keeps making "model requests"    IDLETASK   says nothing until interrupted
 //   FLAKY      the turn fails (no model) while the number in $FAKE_ORC_LOG.flaky is above 0
 //              (each failure takes one off)     QUIETTASK  silent for 1.3 s, then finishes
+//   NOTOOLS    runs nothing and reports that the terminal is unavailable, unless its brief
+//              records that an earlier worker ran nothing (NOTOOLS ALWAYS: even then)
 //   MAKES <name>  also writes that file in the folder
 //   (anything else: a command, an edit, STATUS: DONE)
 // command/exec honours `env` (laid over this process's environment), like the real one.
@@ -115,6 +117,10 @@ async function workerTurn(threadId, turnId, brief) {
   });
   await sleep(10);
   usage(threadId, turnId, 6000 + brief.length / 4);
+  if (/NOTOOLS/.test(task) && (/ALWAYS/.test(task) || !/ran no command/.test(brief))) {
+    say("BLOCKERS: Local terminal execution unavailable.\nSTATUS: BLOCKED");
+    return finish("completed");
+  }
   if (/NOCAP/.test(task)) {
     note("error", {
       threadId,
@@ -271,7 +277,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "thread/start": {
       const id = randomUUID();
       threads.set(id, { cwd: p.cwd, interrupted: false, turnId: null });
-      log({ threadStart: p });
+      log({ threadStart: p, threadId: id });
       note("thread/started", { thread: { id } });
       return send({ id: m.id, result: { thread: { id }, model: p.model, cwd: p.cwd } });
     }

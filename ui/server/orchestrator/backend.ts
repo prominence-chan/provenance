@@ -173,6 +173,8 @@ export type TraceEvent =
       reply: string;
       ms: number;
       servedBy: string | null;
+      /** The call's key in the router's usage ledger (absent from stand-ins that give none). */
+      session?: string;
     }
   | {
       type: "worker";
@@ -181,6 +183,11 @@ export type TraceEvent =
       calls: number;
       maxInputTokens: number;
       status: string;
+      /** The worker's harness thread: the key of its requests in the router's usage ledger. */
+      threadId: string | null;
+      /** The worker's last message as it wrote it, and how many commands it ran. */
+      report: string;
+      commands: number;
     };
 
 /** Ends the turn: "cap" with a plain message as the answer, the others as a failed turn. */
@@ -884,6 +891,7 @@ export class Run {
           reply: reply.text,
           ms: reply.ms,
           servedBy: reply.servedBy,
+          session: reply.session,
         });
         return reply.text;
       } catch (e) {

@@ -89,7 +89,12 @@ export function workerBrief(a: {
   later: MiniTask[];
   notes: string;
   cwd: string;
+  /** An earlier worker on this task ended without using a tool at all: say so. */
+  idleBefore?: boolean;
 }): string {
+  const idle = a.idleBefore
+    ? `\nRECORDED: an earlier worker on this task ran no command and changed no file before it stopped. The shell tool works on this machine: begin by running a command.`
+    : "";
   const later = a.later.length
     ? `\nLATER TASKS (other workers do these, not you): ${a.later.map((t) => clip(t.title, 80)).join("; ")}`
     : "";
@@ -97,7 +102,7 @@ export function workerBrief(a: {
 
 OVERALL GOAL: ${clip(a.goal, 400)}
 YOUR TASK (${a.index} of ${a.total}): ${a.task.title}
-DONE WHEN: ${a.task.done || "the task is complete and you have checked it"}${later}
+DONE WHEN: ${a.task.done || "the task is complete and you have checked it"}${later}${idle}
 
 NOTES FROM EARLIER TASKS:
 ${a.notes || "(none: you are first)"}

@@ -1,0 +1,19 @@
+Benchmark: Terminal-Bench 2.x task set (the 88 tasks in harbor-framework/terminal-bench `legacy/` whose last release is 2.1), repo commit ddfe18efdddb8fb7f924e8a1623a38eb0efb5b52.
+Written BEFORE any agent run.
+
+Docker is not usable on this Mac (daemon not running), so the pool is limited to tasks gradable without it. Eligibility rule (decided from Dockerfile, task.toml, tests, instruction only):
+ E1 official agent timeout <= 1500 s (so the 25-minute cap here is never tighter than the official one)
+ E2 base image is ubuntu/debian or python:3.13 (only Python 3.13 is on this Mac), and the Dockerfile only copies files, runs plain python/git/gcc setup, or pip-installs small wheels (numpy/scipy/pandas/matplotlib); no apt package missing on this Mac (chromium, coq, cobol, texlive, nginx, qemu, R, tmux, sleuthkit...), no torch/transformers/mujoco, no Linux ELF binary as the subject, no system paths (/etc, /usr/local, /var), no daemons
+ E3 the task does not need network at agent time (pip install / dataset download / git clone by the agent): the workspace-write preset runs commands without network
+ E4 the task's input is not an image
+ E5 tests reference only /app, /tests (rewritable to local folders) and tools present here
+Pool (20): see selection.json. Strata by the benchmark's difficulty label; quota easy 1 / medium 6 / hard 3 (the full set is 4/55/29).
+Sample: random.Random(20261123).sample(sorted(stratum), len) gives an order per stratum; take tasks in that order until the quota is filled, skipping a task only if local validation fails (pristine task must FAIL the grader and the task's own reference solution must PASS it in the local setup). Skips are decided before any agent run of that task and are listed in the report.
+Runs: per task, Experimental then Hyperexperimental (then stock if allowance remains), one at a time, tier `solstice`, sandbox workspace-write, approvalPolicy on-request (nobody approves: declined), 25 min wall limit, default orchestrator caps.
+
+Outcome of local validation (done before any agent run), walking the seeded order:
+ easy:   fix-git SKIP (its setup clones github.com/TheMikeMerrill/personal-site, which now answers 404) -> stratum empty, slot given to the next medium
+ medium: gcode-to-text SKIP (reference solution needs matplotlib/cv2), sqlite-db-truncate OK, modernize-scientific-stack OK, db-wal-recovery OK, regex-log OK, log-summary-date-ranges SKIP (reference solution needs GNU date), openssl-selfsigned-cert SKIP (reference solution fails 1 of 6 tests with this Mac's openssl), largest-eigenval SKIP (reference solution installs a module the separate grader interpreter cannot see), polyglot-c-py OK, constraints-scheduling OK, large-scale-text-editing OK
+ hard:   cancel-async-tasks OK, write-compressor SKIP (rustc not usable here: rustup has no default toolchain), model-extraction-relu-logits OK, polyglot-rust-c SKIP (rustc), sparql-university OK
+FINAL SUBSET (10): sqlite-db-truncate, modernize-scientific-stack, db-wal-recovery, regex-log, polyglot-c-py, constraints-scheduling, large-scale-text-editing (medium); cancel-async-tasks, model-extraction-relu-logits, sparql-university (hard)
+Run order (fixed): sqlite-db-truncate, cancel-async-tasks, modernize-scientific-stack, db-wal-recovery, model-extraction-relu-logits, regex-log, polyglot-c-py, sparql-university, constraints-scheduling, large-scale-text-editing; per task Experimental then Hyperexperimental.
