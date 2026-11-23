@@ -11,7 +11,7 @@ finished runs: outside every sandbox-writable root), BENCH_MODEL (the model name
 a tier, or a concrete id of the router's catalog such as chatgpt-web/luna, which the router serves
 strictly), BENCH_SERVED_BY (the one catalog id that may serve: every ledger entry of a run is checked
 against it and a run with any other is kept as invalid and awaits review; the call budget then counts
-that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS. A run whose turn failed on the router with almost nothing spent is retried
+that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS, BENCH_REQUIRE_AC (1: start no run while the Mac is on battery). A run whose turn failed on the router with almost nothing spent is retried
 after a pause (3 times), then once on pool/<tier>.
 """
 import collections, json, os, shutil, signal, subprocess, sys, time, urllib.request
@@ -91,6 +91,13 @@ def web_gate():
             waits = [a.get("blocked_for_s") or 0 for a in signed if a.get("blocked")]
             return "wait", (min(waits) if waits else 1800), brief
     return "unknown", 60, f"no web provider has {SERVED_BY}"
+
+
+def on_ac():
+    try:
+        return "AC Power" in subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return True  # not a Mac, or pmset not answering: nothing to wait for
 
 
 def ledger_rows(t0, t1):
@@ -274,6 +281,14 @@ def main():
                 if b["calls"] >= CALL_BUDGET or time.time() - b["first_run_at"] > HOURS * 3600:
                     log(f"budget reached (calls={b['calls']}, hours={(time.time() - b['first_run_at']) / 3600:.2f}): not starting {task} {mode}")
                     return
+                # BENCH_REQUIRE_AC=1: no run starts on battery (a laptop on battery sleeps under the
+                # run: every call then times out). Waits, a minute at a time, for AC power.
+                while os.environ.get("BENCH_REQUIRE_AC") and not on_ac():
+                    if os.path.exists(os.path.join(BENCH, "STOP")):
+                        log("STOP file: not starting more runs")
+                        return
+                    log(f"WAIT 60s before {task} {mode}: on battery")
+                    time.sleep(60)
                 # One web model must serve: wait while its accounts are blocked (at most 30 minutes a
                 # wait), stop when every account is signed out. Never another model.
                 waited = 0
