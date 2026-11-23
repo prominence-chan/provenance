@@ -1,0 +1,30 @@
+sqlite-db-truncate             | PASS 244s 5c 2293tok                   | PASS 547s 15c 4168ch/w2949tok          | PASS 646s 31c 5214ch                  
+cancel-async-tasks             | FAIL 120s 2c 2324tok                   | FAIL 847s 24c 4139ch/w2998tok          | FAIL 91s 10c 5152ch try2              
+modernize-scientific-stack     | PASS 215s 3c 4853tok try2              | PASS 840s 26c 4905ch/w3829tok try1     | FAIL 371s 42c 8001ch try2             
+db-wal-recovery                | FAIL 216s 5c 2384tok                   | PASS 565s 16c 4377ch/w3789tok          | PASS 253s 25c 7177ch try2             
+model-extraction-relu-logits   | FAIL 543s 8c 4240tok                   | FAIL 815s 18c 4351ch/w3079tok          | FAIL 477s 42c 7905ch try1             
+regex-log                      | PASS 89s 2c 2470tok                    | PASS 788s 21c 5433ch/w3132tok          | PASS 287s 5c 5066ch try1              
+polyglot-c-py                  | PASS 214s 4c 2393tok                   | PASS 1500s 28c 5591ch/w3740tok TIMEOUT | -                                     
+sparql-university              | FAIL 115s 3c 2613tok                   | FAIL 1090s 24c 6125ch/w2995tok         | -                                     
+constraints-scheduling         | PASS 108s 3c 3023tok                   | FAIL 708s 14c 5609ch/w3751tok          | -                                     
+large-scale-text-editing       | PASS 185s 9c 2656tok                   | FAIL 1336s 26c 6487ch/w4615tok         | -                                     
+stock pass 6 of 10 | calls 44 | wall 2049 s | ctx [] | retries 0
+experimental pass 5 of 10 | calls 212 | wall 9037 s | ctx [] | retries 6
+hyperexperimental pass 3 of 6 | calls 155 | wall 2125 s | ctx [] | retries 5
+invalid attempts:
+   modernize-scientific-stack stock try 0 calls 2 | invalid-bridge: the reply that ended the turn was not an answer (no tool block; the bridge did not nudge it). Router fixed by its owner and restarted 
+   modernize-scientific-stack stock try 1 calls 3 | invalid-bridge: ended on an announced next step with no tool block ("I’m correcting that and rerunning the checks."), not nudged; the request after th
+   modernize-scientific-stack experimental try 0 calls 16 | invalid-orchestrator: three workers stopped without running anything ("Local terminal execution unavailable"), the excuse went into the notes and the 
+   cancel-async-tasks hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:00); every call failed in the bridge with Page.goto: net::ERR_INTERNET_DISCONNECTED at https://ch
+   modernize-scientific-stack hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:00); every call failed in the bridge with Page.goto: net::ERR_INTERNET_DISCONNECTED at https://ch
+   db-wal-recovery hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:00); every call failed in the bridge with Page.goto: net::ERR_NETWORK_CHANGED at https://chatgpt.
+   model-extraction-relu-logits hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:00); every call failed in the bridge with Page.goto: net::ERR_NAME_NOT_RESOLVED at https://chatgp
+   regex-log hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:00); every call failed in the bridge with Page.goto: net::ERR_INTERNET_DISCONNECTED at https://ch
+   polyglot-c-py hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:20); every call failed in the bridge with Page.goto: Timeout 60000ms exceeded.). Try again in a w
+   sparql-university hyperexperimental try 0 calls 0 | invalid-network: the Mac lost its network (~08:20-09:20); every call failed in the bridge with Page.goto: net::ERR_NETWORK_CHANGED at https://chatgpt.
+   constraints-scheduling hyperexperimental try 0 calls 1 | invalid-network/bridge: started 09:16 while the network was still dropping; calls failed with net::ERR_INTERNET_DISCONNECTED, one got through, the nex
+   large-scale-text-editing hyperexperimental try 0 calls 3 | invalid-bridge: 3 Luna calls in 28 minutes; plain calls got no answer from the router within the 8-minute call timeout ("The router isn't answering (t
+   cancel-async-tasks hyperexperimental try 1 calls 1 | invalid-sleep: the Mac was asleep on battery for most of this run (pmset log: sleep/dark-wake cycles from ~08:20); calls timed out or never reached th
+   modernize-scientific-stack hyperexperimental try 1 calls 0 | invalid-sleep: the Mac was asleep on battery for most of this run (pmset log: sleep/dark-wake cycles from ~08:20); calls timed out or never reached th
+   db-wal-recovery hyperexperimental try 1 calls 1 | invalid-sleep: the Mac was asleep on battery for most of this run (pmset log: sleep/dark-wake cycles from ~08:20); calls timed out or never reached th
+all Luna calls in runs: 438 | served: {'chatgpt-web/luna'}

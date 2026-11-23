@@ -13,3 +13,9 @@ d. OPEN: text in curly braces is lost from plain (unfenced) Luna replies on the 
 
 Not a software fault: from about 08:20 the Mac was asleep on battery (11-12 %), dark-waking ~20 s every ~17 min. Every Hyperexperimental attempt after sqlite-db-truncate is invalid for that reason and released for rerun; none could be rerun before the 8-hour limit.
 Resume: plug the Mac in, then `sh luna/start.sh` from a copy under scratchpad/bench-luna/harness (paths inside), or rerun driver.py with the same environment; released runs are picked up first.
+
+Later the same day (18:21 - 18:53, on AC power):
+4. [driver] 024b5abf: BENCH_REQUIRE_AC=1 starts no run while the Mac is on battery.
+e. Brace loss worked around in the bridge (a `raw` fence the bridge removes): of 49 translate replies after it, 12 carried braces intact, none arrived fenced, one f-string still lost its {i} {v} (model-extraction try1).
+f. OPEN: text between "<" and ">" is dropped from unfenced plain replies and the reply ends at the next "<" (modernize try2, translate at 18:34:15); a think reply arrived with \n inside quoted strings turned into line breaks.
+g. 18:52: all three ChatGPT accounts reported signed out within three seconds, 280 s after a router start; the driver stopped as instructed. Hyperexperimental: 6 of 10 tasks run (3 pass); polyglot-c-py, sparql-university, constraints-scheduling, large-scale-text-editing not run.
