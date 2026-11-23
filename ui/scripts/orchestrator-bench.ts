@@ -65,6 +65,7 @@ const appServer = new AppServerProcess({
 const text = (s: string) => [{ type: "text", text: s, text_elements: [] }];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const startedAt = Date.now();
+const monoT0 = performance.now();
 
 type Result = {
   mode: string;
@@ -163,7 +164,7 @@ if (mode === "stock") {
     cwd,
     startedAt,
     endedAt: Date.now(),
-    wallMs: Date.now() - startedAt,
+    wallMs: Math.round(performance.now() - monoT0),
     status: turn.status,
     timedOut,
     error: turn.error?.message ?? null,
@@ -249,12 +250,14 @@ const th = (
 ).thread as { id: string };
 await call("turn/start", { threadId: th.id, input: text(job) });
 let timedOut = false;
+// The limit is measured on the monotonic clock: a wall-clock jump must not end a run.
+const monoStart = performance.now();
 while (!doneTurn) {
-  if (!timedOut && Date.now() - startedAt > limitMs) {
+  if (!timedOut && performance.now() - monoStart > limitMs) {
     timedOut = true;
     await call("turn/interrupt", { threadId: th.id }).catch(() => {});
   }
-  if (timedOut && Date.now() - startedAt > limitMs + 60_000) break;
+  if (timedOut && performance.now() - monoStart > limitMs + 60_000) break;
   await sleep(200);
 }
 const threadFile = path.join(out, "data", "threads", `${th.id}.json`);
@@ -273,7 +276,7 @@ finish({
   cwd,
   startedAt,
   endedAt: Date.now(),
-  wallMs: Date.now() - startedAt,
+  wallMs: Math.round(performance.now() - monoT0),
   status: turn.status,
   timedOut,
   error: turn.error?.message ?? null,
