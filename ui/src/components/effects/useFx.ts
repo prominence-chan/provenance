@@ -9,6 +9,7 @@
 //   ?fx=nova:idle       nova, idle (after the load flare)
 //   ?fx=nova:flare      same as idle; the page load plays the flare
 //   ?fx=claude          a fallback: claude or codex
+//   &fxspeed=0.1        slow motion (every effect's clock runs at that rate)
 //   __provenanceFx("spark", "flare")   replay spark's switch flare, then idle
 //   __provenanceFx("spark", "active")  / "idle"
 //   __provenanceFx(null)               back to the real state

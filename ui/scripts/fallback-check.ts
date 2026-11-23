@@ -10,7 +10,9 @@
 // runs like Auto); a Codex thread (exec --json, then exec resume); interrupt; a failed turn; a CLI
 // that went missing; threads read back from disk by a new backend. "Through Provenance": the
 // router pass-through's key (the same as provenance-core's), its arguments, and the check that
-// the router's pass-through answers.
+// the router's pass-through answers. Reasoning effort: the levels each CLI offers (Claude Code's
+// --help, Codex's catalog per model), --effort / -c model_reasoning_effort on the command line
+// (new and resumed runs), none for a turn without one (Default) or with an unknown one.
 
 import {
   appendFileSync,
@@ -80,6 +82,10 @@ check(
   claude.models.map((m) => m.id).join(",") === ",fable,opus,sonnet,haiku",
   "claude models: Default, the --help aliases, then the known list",
 );
+check(
+  claude.models.every((m) => m.efforts?.join(",") === "low,medium,high,xhigh,max"),
+  "claude efforts: what --help lists for --effort, for every model",
+);
 const codex = await checkCodex(env);
 check(
   codex.installed && codex.version === "9.9.9" && codex.account === "ChatGPT",
@@ -88,6 +94,18 @@ check(
 check(
   codex.models.map((m) => m.id).join(",") === ",fake-big,fake-small",
   "codex models from `codex debug models`, hidden left out",
+);
+const effortsOf = (id: string) => codex.models.find((m) => m.id === id);
+check(
+  effortsOf("fake-small")?.efforts?.join(",") === "low,medium,high" &&
+    effortsOf("fake-small")?.defaultEffort === "low" &&
+    effortsOf("fake-big")?.efforts?.join(",") === "low,medium,high,xhigh,max,ultra",
+  "codex efforts per model from the catalog, with its default",
+);
+check(
+  effortsOf("")?.efforts?.join(",") === "low,medium,high,xhigh,max,ultra" &&
+    !effortsOf("")?.defaultEffort,
+  "codex Default (its config's model, unknown here): every listed model's efforts",
 );
 check(
   !codex.provenance.ready && /Codex signed in/.test(codex.provenance.problem ?? ""),
@@ -296,11 +314,13 @@ check(
     !r.argv.includes("--resume"),
   "argv: model, acceptEdits for Auto, no resume on the first turn",
 );
+check(!r.argv.includes("--effort"), "no effort in turn/start (Default): no --effort");
 await c.call("turn/start", {
   threadId: th.id,
   input: text("And again"),
   sandboxPolicy: { type: "dangerFullAccess" },
   approvalPolicy: "never",
+  effort: "high",
 });
 turn = await c.turnDone(th.id);
 r = runs().at(-1)!;
@@ -314,6 +334,18 @@ check(
 check(
   r.argv.includes("--dangerously-skip-permissions"),
   "Full access maps to --dangerously-skip-permissions",
+);
+check(
+  r.argv.join(" ").includes("--effort high") && r.argv.includes("--resume"),
+  "turn/start effort high: --effort high, on the resumed session",
+);
+const resumed = (await c.call("thread/resume", { threadId: th.id })).result as {
+  reasoningEffort: string | null;
+  thread: { reasoningEffort: string | null };
+};
+check(
+  resumed.reasoningEffort === "high" && resumed.thread.reasoningEffort === "high",
+  "the thread reports the effort its last turn ran at",
 );
 check(
   (turn.items.at(-1) as { text: string }).text === "Done (resumed session).",
@@ -332,6 +364,10 @@ check(
     !r.argv.includes("dontAsk") &&
     !r.argv.includes("--dangerously-skip-permissions"),
   "Ask every time: Claude Code runs like Auto (acceptEdits), not read only, not full access",
+);
+check(
+  !r.argv.includes("--effort"),
+  "back to Default: the next turn sends no --effort (each turn says its own)",
 );
 const list = (await c.call("thread/list", { limit: 10 })).result as {
   data: { id: string; preview: string }[];
@@ -360,7 +396,7 @@ check(
 log("codex thread");
 const cs = (await c.call("thread/start", { model: "codex:", cwd: work, sandbox: "read-only" }))
   .result as { thread: { id: string } };
-await c.call("turn/start", { threadId: cs.thread.id, input: text("List files") });
+await c.call("turn/start", { threadId: cs.thread.id, input: text("List files"), effort: "xhigh" });
 turn = await c.turnDone(cs.thread.id);
 r = runs().at(-1)!;
 check(
@@ -371,6 +407,10 @@ check(
   "argv: exec --json, read only, -C folder, prompt on stdin",
 );
 check(
+  r.argv.join(" ").includes('-c model_reasoning_effort="xhigh"'),
+  'turn/start effort xhigh: -c model_reasoning_effort="xhigh"',
+);
+check(
   turn.items.map((i) => i.type).join(",") ===
     "userMessage,reasoning,commandExecution,fileChange,agentMessage",
   "reasoning, command, file change, message",
@@ -379,12 +419,16 @@ check(
   (turn.items[2] as { command: string }).command === "ls",
   "the shell wrapper is taken off the command",
 );
-await c.call("turn/start", { threadId: cs.thread.id, input: text("More") });
+await c.call("turn/start", { threadId: cs.thread.id, input: text("More"), effort: "low" });
 turn = await c.turnDone(cs.thread.id);
 r = runs().at(-1)!;
 check(
   r.argv.slice(0, 2).join(" ") === "exec resume" && r.argv.includes('sandbox_mode="read-only"'),
   "second turn: exec resume with the sandbox kept",
+);
+check(
+  r.argv.join(" ").includes('-c model_reasoning_effort="low"') && r.argv.at(-1) === "-",
+  "and the effort on the resumed run too",
 );
 check(
   (turn.items.at(-1) as { text: string }).text === "Done (resumed session).",
@@ -398,12 +442,16 @@ const ask = (
     approvalPolicy: "untrusted",
   })
 ).result as { thread: { id: string } };
-await c.call("turn/start", { threadId: ask.thread.id, input: text("Ask first") });
+await c.call("turn/start", { threadId: ask.thread.id, input: text("Ask first"), effort: "bogus" });
 turn = await c.turnDone(ask.thread.id);
 r = runs().at(-1)!;
 check(
   r.argv.slice(0, 5).join(" ") === "exec --json --skip-git-repo-check -s workspace-write",
   "Ask every time: Codex runs with workspace-write, like Auto",
+);
+check(
+  !r.argv.join(" ").includes("model_reasoning_effort"),
+  "an effort no CLI knows: none sent (Codex's own default)",
 );
 await backendArchive(ask.thread.id);
 

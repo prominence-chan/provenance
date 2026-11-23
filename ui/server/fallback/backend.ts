@@ -12,7 +12,9 @@
 // kept, and the next turn resumes it (claude --resume <id>, codex exec resume <id>). Permissions
 // follow the composer's preset: read only -> claude dontAsk / codex -s read-only; auto ->
 // acceptEdits / workspace-write; full access -> --dangerously-skip-permissions /
-// danger-full-access. The CLIs can't ask the page for approval, so "Ask every time" runs like
+// danger-full-access. The reasoning effort a turn/start carries (`effort`, the composer's choice)
+// goes on that run's command line: claude --effort <level>, codex -c model_reasoning_effort=
+// "<level>"; a turn without one runs at the CLI's own default. The CLIs can't ask the page for approval, so "Ask every time" runs like
 // Auto (the composer and the Fallbacks page warn about it), and anything the CLI itself would
 // still ask about is declined by the CLI (and shows as a failed tool row).
 //
@@ -34,6 +36,7 @@ import path from "node:path";
 import readline from "node:readline";
 import type { WebSocket } from "ws";
 import { parseFallbackModel } from "../../shared/fallback-api.ts";
+import { isFallbackEffort, type FallbackEffort } from "../../shared/orchestrator-api.ts";
 import { ClaudeStream } from "./claude-stream.ts";
 import { findCli } from "./cli.ts";
 import { CodexStream } from "./codex-stream.ts";
@@ -68,6 +71,8 @@ interface ThreadRecord {
   /** The CLI's own session / thread id (claude session_id, codex thread_id). */
   session: string | null;
   sandbox: Sandbox;
+  /** The reasoning effort its last turn ran at (null: the CLI's default). */
+  effort?: FallbackEffort | null;
   turns: TurnRecord[];
   archived?: boolean;
 }
@@ -267,7 +272,7 @@ export class FallbackBackend {
     const status = this.running.has(t.thread.id)
       ? { type: "active", activeFlags: [] }
       : { type: "idle" };
-    return { ...t.thread, status, turns: [] };
+    return { ...t.thread, reasoningEffort: t.effort ?? null, status, turns: [] };
   }
 
   private threadResponse(t: ThreadRecord): Json {
@@ -284,7 +289,7 @@ export class FallbackBackend {
       approvalsReviewer: "user",
       sandbox: { type: "workspaceWrite" },
       activePermissionProfile: null,
-      reasoningEffort: null,
+      reasoningEffort: t.effort ?? null,
       multiAgentMode: "explicitRequestOnly",
     };
   }
@@ -304,6 +309,8 @@ export class FallbackBackend {
     if (typeof p.cwd === "string" && p.cwd && isDir(p.cwd)) t.thread.cwd = p.cwd;
     if (p.sandboxPolicy || p.approvalPolicy)
       t.sandbox = sandboxFrom(policyMode(p.sandboxPolicy) ?? t.sandbox, p.approvalPolicy);
+    // Each turn says its effort (the page sends its choice every time); none: the CLI's default.
+    t.effort = isFallbackEffort(p.effort) ? p.effort : null;
 
     const now = Math.floor(Date.now() / 1000);
     const turn: TurnRecord = {
@@ -503,20 +510,25 @@ export function claudeArgs(t: {
   model: string;
   session: string | null;
   sandbox: Sandbox;
+  effort?: FallbackEffort | null;
 }): string[] {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   if (t.sandbox === "danger-full-access") args.push("--dangerously-skip-permissions");
   else args.push("--permission-mode", t.sandbox === "read-only" ? "dontAsk" : "acceptEdits");
   if (t.model) args.push("--model", t.model);
+  if (t.effort) args.push("--effort", t.effort);
   if (t.session) args.push("--resume", t.session);
   return args;
 }
 
 export function codexArgs(
-  t: { model: string; session: string | null; sandbox: Sandbox },
+  t: { model: string; session: string | null; sandbox: Sandbox; effort?: FallbackEffort | null },
   cwd: string,
 ): string[] {
-  const model = t.model ? ["-m", t.model] : [];
+  const model = [
+    ...(t.model ? ["-m", t.model] : []),
+    ...(t.effort ? ["-c", `model_reasoning_effort="${t.effort}"`] : []),
+  ];
   if (t.session)
     return [
       "exec",

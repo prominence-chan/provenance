@@ -1739,6 +1739,103 @@ button.turn-models-list:hover .turn-models-more {
   width: 13px;
 }
 
+/* ---- composer slot: a fallback's reasoning effort, or a tier's orchestrator ----
+   (ComposerSlot.tsx) The model picker's parts: a quiet button, a list above the composer. */
+.slot-picker {
+  position: static;
+  flex-shrink: 0;
+}
+.slot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.slot-btn > svg:last-child {
+  color: var(--muted);
+  transition: transform var(--dur) var(--ease);
+}
+.slot-btn.open > svg:last-child {
+  transform: rotate(180deg);
+}
+.slot-btn .slot-label.quiet {
+  color: var(--muted);
+}
+/* A thread keeps the orchestrator it was started with: shown, not a control. */
+.slot-btn.readonly {
+  cursor: default;
+  color: var(--muted);
+}
+.slot-btn.readonly:hover {
+  background: transparent;
+}
+.slot-btn .orch-glyph {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.slot-menu {
+  width: 212px;
+}
+.slot-menu-orchestrator {
+  width: max-content;
+  max-width: min(380px, calc(100vw - 40px));
+}
+.slot-menu-orchestrator .meta {
+  white-space: normal;
+}
+.slot-menu-head {
+  padding: 5px 8px 4px;
+}
+.slot-option {
+  gap: 10px;
+  padding: 5px 8px;
+}
+.slot-menu-effort .slot-option {
+  height: 28px;
+  padding: 0 8px;
+}
+.slot-menu-effort .tier-option-name {
+  font-weight: 400;
+}
+.slot-option.group {
+  position: relative;
+  margin-top: 9px;
+}
+.slot-option.group::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: -5px;
+  border-top: 1px solid var(--border);
+}
+.slot-option-glyph {
+  width: 20px;
+  display: inline-flex;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+.slot-option[aria-selected="true"] .slot-option-glyph {
+  color: var(--tier-color, var(--text));
+}
+/* Not a tier: the selected name stays plain text (no tier gradient). */
+.slot-menu-orchestrator .tier-option[aria-selected="true"] .tier-option-name {
+  background: none;
+  color: var(--text);
+}
+.slot-menu-orchestrator .tier-option-check {
+  color: var(--text-2);
+}
+.effort-meter {
+  flex-shrink: 0;
+}
+.effort-meter rect.off {
+  fill: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+.effort-meter rect.on {
+  fill: var(--tier-color, var(--text-2));
+}
+
 /* ---- notices ----------------------------------------------------------- */
 .notices {
   position: fixed;
@@ -1830,6 +1927,10 @@ select.picker {
     max-width: 64px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* The slot keeps its glyph (the meter, the orchestrator's drawing); the word goes. */
+  .slot-btn .slot-label {
+    display: none;
   }
   .tool-dur {
     display: none;

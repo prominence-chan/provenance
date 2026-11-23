@@ -8,6 +8,7 @@
 
 import type { FallbacksInfo } from "../../shared/fallback-api";
 import { threadBrief } from "../fallback/brief";
+import { chosenEffort } from "../fallback/effort";
 import {
   backendOfModel,
   backendOfThreadId,
@@ -458,6 +459,8 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
   // Only override an existing thread's cwd when the user changed it.
   const cwdOverride = threadId && cwd === getState().views[threadId]?.cwd ? null : cwd || null;
   const client = clients[target];
+  // A fallback's reasoning effort rides on every turn, so a resumed thread keeps it.
+  const effort = chosenEffort(settings, getState().fallbackInfo);
   setState((s) => ({ ...s, sending: true }));
   try {
     if (target !== "main") await ensureBackend(target);
@@ -474,6 +477,7 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
       cwd: cwdOverride,
       approvalPolicy: settings.approvalPolicy,
       sandboxPolicy: sandboxPolicyFor(settings.sandbox),
+      ...(effort ? { effort } : {}),
     });
     const tid = threadId;
     setState((s) => {

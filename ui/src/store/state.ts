@@ -1,7 +1,14 @@
 // Shape of the whole UI state. Protocol objects (Thread, ThreadItem, ...) are
 // stored as-is from app-server; the "View" types only add what the UI needs on top.
 
-import type { FallbacksInfo } from "../../shared/fallback-api";
+import type { FallbackCli, FallbacksInfo } from "../../shared/fallback-api";
+import {
+  DEFAULT_ORCHESTRATOR,
+  isFallbackEffort,
+  isOrchestrator,
+  type FallbackEffort,
+  type Orchestrator,
+} from "../../shared/orchestrator-api";
 import type { SourceNeeds, WireSource } from "../../shared/router-api";
 import type { BackendId } from "../fallback/model";
 import type {
@@ -105,6 +112,10 @@ export interface Settings {
   approvalPolicy: Extract<AskForApproval, string>;
   sandbox: SandboxMode;
   fallbacks: FallbackPrefs;
+  /** Who drives new threads on the tiers (shared/orchestrator-api.ts); a thread keeps its own. */
+  orchestrator: Orchestrator;
+  /** Reasoning effort per fallback (Codex's covers both ways it runs); null: the CLI's default. */
+  fallbackEffort: Record<FallbackCli, FallbackEffort | null>;
 }
 
 export interface Notice {
@@ -156,6 +167,8 @@ export function saveSettings(s: Settings): void {
 }
 
 export function initialState(): AppState {
+  const saved = loadSettings();
+  const effort = (saved.fallbackEffort ?? {}) as Partial<Record<FallbackCli, unknown>>;
   return {
     socketOpen: false,
     bridge: null,
@@ -170,8 +183,13 @@ export function initialState(): AppState {
       cwd: "",
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
-      ...loadSettings(),
-      fallbacks: { claude: false, codex: "off", ...loadSettings().fallbacks },
+      ...saved,
+      fallbacks: { claude: false, codex: "off", ...saved.fallbacks },
+      orchestrator: isOrchestrator(saved.orchestrator) ? saved.orchestrator : DEFAULT_ORCHESTRATOR,
+      fallbackEffort: {
+        claude: isFallbackEffort(effort.claude) ? effort.claude : null,
+        codex: isFallbackEffort(effort.codex) ? effort.codex : null,
+      },
     },
     tiers: ["nova", "solstice", "ember", "spark"],
     sources: {},

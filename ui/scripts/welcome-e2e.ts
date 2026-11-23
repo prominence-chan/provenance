@@ -18,6 +18,10 @@
 // neither CLI: "Not installed" with how to get each, and the picker's muted rows. Then when the
 // welcome opens by itself: sites signed in but no fallback -> it opens, reading as partly set up,
 // and "Finish setting up" leads to what is left until nothing is; everything set up -> it doesn't.
+// The composer's slot after the model picker: a fallback's reasoning effort (only the efforts its
+// model takes; chosen by keyboard and by pointer; on Claude Code's command line, in Codex through
+// Provenance's turn/start, nothing for Default; kept per fallback across a reload), and on a tier
+// the orchestrator (read only in an existing thread; chosen for new threads, kept).
 
 import {
   appendFileSync,
@@ -68,6 +72,8 @@ const runs = () =>
           text?: string;
           home?: string;
           method?: string;
+          effort?: string | null;
+          hasEffort?: boolean;
         },
     );
 const nodeDir = path.dirname(process.execPath);
@@ -307,6 +313,33 @@ try {
   await shot(page, "picker-claude-selected");
   await page.keyboard.press("Escape");
 
+  // The slot after the picker: Claude Code's reasoning effort, what its --effort takes.
+  const slotBtn = page.locator(".composer .slot-btn");
+  check(
+    (await page.locator(".composer .slot-effort").count()) === 1 &&
+      (await page.locator(".composer .slot-orchestrator").count()) === 0,
+    "a fallback picked: the slot is the effort control, not the orchestrator",
+  );
+  check(
+    (await slotBtn.innerText()).trim() === "Effort" &&
+      (await slotBtn.getAttribute("data-value")) === "default",
+    "at Default it reads Effort",
+  );
+  await slotBtn.click();
+  await page.waitForSelector(".slot-menu-effort");
+  const levels = await page.locator(".slot-menu-effort .tier-option-name").allInnerTexts();
+  check(
+    levels.join(",") === "Default,Low,Medium,High,Extra high,Max",
+    `Claude Code's efforts: Default and what --effort takes (${levels.join(", ")})`,
+  );
+  check(
+    await colourIs(page, '.slot-menu-effort [aria-selected="true"] .tier-option-check', "--fallback-claude"),
+    "the effort list takes Claude Code's colour",
+  );
+  await shot(page, "effort-claude-open");
+  await page.keyboard.press("Escape");
+  check((await page.locator(".slot-menu").count()) === 0, "Escape closes it");
+
   // ---- 3. a Claude Code thread ---------------------------------------------------------
   log("claude thread");
   const perms = page.locator(".composer .picker-wrap select.picker");
@@ -356,6 +389,35 @@ try {
     r.argv.includes("acceptEdits") && !r.argv.includes("dontAsk"),
     "Ask every time ran it like Auto (acceptEdits), not read only",
   );
+  check(!r.argv.includes("--effort"), "Default effort: no --effort");
+  // Choose High by keyboard, as in the model picker: arrow opens, arrows move, Enter picks.
+  await slotBtn.focus();
+  await page.keyboard.press("ArrowUp");
+  await page.waitForSelector(".slot-menu-effort");
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  check(
+    (await slotBtn.innerText()).trim() === "High" &&
+      (await page.locator(".slot-menu").count()) === 0,
+    "keyboard: High chosen, the list closed",
+  );
+  check(
+    await page.evaluate(() => {
+        const r = document.querySelector(".composer .slot-btn .effort-meter rect.on");
+        const probe = document.createElement("span");
+        probe.style.color = "var(--fallback-claude)";
+        document.body.append(probe);
+        const want = getComputedStyle(probe).color;
+        probe.remove();
+        return !!r && getComputedStyle(r).fill === want;
+      }),
+    "its meter in Claude Code's colour",
+  );
+  check(
+    (await page.evaluate(() => JSON.parse(localStorage.getItem("provenance-ui.settings") ?? "{}")))
+      .fallbackEffort?.claude === "high",
+    "kept in settings for Claude Code",
+  );
   await page.fill(".composer textarea", "Now the other one");
   await page.keyboard.press("Enter");
   await page.waitForSelector('.turn .agent-message:has-text("Done (resumed session).")', {
@@ -365,6 +427,11 @@ try {
     .filter((x) => x.cli === "claude")
     .at(-1)!;
   check(r.argv.includes("--resume"), "the second turn resumed the session");
+  check(
+    r.argv.join(" ").includes("--effort high"),
+    "with --effort high on the resumed session (the effort rides on every turn)",
+  );
+  await shot(page, "effort-claude-high");
 
   // ---- 4. the "too large" suggestion ----------------------------------------------------
   log("suggestion");
@@ -379,6 +446,13 @@ try {
     /solstice/.test(await page.locator(".tier-picker-btn").innerText()),
     "opening a tier thread points the picker back at its tier",
   );
+  check(
+    (await page.locator(".composer .slot-orchestrator .slot-btn.readonly").innerText()).trim() ===
+      "Provenance" && (await page.locator(".composer .slot-effort").count()) === 0,
+    "a tier thread: the slot shows its orchestrator, Provenance, read only",
+  );
+  await page.click(".composer .slot-btn", { force: true });
+  check((await page.locator(".slot-menu").count()) === 0, "and it doesn't open there");
   const note = await page.locator(".strain-note").innerText();
   check(
     /grown too large for the free models/.test(note) &&
@@ -437,6 +511,26 @@ try {
     /Codex\s*· Default/.test(await page.locator(".tier-picker-btn").innerText()),
     "the picker follows the new thread",
   );
+  check(pv.hasEffort === false, "Codex at Default effort: turn/start carries no effort");
+  await page.click(".composer .slot-btn");
+  await page.waitForSelector(".slot-menu-effort");
+  const pvLevels = await page.locator(".slot-menu-effort .tier-option-name").allInnerTexts();
+  check(
+    pvLevels.join(",") === "Default,Low,Medium,High,Extra high,Max,Ultra",
+    `Codex through Provenance, its default model: every listed model's efforts (${pvLevels.join(", ")})`,
+  );
+  await page.click('.slot-menu-effort [data-value="max"]');
+  await page.fill(".composer textarea", "Go deeper");
+  await page.keyboard.press("Enter");
+  for (let i = 0; i < 100 && !runs().some((x) => x.text === "Go deeper"); i++)
+    await page.waitForTimeout(100);
+  const pv2 = runs()
+    .filter((x) => x.cli === "provenance" && x.method === "turn/start")
+    .at(-1)!;
+  check(
+    pv2.text === "Go deeper" && pv2.effort === "max",
+    `pointer: Max chosen; turn/start carries effort "max" (${pv2.effort})`,
+  );
   check(
     (await page.locator('.tier-picker-btn[data-fallback="codex"]').count()) === 1 &&
       (await page.locator('.composer-shell[data-fallback="codex"]').count()) === 1 &&
@@ -448,6 +542,12 @@ try {
   );
   check(true, "the new thread is named after the one it continues");
   await shot(page, "continued-in-codex");
+  await page.reload();
+  await page.waitForSelector(".composer .slot-effort .slot-btn");
+  check(
+    (await page.locator(".composer .slot-btn").innerText()).trim() === "Max",
+    "after a reload Codex's effort is still Max",
+  );
   await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
   await page.waitForSelector(".strain-note");
   await page.locator(".strain-note").getByRole("button", { name: "Dismiss" }).click();
@@ -457,6 +557,59 @@ try {
   await page.waitForSelector('.agent-message:has-text("Looking at the tokenizer again.")');
   await page.waitForTimeout(800);
   check((await page.locator(".strain-note").count()) === 0, "and stays dismissed for that thread");
+
+  // ---- 4b. the orchestrator, for new threads on a tier --------------------------------
+  log("orchestrator");
+  await page.getByRole("button", { name: "New thread", exact: true }).first().click();
+  const orch = page.locator(".composer .slot-orchestrator .slot-btn");
+  await orch.waitFor();
+  check(
+    (await orch.innerText()).trim() === "Provenance" &&
+      (await orch.getAttribute("aria-disabled")) === null,
+    "a new thread on a tier: the orchestrator, Provenance by default, to choose",
+  );
+  await orch.click();
+  await page.waitForSelector(".slot-menu-orchestrator");
+  const orchRows = await page.locator(".slot-menu-orchestrator .slot-option").allInnerTexts();
+  check(
+    orchRows.length === 3 &&
+      /Provenance\s+One thread/.test(orchRows[0]) &&
+      /Experimental\s+Splits the task/.test(orchRows[1]) &&
+      /Hyperexperimental\s+Every step/.test(orchRows[2]),
+    "three choices, each with its one line",
+  );
+  await page.hover('.slot-menu-orchestrator [data-value="experimental"]');
+  await shot(page, "orchestrator-open");
+  await page.click('.slot-menu-orchestrator [data-value="experimental"]');
+  check((await orch.innerText()).trim() === "Experimental", "Experimental chosen");
+  await page.reload();
+  await page.waitForSelector(".composer .slot-orchestrator .slot-btn");
+  check(
+    (await page.locator(".composer .slot-orchestrator .slot-btn").innerText()).trim() ===
+      "Experimental" &&
+      (await page.evaluate(() => JSON.parse(localStorage.getItem("provenance-ui.settings") ?? "{}")))
+        .orchestrator === "experimental",
+    "kept as settings.orchestrator across a reload",
+  );
+  await page.locator(".thread-title", { hasText: /^Add a README section$/ }).click();
+  await page.waitForSelector('.agent-message:has-text("Added it.")');
+  check(
+    (await page.locator(".composer .slot-orchestrator .slot-btn.readonly").innerText()).trim() ===
+      "Provenance",
+    "an existing thread still shows the orchestrator it was started with",
+  );
+  await page.evaluate(() => {
+    const s = JSON.parse(localStorage.getItem("provenance-ui.settings") ?? "{}");
+    localStorage.setItem("provenance-ui.settings", JSON.stringify({ ...s, orchestrator: "bogus" }));
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "New thread", exact: true }).first().click();
+  await page.waitForSelector(".composer .slot-orchestrator .slot-btn");
+  check(
+    (await page.locator(".composer .slot-orchestrator .slot-btn").innerText()).trim() ===
+      "Provenance",
+    "a saved value that isn't an orchestrator loads as the default",
+  );
 
   // ---- 5. Models & accounts has the fallbacks too; narrow window ----------------------
   log("settings");

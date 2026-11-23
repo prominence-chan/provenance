@@ -10,6 +10,8 @@
 //                     (server/fallback/codex-route.ts)
 // <model> is empty for the CLI's own default.
 
+import type { FallbackEffort } from "./orchestrator-api.ts";
+
 export type FallbackCli = "claude" | "codex";
 
 /** What a CLI's health check found. Nothing here is a secret: no tokens, no e-mail. */
@@ -35,6 +37,14 @@ export interface FallbackModel {
   label: string;
   /** Marked default by the CLI itself. */
   isDefault?: boolean;
+  /**
+   * Reasoning efforts it takes, lowest first (Claude Code: what its --effort takes, the same for
+   * every model; Codex: the catalog's per model, and for "Default" every listed model's). Empty:
+   * the CLI takes none (an older Claude Code), so nothing is offered.
+   */
+  efforts?: FallbackEffort[];
+  /** The effort it runs at when none is sent (Codex's catalog says; unknown otherwise). */
+  defaultEffort?: FallbackEffort | null;
 }
 
 export interface FallbacksInfo {

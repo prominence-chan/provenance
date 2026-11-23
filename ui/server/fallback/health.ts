@@ -6,6 +6,11 @@
 // installed" + how to get it), never an error.
 
 import type { CliHealth, FallbackModel, FallbacksInfo } from "../../shared/fallback-api.ts";
+import {
+  FALLBACK_EFFORTS,
+  isFallbackEffort,
+  type FallbackEffort,
+} from "../../shared/orchestrator-api.ts";
 import { findCli, run } from "./cli.ts";
 import { codexHomeEnv, codexLoginHome, prepareCodexHome } from "./codex-home.ts";
 import { checkCodexRoute, type RouterRef } from "./codex-route.ts";
@@ -88,8 +93,23 @@ export async function checkClaude(env: FallbackEnv): Promise<FallbacksInfo["clau
     h.problem = "Not signed in";
     h.fix = "Run `claude` in a terminal once and sign in.";
   }
-  return { ...h, models: claudeModels(help.stdout) };
+  const efforts = claudeEfforts(help.stdout);
+  return { ...h, models: claudeModels(help.stdout).map((m) => ({ ...m, efforts })) };
 }
+
+/**
+ * The levels Claude Code's `--effort <level>` takes, as its own --help lists them ("Effort level
+ * for the current session (low, medium, high, xhigh, max)"); none for a CLI without the flag.
+ */
+export function claudeEfforts(help: string): FallbackEffort[] {
+  const para = /--effort <level>([\s\S]*?)(?:\n\s{2}-|\n\n|$)/.exec(help)?.[1];
+  if (para === undefined) return [];
+  const listed = /\(([^)]*)\)/.exec(para)?.[1] ?? "";
+  return sortEfforts(listed.split(/[\s,]+/).filter(isFallbackEffort));
+}
+
+const sortEfforts = (list: FallbackEffort[]) =>
+  [...new Set(list)].sort((a, b) => FALLBACK_EFFORTS.indexOf(a) - FALLBACK_EFFORTS.indexOf(b));
 
 /** Aliases the CLI's own --help names for --model ("e.g. 'fable', 'opus', or 'sonnet'"), then the known list. */
 export function claudeModels(help: string): FallbackModel[] {
@@ -159,17 +179,38 @@ export function loginKind(text: string): string | null {
   return null;
 }
 
-/** `codex debug models` / `provenance debug models` JSON -> the listed (not hidden) models. */
+/**
+ * `codex debug models` / `provenance debug models` JSON -> the listed (not hidden) models, each
+ * with the reasoning efforts the catalog says it supports and its default. "Default" (no -m: the
+ * model Codex's own config picks, which the page doesn't read) offers every listed model's.
+ */
 export function catalogModels(json: string): FallbackModel[] | null {
   try {
     const d = JSON.parse(json) as {
-      models?: { slug?: string; display_name?: string; visibility?: string; priority?: number }[];
+      models?: {
+        slug?: string;
+        display_name?: string;
+        visibility?: string;
+        priority?: number;
+        supported_reasoning_levels?: { effort?: unknown }[];
+        default_reasoning_level?: unknown;
+      }[];
     };
-    const list = (d.models ?? [])
+    const list: FallbackModel[] = (d.models ?? [])
       .filter((m) => typeof m.slug === "string" && m.visibility !== "hide")
       .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999))
-      .map((m) => ({ id: m.slug!, label: m.display_name || m.slug! }));
-    return list.length ? [DEFAULT, ...list] : null;
+      .map((m) => ({
+        id: m.slug!,
+        label: m.display_name || m.slug!,
+        efforts: sortEfforts(
+          (m.supported_reasoning_levels ?? []).map((l) => l?.effort).filter(isFallbackEffort),
+        ),
+        defaultEffort: isFallbackEffort(m.default_reasoning_level)
+          ? m.default_reasoning_level
+          : null,
+      }));
+    if (!list.length) return null;
+    return [{ ...DEFAULT, efforts: sortEfforts(list.flatMap((m) => m.efforts ?? [])) }, ...list];
   } catch {
     return null;
   }
