@@ -172,7 +172,10 @@ export async function runExperimental(run: Run): Promise<void> {
     const rep = parseReport(res.report);
     const sec = reportSections(res.report);
     lastReport = res.report;
-    if (res.status === "completed" && rep.status === "done") {
+    // A report is a claim; the last command's exit code is a record. "Done" over a failed last
+    // command is treated as not done.
+    const contradicted = rep.status === "done" && res.lastFailure !== null;
+    if (res.status === "completed" && rep.status === "done" && !contradicted) {
       addDone(notes, task.title, sec.result || "done");
       finished.push(task);
       run.save();
@@ -182,12 +185,16 @@ export async function runExperimental(run: Run): Promise<void> {
     const why =
       res.status === "failed"
         ? `the worker stopped: ${res.error ?? "no reason given"}`
-        : sec.blockers ||
-          sec.result ||
-          `it ended without a report${res.lastFailure ? `; its last command failed: ${clip(res.lastFailure.cmd, 100)}` : ""}`;
+        : contradicted
+          ? `it reported done, but its last command failed: ${clip(res.lastFailure!.cmd, 100)}`
+          : sec.blockers ||
+            sec.result ||
+            `it ended without a report${res.lastFailure ? `; its last command failed: ${clip(res.lastFailure.cmd, 100)}` : ""}`;
     // With no report to go on, the planner gets what the failed command printed.
     const evidence =
-      res.report ||
+      (contradicted
+        ? `${res.report}\n\n(recorded) Its last command, ${clip(res.lastFailure!.cmd, 160)}, failed with:\n${res.lastFailure!.output}`
+        : res.report) ||
       res.error ||
       (res.lastFailure
         ? `(no report) The last command, ${clip(res.lastFailure.cmd, 160)}, failed with:\n${res.lastFailure.output}`

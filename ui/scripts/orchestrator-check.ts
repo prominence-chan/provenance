@@ -333,6 +333,7 @@ function answer(role: string, whole: string): string | number {
       if (/nocap/.test(input)) return "TASK 1: NOCAP";
       if (/calls/.test(input)) return "TASK 1: LOOPCALLS";
       if (/silent/.test(input)) return "TASK 1: IDLETASK";
+      if (/claims/.test(input)) return "TASK 1: FAILLAST run the check";
       return "TASK 1: Follow up on it\nDONE WHEN: done";
     case "revise":
       if (/BLOCKME forever/.test(input)) return "TASK 1: BLOCKME forever\nDONE WHEN: never";
@@ -796,6 +797,17 @@ rec = stored(bl.id);
 check(
   rec.notes.problems.some((p) => /frobnicate/.test(p)) && rec.notes.done.length === 3,
   "the notes keep the problem and the three finished tasks",
+);
+
+seen.length = 0;
+const li = await start("experimental");
+await say(li.id, "claims done");
+turn = await turnDone(li.id);
+check(
+  seen.map((s) => s.role).join(",") === "planner,revise,final" &&
+    /reported done, but its last command failed: python3 check\.py FAILLAST/.test(seen[1].input) &&
+    /ImportError: no module named frob/.test(seen[1].input),
+  "a worker that says DONE over a failed last command is not believed: the planner gets the command and its output",
 );
 
 log("experimental: caps");

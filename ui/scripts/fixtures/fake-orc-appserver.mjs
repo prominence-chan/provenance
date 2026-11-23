@@ -157,6 +157,15 @@ async function workerTurn(threadId, turnId, brief) {
       return finish("completed");
     }
   }
+  if (/FAILLAST/.test(task)) {
+    // says done over a command that failed
+    item(
+      "item/completed",
+      cmdItem(cid, command, th.cwd, "failed", "ImportError: no module named frob\n", 1),
+    );
+    say("RESULT: all good\nSTATUS: DONE");
+    return finish("completed");
+  }
   note("item/commandExecution/outputDelta", { threadId, turnId, itemId: cid, delta: "out\n" });
   item("item/completed", cmdItem(cid, command, th.cwd, "completed", "out\n", 0));
   const fid = randomUUID();
