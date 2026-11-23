@@ -10,6 +10,8 @@
 //   ?fx=nova:flare      same as idle; the page load plays the flare
 //   ?fx=claude          a fallback: claude or codex
 //   &fxspeed=0.1        slow motion (every effect's clock runs at that rate)
+//   &fxuptime=86400     start every effect's clock as if the app had been open that long
+//                       (seconds): for checking that nothing degrades over days
 //   __provenanceFx("spark", "flare")   replay spark's switch flare, then idle
 //   __provenanceFx("spark", "active")  / "idle"
 //   __provenanceFx(null)               back to the real state
@@ -97,6 +99,11 @@ function identity(model: string | null | undefined): Pick<FxState, "tier" | "fal
 export function prefersReducedMotion(): boolean {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
+
+/** Dev only (?fxuptime=s): seconds every effect's clock starts at. 0 in production. */
+export const devUptime = import.meta.env.DEV
+  ? Number(new URLSearchParams(location.search).get("fxuptime")) || 0
+  : 0;
 
 /** prefers-reduced-motion, kept live (the OS setting can change while the app is open). */
 export function useReducedMotion(): boolean {
