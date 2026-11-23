@@ -33,9 +33,17 @@
 // prefers-reduced-motion, or without WebGL2, nothing runs and effects.css draws a static tier
 // tint instead.
 //
-// The fallbacks (Claude Code, Codex) have an effect too: ember's style (a layer's `tier`) drawn
-// in their own colour ramp (its `id`, a palette slot of its own), so a selected fallback looks
-// as selected as a tier without a style of its own.
+// The fallbacks (Claude Code, Codex) are terminal coding agents, not flames, and have styles of
+// their own, in their own colour ramps:
+//   claude    write head: a block cursor travels the composer's outline a character cell at a
+//             time, leaving a short dashed trail that cools behind it; on switch the cursor
+//             blinks twice on the top edge, then types the whole outline out both ways round;
+//             while active, two more heads join and they step faster, with longer trails
+//   codex     raster: faint scan lines above the top edge, in the composer's width; a refresh
+//             line rolls up through them every few seconds and leaves them glowing like
+//             phosphor; on switch one bright refresh climbs high and fades; while active the
+//             sweeps come faster and short runs of data slide along the lines
+// Both are discrete where the tiers are organic: they read as a screen, not a fire.
 import { useEffect, useRef } from "react";
 import { useTheme } from "../../theme/theme";
 import type { FallbackCli } from "../../../shared/fallback-api";
@@ -92,18 +100,11 @@ const TIER_IDS: TierId[] = ["spark", "ember", "solstice", "nova"];
 /** Point palette slot for nova's off-palette debris (violet / cyan). */
 const OFF = 4;
 
-/** What an effect is for: a tier, or a fallback. */
+/** What an effect is for, and which style draws it: a tier, or a fallback. */
 type FxId = TierId | FallbackCli;
 const FALLBACK_IDS: FallbackCli[] = ["claude", "codex"];
-/** Which style draws it: a tier's own; a fallback's, ember's (hairline cracks, in its colour). */
-const STYLE: Record<FxId, TierId> = {
-  spark: "spark",
-  ember: "ember",
-  solstice: "solstice",
-  nova: "nova",
-  claude: "ember",
-  codex: "ember",
-};
+/** The shader's uTier for each style. */
+const STYLE_INDEX: Record<FxId, number> = { ...TIER_INDEX, claude: 4, codex: 5 };
 /** Its colour ramp's palette slot: the tiers', OFF, then the fallbacks'. */
 const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6 };
 
@@ -113,13 +114,16 @@ const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6 };
  * gone by `len`. Each flare stretches all of it by a random 0.88..1.14.
  */
 const FLARE: Record<
-  TierId,
+  FxId,
   { pre: number; rise: number; k1: number; k2: number; m: number; len: number }
 > = {
   spark: { pre: 0, rise: 0.45, k1: 2.0, k2: 0.8, m: 0.6, len: 3.0 },
   ember: { pre: 0, rise: 0.7, k1: 1.3, k2: 0.55, m: 0.55, len: 4.2 },
   solstice: { pre: 0, rise: 0.9, k1: 0.8, k2: 0.38, m: 0.5, len: 6.5 },
   nova: { pre: 1.35, rise: 0.1, k1: 1.5, k2: 0.42, m: 0.6, len: 6.5 },
+  // Claude Code's charge is the cursor blinking twice before it types the outline.
+  claude: { pre: 0.45, rise: 0.25, k1: 1.5, k2: 0.5, m: 0.6, len: 4.6 },
+  codex: { pre: 0, rise: 0.25, k1: 1.6, k2: 0.55, m: 0.6, len: 4.4 },
 };
 
 const QUAD_VS = `#version 300 es
@@ -148,7 +152,8 @@ uniform float uSeed;    // per-flare random, 0..100
 uniform float uAlphaK, uGain, uHaze, uRadius, uTopY;
 uniform vec2 uRes;
 uniform int uMode;      // 0 = composer band, 1 = header filament, 2 = nova eruption
-uniform int uTier;      // 0 spark, 1 ember, 2 solstice, 3 nova
+uniform int uTier;      // 0 spark, 1 ember, 2 solstice, 3 nova, 4 claude, 5 codex
+uniform float uPhase;   // claude: cells the write head has stepped; codex: refresh sweeps run
 uniform vec4 uRect;     // composer x, y, w, h (CSS px)
 uniform vec4 uBand;     // the quad being drawn, x0 y0 x1 y1: everything fades out before it
 uniform vec3 uC0, uC1, uC2, uC3, uOff1, uOff2, uDusk;
@@ -240,6 +245,28 @@ float bandWin(vec2 p) {
   float m = 16.0;
   return smoothstep(uBand.x, uBand.x + m, p.x) * smoothstep(uBand.z, uBand.z - m, p.x)
        * smoothstep(uBand.y, uBand.y + m, p.y) * smoothstep(uBand.w, uBand.w - m, p.y);
+}
+// Arc length along the composer's border for a point near it, clockwise from the top edge's
+// left end (as perim() in the engine); L = the whole perimeter.
+float perimS(vec2 p, out float L) {
+  float R = uRadius;
+  vec2 q = p - uRect.xy;
+  float a = max(uRect.z - 2.0 * R, 0.0), b = max(uRect.w - 2.0 * R, 0.0), qa = 1.5707963 * R;
+  L = 2.0 * a + 2.0 * b + 4.0 * qa;
+  vec2 c0 = clamp(q, vec2(R), vec2(R + a, R + b));
+  vec2 n = q - c0;
+  if (n.x == 0.0 && n.y == 0.0) {
+    vec2 e = vec2(min(q.x, uRect.z - q.x), min(q.y, uRect.w - q.y));
+    n = e.y < e.x ? vec2(0.0, q.y < uRect.w * 0.5 ? -1.0 : 1.0)
+                  : vec2(q.x < uRect.z * 0.5 ? -1.0 : 1.0, 0.0);
+  }
+  if (n.x == 0.0) return n.y < 0.0 ? c0.x - R : a + b + 2.0 * qa + (R + a - c0.x);
+  if (n.y == 0.0) return n.x > 0.0 ? a + qa + (c0.y - R) : 2.0 * a + b + 3.0 * qa + (R + b - c0.y);
+  float ang = atan(n.y, n.x);                         // y down: the top is -pi/2
+  if (n.x > 0.0 && n.y < 0.0) return a + (ang + 1.5707963) * R;
+  if (n.x > 0.0) return a + b + qa + ang * R;
+  if (n.y > 0.0) return 2.0 * a + b + 2.0 * qa + (ang - 1.5707963) * R;
+  return 2.0 * a + 2.0 * b + 3.0 * qa + (ang + 3.1415927) * R;
 }
 // heat 0..1 -> premultiplied colour: transparent -> deep -> tier -> hot -> core
 vec4 ramp(float h) {
@@ -562,6 +589,90 @@ void main() {
         tint += mix(uC2 * 0.8, uDusk, dusk) * clouds * 0.6 * xt;
         tintA += clouds * 0.2 * xt;
       }
+    } else if (uTier == 4) {
+      // CLAUDE CODE: a write head. The outline is cut into character cells (a whole number of
+      // them, so nothing seams); each cell is a short dash hugging the border. One head (a
+      // block cursor) steps along it a cell at a time and the cells it leaves cool behind it;
+      // while active two more join. On switch: the cursor blinks twice on the top edge, then
+      // the outline types itself out both ways round from there, hot at the heads.
+      float L;
+      float s = perimS(vPos, L);
+      float N = max(12.0, floor(L / 9.0 + 0.5));
+      float C = L / N;                                       // ~9 px a cell
+      float k = floor(s / C);
+      float u = s - k * C;                                   // px into the cell
+      float dash = smoothstep(0.7, 1.4, u) * smoothstep(C - 2.0, C - 2.7, u);
+      float bar = smoothstep(-0.3, 0.4, d) * smoothstep(2.3, 1.6, d);  // ~2 px out from the border
+      float blk = smoothstep(-0.3, 0.4, d) * smoothstep(4.4, 3.6, d);  // the cursor, a block
+      float lvl = 0.0, head = 0.0;
+      float tau = mix(2.2, 4.5, act);
+      for (int i = 0; i < 3; i++) {
+        float hb = i == 0 ? 1.0 : smoothstep(0.15, 0.8, act);
+        if (hb < 0.01) continue;
+        float hk = mod(floor(uPhase) + floor(uSeed * 7.0) + float(i) * floor(N / 3.0), N);
+        float back = mod(hk - k, N);                         // cells behind this head
+        lvl = max(lvl, hb * exp(-back / tau) * step(back, 16.0) * mix(0.42, 0.5, act));
+        head = max(head, hb * step(back, 0.5) * mix(0.62, 0.75, act));
+      }
+      if (ft > -1.0 && ft < 6.0) {
+        float k0 = floor((hash(vec2(uSeed, 2.3)) * 0.4 + 0.3) * max(uRect.z - 2.0 * uRadius, 1.0) / C);
+        float m = min(mod(k - k0, N), mod(k0 - k, N));     // cells from the start, either way
+        float Lh = N * 0.5;
+        if (ft < 0.0) {
+          // The prompt: a block cursor at the start, blinking.
+          head = max(head, step(m, 0.5) * step(fract((ft + 0.45) / 0.3), 0.6) * uPre);
+        } else {
+          float D = Lh * (1.0 - exp(-ft * 1.5));            // cells typed each way so far
+          float lit = step(m, D);
+          float tm = -log(max(1.0 - m / Lh, 0.001)) / 1.5;   // when this cell was typed
+          float age = max(ft - tm, 0.0);
+          lvl = max(lvl, lit * (0.5 * exp(-age * 1.5) + 0.12 * exp(-age * 0.4)) * smoothstep(5.8, 3.6, ft));
+          head = max(head, lit * step(D - m, 1.0) * exp(-ft * 0.7));
+        }
+      }
+      float rest = (0.035 * uBreath + 0.05 * act) * mix(0.45, 1.0, topW);
+      float cell = max(lvl, rest);
+      float cur = smoothstep(0.2, 0.9, u) * smoothstep(C - 0.4, C - 1.1, u);
+      heat = max(bar * dash * cell, blk * cur * head);
+      // A soft glow off the lit cells (along the edge, not dashed) and off the cursor.
+      heat += exp(-dd / 4.0) * outside * (max(lvl - rest, 0.0) * 0.18 + head * 0.2);
+      add += blk * cur * head * 0.14;
+    } else if (uTier == 5) {
+      // CODEX: raster. Scan lines above the top edge, inside the composer's width; a refresh
+      // line rolls up through them now and then and leaves them glowing like phosphor; while
+      // active the sweeps come faster and short runs of data slide along the lines. On switch
+      // one bright refresh climbs high, the lines lighting up behind it.
+      float xt = smoothstep(uRect.x + 2.0, uRect.x + uRect.z * 0.14, vPos.x)
+               * smoothstep(uRect.x + uRect.z - 2.0, uRect.x + uRect.z * 0.86, vPos.x);
+      float topBand = smoothstep(uRect.y + uRadius + 2.0, uRect.y + 1.0, vPos.y);
+      float upc = max(up, 0.0);
+      float P = 4.0;                                         // line pitch, px
+      float r = floor(upc / P);
+      float line = smoothstep(1.1, 0.45, abs(upc - (r + 0.5) * P)) * smoothstep(1.0, 2.0, up);
+      float hr = hash(vec2(r, floor(uSeed)));
+      float H = 9.0 + 8.0 * act + 30.0 * fl;
+      float env = exp(-upc / H) * smoothstep(H * 4.5, H * 2.0, upc);
+      float flick = 0.6 + 0.4 * noise(vec2(r * 1.7, t * 0.7 + uSeed));
+      float dir = hr < 0.5 ? -1.0 : 1.0;
+      float seg = smoothstep(0.55, 0.8, noise(vec2(vPos.x / (12.0 + 16.0 * hr) - dir * t * (2.0 + 3.0 * hr),
+                                                  r * 3.1 + uSeed)));
+      // The refresh: for the first 40% of each period a front rises from the edge to ~56 px,
+      // the lines below it still lit; then the raster rests until the next one.
+      float Y = fract(uPhase) / 0.4 * 56.0;
+      float sw = exp(-abs(upc - Y) / 1.4) * 0.7 + (upc < Y ? exp(-(Y - upc) / 9.0) * 0.35 : 0.0);
+      sw *= exp(-upc / (H * 1.9)) * smoothstep(0.0, 4.0, Y) * smoothstep(56.0, 40.0, Y);
+      float lit = env * ((0.3 * uBreath + 0.1 * act) * flick + seg * act * 0.3) + sw * (0.36 + 0.08 * act);
+      if (ft > 0.0 && ft < 6.0) {
+        float Yf = 104.0 * (1.0 - exp(-ft * 0.95));
+        float front = exp(-abs(upc - Yf) / 2.2) * exp(-ft * 0.4);
+        float behind = upc < Yf ? exp(-(Yf - upc) / (12.0 + 14.0 * ft)) * exp(-ft * 0.6) : 0.0;
+        lit += (front * 0.9 + behind * 0.45) * smoothstep(118.0, 70.0, upc) * smoothstep(6.0, 3.5, ft);
+      }
+      heat = line * lit * xt;
+      // The top edge itself: a faint hairline, bright for a moment on switch.
+      heat += rimLine * topBand * xt * (0.035 * uBreath + 0.05 * act + 0.3 * fl);
+      heat += exp(-upc / 6.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.025 + 0.03 * act + 0.1 * fl);
+      add += rimLine * topBand * xt * fl * 0.1;
     } else {
       // NOVA: a shimmering plasma rim all round, plasma wisps drifting along it; the charge
       // tightens it, the eruption leaves a lingering afterglow; flames while active.
@@ -696,10 +807,10 @@ interface Arc {
 }
 
 interface Layer {
-  /** What it is for (its colours). */
+  /** What it is for: its style and its colours. */
   id: FxId;
-  /** Which style draws it (STYLE[id]). */
-  tier: TierId;
+  /** The same (a tier's style or a fallback's). */
+  tier: FxId;
   seed: number;
   fade: number;
   fading: boolean;
@@ -714,6 +825,8 @@ interface Layer {
   blasted: boolean;
   trickle: number;
   nextSpawn: number;
+  /** claude: cells stepped by the write head; codex: refresh sweeps (fract = how far up). */
+  phase: number;
 }
 
 const MAX_PARTICLES = 420;
@@ -796,6 +909,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     "uTopY",
     "uMode",
     "uTier",
+    "uPhase",
     "uRect",
     "uBand",
     "uC0",
@@ -836,7 +950,11 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   // ---- state ----
   const start = performance.now();
-  const clock = () => (performance.now() - start) / 1000;
+  // Dev-only slow motion for looking at a flare frame by frame (?fxspeed=0.1, see useFx.ts).
+  const speed = import.meta.env.DEV
+    ? Number(new URLSearchParams(location.search).get("fxspeed")) || 1
+    : 1;
+  const clock = () => ((performance.now() - start) / 1000) * speed;
   let layers: Layer[] = [];
   let active = false;
   let flareKey = 0;
@@ -1161,6 +1279,10 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       l.actV = 0;
     }
     l.time += dt * (0.3 + 0.7 * l.act + 0.6 * l.fl);
+    // Claude Code's head steps ~1.2 cells a second at rest, ~9 while active; Codex refreshes
+    // every ~6.5 s at rest, every ~2 s while active (each sweep takes 40% of that).
+    if (l.tier === "claude") l.phase += dt * (1.2 + 7.8 * l.act);
+    if (l.tier === "codex") l.phase += dt / (6.5 - 4.4 * l.act);
     if (l.fading) l.fade = Math.max(0, l.fade - dt / 0.6);
     if (l.fading) return;
 
@@ -1303,7 +1425,8 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.uniform1f(fu.uFade, l.fade);
     gl.uniform1f(fu.uBreath, breathOf(l, now));
     gl.uniform1f(fu.uSeed, l.seed);
-    gl.uniform1i(fu.uTier, TIER_INDEX[l.tier]);
+    gl.uniform1i(fu.uTier, STYLE_INDEX[l.tier]);
+    gl.uniform1f(fu.uPhase, l.phase);
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
     gl.uniform3fv(fu.uC2, c(2));
@@ -1326,6 +1449,15 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     if (l.tier === "ember") {
       top = 56;
       side = 34;
+    }
+    if (l.tier === "claude") {
+      // Hugs the border: the dashes, the cursor and their glow (plus the band's 16 px fade).
+      top = side = below = 34;
+    }
+    if (l.tier === "codex") {
+      top = l.ft > 0 && l.ft < 6 ? 140 : 76 + 30 * l.act;
+      side = 12;
+      below = 0;
     }
     if (l.tier === "solstice") {
       // Everything solstice draws tapers off inside the composer's own width.
@@ -1532,7 +1664,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   const frame = (now: number) => {
     raf = 0;
     timer = 0;
-    const dt = Math.min(0.06, last ? (now - last) / 1000 : 0.016);
+    const dt = Math.min(0.06, last ? (now - last) / 1000 : 0.016) * speed;
     last = now;
     draw(dt);
     schedule();
@@ -1590,6 +1722,8 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     if (!r) return;
     if (l.tier === "solstice") spawnEmbers(l, r, 10, true);
     if (l.tier === "spark") l.nextSpawn = 0.2;
+    // The switch's own refresh replaces the next regular one (it starts after the flare).
+    if (l.tier === "codex") l.phase = Math.floor(l.phase) + 0.4;
   };
 
   return {
@@ -1601,7 +1735,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         if (id) {
           const l: Layer = {
             id,
-            tier: STYLE[id],
+            tier: id,
             seed: Math.random() * 100,
             fade: 1,
             fading: false,
@@ -1616,6 +1750,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             blasted: false,
             trickle: 0,
             nextSpawn: 1,
+            phase: Math.random() * 40,
           };
           layers.push(l);
           flare(l);

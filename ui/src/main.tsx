@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { applyShell, appShell } from "./app-shell";
+import { PresenceReporter } from "./presence";
 import { maybeOpenWelcome, openSetup, openWelcome } from "./setup/open";
 import { boot, newThread, updateSettings } from "./store/actions";
 import "./styles.css";
@@ -26,5 +27,6 @@ void maybeOpenWelcome();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App />
+    {appShell?.setPresence && <PresenceReporter />}
   </StrictMode>,
 );

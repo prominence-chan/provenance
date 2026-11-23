@@ -23,9 +23,29 @@ if (argv[0] === "debug" && argv[1] === "models") {
   console.log(
     JSON.stringify({
       models: [
-        { slug: "fake-big", display_name: "Fake Big", visibility: "list", priority: 1 },
+        {
+          slug: "fake-big",
+          display_name: "Fake Big",
+          visibility: "list",
+          priority: 1,
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"].map(
+            (effort) => ({ effort, description: effort }),
+          ),
+        },
         { slug: "fake-hidden", display_name: "Hidden", visibility: "hide", priority: 2 },
-        { slug: "fake-small", display_name: "Fake Small", visibility: "list", priority: 3 },
+        {
+          slug: "fake-small",
+          display_name: "Fake Small",
+          visibility: "list",
+          priority: 3,
+          default_reasoning_level: "low",
+          supported_reasoning_levels: [
+            { effort: "low", description: "low" },
+            { effort: "medium", description: "medium" },
+            { effort: "high", description: "high" },
+          ],
+        },
       ],
     }),
   );

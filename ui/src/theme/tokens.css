@@ -97,7 +97,7 @@
   --fx-nova-mid: #e0287f;
   --fx-nova-hot: #ff9ab8;
   --fx-nova-core: #f6f1ff;
-  --fx-claude-deep: #1d1145; /* the fallbacks draw ember's hairline cracks in their own colour */
+  --fx-claude-deep: #1d1145; /* the fallbacks' own effects: Claude Code's write head, Codex's raster */
   --fx-claude-mid: #7f5cf6;
   --fx-claude-hot: #c4a8ff;
   --fx-claude-core: #f2ecff;

@@ -34,5 +34,33 @@ export function isOrchestrator(v: unknown): v is Orchestrator {
   return v === "provenance" || v === "experimental" || v === "hyperexperimental";
 }
 
-/** Reasoning efforts a fallback's CLI takes (the composer shows the ones its model supports). */
-export type FallbackEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+/**
+ * Reasoning efforts a fallback's CLI takes (the composer shows the ones its model supports).
+ * Claude Code's `--effort` takes low..max (its --help); Codex's catalog (`codex debug models`,
+ * model/list) lists low..ultra per model, and its enum also knows none and minimal (older models).
+ */
+export type FallbackEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
+
+/** Every effort, lowest first. */
+export const FALLBACK_EFFORTS: FallbackEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+
+export function isFallbackEffort(v: unknown): v is FallbackEffort {
+  return typeof v === "string" && (FALLBACK_EFFORTS as string[]).includes(v);
+}

@@ -37,6 +37,7 @@ Other scripts:
 | `npm run check:fallback`      | Claude Code / Codex fallbacks, server side, against stand-in CLIs (no browser)                |
 | `npm run e2e:welcome`         | Welcome, fallbacks, picker, "too large" suggestion, headless (needs `npm run build`)          |
 | `npm run check:orchestrator`  | The two experimental orchestrators, server side, against a stand-in router and app-server     |
+| `npm run check:presence`      | Discord Rich Presence against a stand-in Discord socket, plus the page's reports (below)      |
 
 `smoke` and `e2e` expect the server to already be running; `e2e:setup` starts its own UI
 server and mock router and needs neither app-server nor model quota. `MODEL=ember` picks a different tier.
@@ -113,6 +114,7 @@ What the shell adds:
   without the buttons (`GET /api/health`).
 - **PATH:** the login shell's PATH (`$SHELL -ilc`) plus `~/.local/bin` and Homebrew, so
   commands the agent runs find your tools.
+- **Discord:** Rich Presence, once a Discord application id is set ([below](#discord-rich-presence)).
 
 Files, all in `~/Library/Application Support/Provenance/`:
 
@@ -128,7 +130,9 @@ Files, all in `~/Library/Application Support/Provenance/`:
 (`http://127.0.0.1:4141`: where your own router answers, if you run one), `router` (`auto`: the
 router at `routerUrl` if it answers at launch, else the app's own; `external`: only `routerUrl`;
 `bundled`: always the app's own), `routerLaunchdLabel` (empty; a launchd agent running your own
-router, waited for at launch), `defaultCwd` (empty: last used, else home), `port` (`41730`). The
+router, waited for at launch), `defaultCwd` (empty: last used, else home), `port` (`41730`),
+`discordPresence` (`true`: the menu's "Show activity in Discord"), `discordClientId` (empty: the id
+in `electron/discord-presence.ts`; both Discord keys apply without a relaunch). The
 env vars `PROVENANCE_BIN`, `TIERLM_URL`, `PROVENANCE_ROUTER=auto|external|bundled` and
 `PROVENANCE_ROUTER_AUTOSTART=0` (= external) still win; an old `autoStartRouter: false` means
 external.
@@ -166,6 +170,51 @@ someone with only the app can run threads. `scripts/fetch-agent.ts` (run by `app
 ad-hoc signs it again, checks it runs, writes `VERSION.json`, and warns when
 `src/protocol/generated` doesn't match the types it generates. Build it first:
 `cd codex-rs && cargo build --release -p codex-cli --bin provenance -j 4`.
+
+#### Discord Rich Presence
+
+`electron/discord-presence.ts` speaks Discord's local RPC socket itself (`$TMPDIR/discord-ipc-<n>`,
+no dependency). The page sends the main process only `{kind, working, since}` (`src/presence.ts`,
+preload `setPresence`): the selected tier or fallback, whether a turn runs, and since when. No
+thread title, prompt, path, project, output or account ever reaches Discord. It shows:
+
+| line                | idle                                                                                                     | a turn running                       |
+| ------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| title               | Provenance (the Discord application's name)                                                              | same                                 |
+| details             | `Idle · Solstice`                                                                                        | `Working · Solstice` + elapsed timer |
+| state               | `by SkyeNXT · coming soon`                                                                               | same                                 |
+| large image (hover) | the app icon (`Provenance · made by Yufan at SkyeNXT`; a click opens the repo)                           | same                                 |
+| small image (hover) | the tier's glyph (`Solstice tier · frontier`); Claude Code / Codex: their glyph (`Claude Code fallback`) | same                                 |
+| button              | `Provenance on GitHub` (Discord shows buttons to others, not to you)                                     | same                                 |
+
+The tier names are Spark, Ember, Solstice, Nova, Claude Code and Codex; a model that is none of
+these shows just `Idle` / `Working` and no small image. The words, the credit, the button and the
+image source are one `PRESENCE` block at the top of that file. It connects only when there is
+something to show, retries quietly (5 s doubling to 60 s) while Discord isn't running, sends at
+most one update per 15 s (the latest wins), clears at once when switched off and on quit, and
+does nothing at all without an application id, in headless runs, or in the browser.
+
+Setting it up (the Discord developer portal, once):
+
+1. <https://discord.com/developers/applications> → **New Application** → name it **Provenance**
+   (that name is the activity's title) → Create.
+2. **General Information** → copy the **Application ID**.
+3. Put it in `PRESENCE.clientId` in `electron/discord-presence.ts` (ships with the app), or, for
+   this Mac only, in `settings.json` as `"discordClientId": "<id>"` (applies at once).
+   Provenance → **Show activity in Discord** appears in the app menu once an id is set.
+
+Nothing needs uploading: the images are https URLs into the public repo
+(`ui/design/presence/*.png` on the `provenance` branch, made by `node design/presence/render.ts`),
+which Discord fetches itself, so they show once this folder is pushed there. To use uploaded
+art instead, upload under **Rich Presence → Art Assets** `provenance.png` as `provenance`,
+`tier-spark.png` / `tier-ember.png` / `tier-solstice.png` / `tier-nova.png` as `tier-spark` /
+`tier-ember` / `tier-solstice` / `tier-nova`, and `fallback-claude.png` / `fallback-codex.png` as
+`fallback-claude` / `fallback-codex`, then set `PRESENCE.imageBase` to `""`.
+
+`npm run check:presence` runs it against a stand-in Discord (a scratch `TMPDIR` with its own
+`discord-ipc-0`; the real socket is never touched): handshake, the activity's fields, coalescing,
+clearing on switch-off and quit, reconnecting, quiet without a socket or an id; then, with a
+build in `dist/`, the page's reports through a stand-in preload during a scripted turn.
 
 #### Which provenance binary
 
@@ -234,6 +283,7 @@ ui/
 ├── electron/
 │   ├── main.ts        desktop app: window, menu, settings, runs startUiServer(), test switches
 │   ├── router.ts      RouterSupervisor: an answering router, else the bundled one (start, watch, stop)
+│   ├── discord-presence.ts  Discord Rich Presence over Discord's local socket (coarse state only)
 │   └── preload.ts     window.provenanceApp (folder picker, start router, preferences, menu events)
 ├── scripts/
 │   ├── gen-protocol.ts  runs `provenance app-server generate-ts --experimental`

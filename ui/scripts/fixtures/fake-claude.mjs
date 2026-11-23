@@ -25,7 +25,7 @@ if (argv[0] === "auth" && argv[1] === "status") {
 }
 if (argv[0] === "--help") {
   console.log(
-    `Usage: claude [options]\n  --model <model>   Model for the current session. Use an\n                    alias for the latest model (e.g.\n                    'fable', 'opus', or 'sonnet') or a\n                    model's full name.\n  -n, --name <name>  Name`,
+    `Usage: claude [options]\n  --model <model>   Model for the current session. Use an\n                    alias for the latest model (e.g.\n                    'fable', 'opus', or 'sonnet') or a\n                    model's full name.\n  --effort <level>  Effort level for the current session\n                    (low, medium, high, xhigh, max)\n  -n, --name <name>  Name`,
   );
   process.exit(0);
 }

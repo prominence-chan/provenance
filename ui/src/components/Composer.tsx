@@ -9,6 +9,7 @@ import { useAppState } from "../store/store";
 import { useFx } from "./effects/useFx";
 import { IconArrowUp, IconFolder, IconShield, IconStop } from "./icons";
 import { shortPath } from "./format";
+import { ComposerSlot } from "./ComposerSlot";
 import { TierPicker } from "./TierPicker";
 
 /** Bottom composer: prompt box + model / permissions / cwd controls. */
@@ -109,6 +110,7 @@ export function Composer() {
           />
           <div className="composer-bar">
             <TierPicker />
+            <ComposerSlot />
             <PermissionsPicker settings={settings} />
             <label className="cwd-input" title={`Working directory: ${cwdDraft}`}>
               {appShell ? (

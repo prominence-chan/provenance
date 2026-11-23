@@ -30,8 +30,27 @@ if (argv[0] === "debug" && argv[1] === "models") {
   console.log(
     JSON.stringify({
       models: [
-        { slug: "gpt-fake-sol", display_name: "GPT-Fake-Sol", visibility: "list", priority: 1 },
-        { slug: "gpt-fake-luna", display_name: "GPT-Fake-Luna", visibility: "list", priority: 2 },
+        {
+          slug: "gpt-fake-sol",
+          display_name: "GPT-Fake-Sol",
+          visibility: "list",
+          priority: 1,
+          default_reasoning_level: "low",
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"].map(
+            (effort) => ({ effort, description: effort }),
+          ),
+        },
+        {
+          slug: "gpt-fake-luna",
+          display_name: "GPT-Fake-Luna",
+          visibility: "list",
+          priority: 2,
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"].map((effort) => ({
+            effort,
+            description: effort,
+          })),
+        },
       ],
     }),
   );
@@ -216,7 +235,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     case "turn/start": {
       const t = threads.get(p.threadId);
       const text = (p.input ?? []).map((x) => x.text ?? "").join("\n");
-      logRun({ method: "turn/start", model: p.model ?? null, text: text.slice(0, 200) });
+      logRun({
+        method: "turn/start",
+        model: p.model ?? null,
+        text: text.slice(0, 200),
+        hasEffort: "effort" in p,
+        effort: p.effort ?? null,
+      });
       if (t && !t.preview) t.preview = text.slice(0, 200);
       const tid = randomUUID();
       const tr = turn(tid, [], Math.floor(Date.now() / 1000));
