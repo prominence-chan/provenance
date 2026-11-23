@@ -12,7 +12,8 @@ import collections, json, os, shutil, signal, subprocess, sys, time, urllib.requ
 BENCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UI = "/Users/yufan/Desktop/Development/provenance-wt-bench/ui"
 TASKS_PY = os.path.join(BENCH, "harness", "tasks.py")
-RUNS = os.path.join(BENCH, "runs")
+RUNS = os.path.join(BENCH, "runs")  # only the run in progress; finished runs move to HIDDEN/runs
+HIDDEN = "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
 LEDGER = os.path.expanduser("~/.tierlm/usage-ledger.jsonl")
 TIER = "solstice"
 LIMIT_MIN = 25
@@ -111,8 +112,7 @@ def one(mode, task, model, attempt):
             f'[ -f "{home}/{f}" ] && source "{home}/{f}"\nexport PATH="{venv}:$PATH"\n')
     env = dict(os.environ, ZDOTDIR=zdot)
     # The tests and reference solutions are unreadable while the agent works.
-    os.chmod(os.path.join(BENCH, "dataset"), 0)
-    os.chmod(os.path.join(BENCH, "validate"), 0)
+    os.chmod(HIDDEN, 0)
     t0 = time.time()
     try:
         p = subprocess.Popen(["node", "scripts/orchestrator-bench.ts", mode, "--cwd", cwd, "--job-file",
@@ -130,8 +130,7 @@ def one(mode, task, model, attempt):
             except ProcessLookupError:
                 pass
     finally:
-        os.chmod(os.path.join(BENCH, "dataset"), 0o755)
-        os.chmod(os.path.join(BENCH, "validate"), 0o755)
+        os.chmod(HIDDEN, 0o755)
     t1 = time.time()
     # Anything the run left behind (a worker's command, a server the agent started).
     subprocess.run(["pkill", "-f", run_dir], capture_output=True)
@@ -155,6 +154,15 @@ def one(mode, task, model, attempt):
     b = budget()
     b["calls"] += (res.get("modelCalls") or 0) or (res.get("ledger_new_key_calls") or 0)
     save_budget(b)
+    # Finished: out of the agent's reach (its tests copy, grade log and transcript included).
+    kept = os.path.join(HIDDEN, "runs", name)
+    if os.path.exists(kept):
+        shutil.rmtree(kept)
+    shutil.move(run_dir, kept)
+    rec["run_dir"] = kept
+    au = subprocess.run(["python3", "-I", os.path.join(BENCH, "harness", "audit.py"), kept], capture_output=True, text=True).stdout.strip()
+    rec["audit"] = au
+    log("AUDIT " + au.replace("\n", " ;; ")[:400])
     log(f"{name}: {'PASS' if g['passed'] else 'FAIL'} status={res.get('status')} timedOut={res.get('timedOut')} "
         f"calls={res.get('modelCalls')} wall={rec['wall_seconds']}s guard={res.get('guard')} err={(res.get('error') or '')[:120]} | budget calls={b['calls']}")
     return rec

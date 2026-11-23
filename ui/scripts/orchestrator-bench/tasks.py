@@ -14,7 +14,10 @@ no writes outside <run_dir> and temp folders, no reads of the home folder except
 import json, os, re, shutil, subprocess, sys, time, gzip
 
 BENCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(BENCH, "dataset", "tb", "legacy")
+# Tests, reference solutions and finished runs live OUTSIDE the folders a workspace-write sandbox
+# can write (so the agent cannot chmod its way in) and are mode 000 while an agent works.
+HIDDEN = "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
+DATA = os.path.join(HIDDEN, "dataset", "tb", "legacy")
 VENVS = os.path.join(BENCH, "venvs")
 HOME = os.path.expanduser("~")
 
