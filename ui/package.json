@@ -20,6 +20,7 @@
     "check:fallback": "node scripts/fallback-check.ts",
     "e2e:welcome": "node scripts/welcome-e2e.ts",
     "e2e:toolgroup": "node scripts/toolgroup-e2e.ts",
+    "check:presence": "node scripts/presence-check.ts",
     "mock:router": "node scripts/mock-router.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

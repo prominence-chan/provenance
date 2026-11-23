@@ -12,6 +12,17 @@ export interface AppShell {
   onOpenAccounts?(cb: () => void): () => void;
   /** App menu -> Welcome… (absent in builds from before it). */
   onOpenWelcome?(cb: () => void): () => void;
+  /** Coarse state for Discord Rich Presence (src/presence.ts; absent in builds from before it). */
+  setPresence?(s: PresenceReport): void;
+}
+
+/** What the page tells the app for Discord: never a title, prompt, path or account. */
+export interface PresenceReport {
+  /** The selected tier (spark, ember, solstice, nova) or fallback (claude, codex); else null. */
+  kind: string | null;
+  working: boolean;
+  /** When the running turn started, ms since epoch. */
+  since: number | null;
 }
 
 export const appShell: AppShell | undefined = (window as { provenanceApp?: AppShell })

@@ -33,6 +33,7 @@ import {
   type MenuItemConstructorOptions,
 } from "electron";
 import { startUiServer, type UiServer } from "../server/app.ts";
+import { DiscordPresence, PRESENCE, sanitizePresence } from "./discord-presence.ts";
 import { RouterSupervisor, type RouterPolicy } from "./router.ts";
 
 app.setName("Provenance");
@@ -88,6 +89,10 @@ interface Settings {
   defaultCwd: string;
   /** Local port for the UI server (127.0.0.1 only). */
   port: number;
+  /** Show activity in Discord (the app menu's switch; only with a Discord client id). */
+  discordPresence: boolean;
+  /** The Discord application id for Rich Presence (empty: the one in discord-presence.ts). */
+  discordClientId: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -97,6 +102,8 @@ const DEFAULT_SETTINGS: Settings = {
   routerLaunchdLabel: "",
   defaultCwd: "",
   port: 41730,
+  discordPresence: true,
+  discordClientId: "",
 };
 
 function expandHome(p: string): string {
@@ -121,6 +128,8 @@ function loadSettings(): Settings {
   if (process.env.PROVENANCE_ROUTER_AUTOSTART === "0") s.router = "external";
   const r = process.env.PROVENANCE_ROUTER as RouterPolicy | undefined;
   if (r && ["auto", "external", "bundled"].includes(r)) s.router = r;
+  s.discordPresence = s.discordPresence !== false;
+  if (typeof s.discordClientId !== "string") s.discordClientId = "";
   return s;
 }
 
@@ -254,6 +263,46 @@ const router = new RouterSupervisor({
   onUrlChange: () => ui?.bridge.restart(),
 });
 
+// ---- Discord Rich Presence (electron/discord-presence.ts) --------------------------------------
+
+const discordClientId = (s: Settings) => s.discordClientId.trim() || PRESENCE.clientId;
+// Never from a headless check: it must not reach a Discord running on the same Mac.
+const presence = new DiscordPresence({
+  clientId: headless ? "" : discordClientId(settings),
+  enabled: settings.discordPresence,
+  log: (m) => console.log(m),
+});
+
+/** The menu switch: saved to settings.json (in memory first, so the watcher sees no change). */
+function setDiscordPresence(on: boolean): void {
+  settings.discordPresence = on;
+  presence.configure(headless ? "" : discordClientId(settings), on);
+  try {
+    let raw: Record<string, unknown> = {};
+    try {
+      raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    } catch {
+      raw = { ...DEFAULT_SETTINGS };
+    }
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, discordPresence: on }, null, 2) + "\n");
+  } catch (e) {
+    console.warn("can't save settings.json:", String(e));
+  }
+}
+
+/** settings.json edited by hand: the Discord keys apply at once, no relaunch. */
+function applyDiscordSettings(next: Settings): void {
+  if (
+    next.discordPresence === settings.discordPresence &&
+    next.discordClientId === settings.discordClientId
+  )
+    return;
+  settings.discordPresence = next.discordPresence;
+  settings.discordClientId = next.discordClientId;
+  presence.configure(headless ? "" : discordClientId(settings), settings.discordPresence);
+  buildMenu();
+}
+
 // ---- window --------------------------------------------------------------------
 
 interface WindowState {
@@ -335,6 +384,8 @@ function createWindow(): void {
   w.on("close", () => saveWindowState(w));
   w.on("closed", () => {
     if (win === w) win = null;
+    // Nothing reports turns now: say idle rather than a timer that may never stop.
+    presence.update({ ...lastPresence, working: false, since: null });
   });
 
   // Links: anything that isn't the app opens in the default browser.
@@ -386,6 +437,14 @@ function buildMenu(): void {
         { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: openPreferences },
         { label: "Models & Accounts…", click: () => send("app:open-accounts") },
         { label: "Welcome…", click: () => send("app:open-welcome") },
+        {
+          label: "Show activity in Discord",
+          type: "checkbox",
+          checked: settings.discordPresence,
+          // Hidden until a Discord client id is configured: presence is off without one.
+          visible: !!discordClientId(settings),
+          click: (item) => setDiscordPresence(item.checked),
+        },
         { type: "separator" },
         { role: "services" },
         { type: "separator" },
@@ -455,6 +514,13 @@ function buildMenu(): void {
 ipcMain.handle("app:pick-directory", (_e, defaultPath?: string) => pickDirectory(defaultPath));
 ipcMain.handle("app:start-router", () => router.ensure());
 ipcMain.handle("app:open-preferences", () => openPreferences());
+// The page's coarse state for Discord: tier or fallback, working or not, since when. Nothing else.
+let lastPresence = sanitizePresence(null);
+ipcMain.on("app:presence", (e, raw: unknown) => {
+  if (!win || e.sender !== win.webContents) return;
+  lastPresence = sanitizePresence(raw);
+  presence.update(lastPresence);
+});
 
 // ---- lifecycle -----------------------------------------------------------------
 
@@ -468,6 +534,7 @@ function watchSettings(): void {
       clearTimeout(timer);
       timer = setTimeout(async () => {
         const next = loadSettings();
+        applyDiscordSettings(next);
         if (JSON.stringify(next) === JSON.stringify(settings)) return;
         prompted = true;
         const r = await dialog.showMessageBox({
@@ -574,7 +641,7 @@ app.on("before-quit", (e) => {
   const uiClosed = server
     ? Promise.race([server.close(), new Promise((r) => setTimeout(r, 1500))])
     : Promise.resolve();
-  void Promise.all([uiClosed, router.stop()]).finally(() => app.quit());
+  void Promise.all([uiClosed, router.stop(), presence.shutdown()]).finally(() => app.quit());
 });
 process.on("exit", () => router.killNow());
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => app.quit());
