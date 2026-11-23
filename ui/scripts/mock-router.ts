@@ -23,7 +23,11 @@
 //                       checking where a password or key went (POST /mock/requests clears it)
 //   POST /mock/older    {"older": true}  a router from before saved sign-ins, plans and /pool/help:
 //                       those fields are left out and their routes 404 (the rest works);
-//                       {"older": false, "noWebOpen": true}: everything but POST/GET /web/open
+//                       {"older": false, "noWebOpen": true}: everything but POST/GET /web/open;
+//                       {"older": false, "noMultiKey": true}: /pool/help but one key per provider
+//                       (no `keys`, `multiple_keys`, `until`, `removed`, `experience`, no check,
+//                       and POST /pool/keys/{id}, …/{key_id} and …/outcome 404)
+//   GET  /mock/state    also `outcomes`: each POST /pool/help/{id}/outcome {provider, body}
 //   POST /mock/plan     {"provider", "account", "plan", "plan_label"?, "needs_confirmation"?}
 //   POST /mock/autologin {"result": "ok" | "wrong_password" | "needs_person" | "error", "detail"?}
 //                       what the next try (POST …/autologin/try) comes to
@@ -37,6 +41,10 @@
 //   POST /web/login/show {provider, account}   -> {state, shown}
 //   POST /web/browser/prepare
 //   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}, GET /pool/help
+//   POST /pool/keys/{id} {key, label?, tier?, extras?} (409: saved already) -> provider + check,
+//   PATCH /pool/keys/{id}/{key_id} {label?, tier?, enabled?}, DELETE /pool/keys/{id}/{key_id},
+//   POST /pool/help/{id}/outcome {result, minutes?, step_notes?, labels_seen?, source}
+//   A key with REVOKED in it is refused (409); with REJECT in it, saved but its check fails.
 //   PUT/PATCH/DELETE /web/accounts/{provider}/{account}/autologin, POST …/autologin/try
 //   POST /web/accounts/{provider}/{account}/confirm {confirm: "paid_plan"}
 //   POST /web/open {provider, account, url}, GET /web/open: a key page in a signed-in account's
@@ -46,6 +54,7 @@
 // Everything a real router has that matters to the screen; what a real one does beyond it
 // (the window, the cookie, the check) is in provenance-core's own tests and router-e2e.ts.
 
+import { createHash } from "node:crypto";
 import http from "node:http";
 import type {
   AccountPlan,
@@ -55,8 +64,11 @@ import type {
   WireAccount,
   WireBrowser,
   WireHealth,
+  WireMultipleKeys,
   WirePoolHelpProvider,
+  WirePoolKey,
   WirePoolProvider,
+  WireRemovedProvider,
   WireProvider,
   WireSource,
   WireWebAccounts,
@@ -120,7 +132,61 @@ const POOL: Omit<WirePoolProvider, "usable">[] = [
     models: 4,
     tiers: ["solstice", "ember"],
   },
+  {
+    id: "inception",
+    anonymous: false,
+    vars: [{ name: "INCEPTION_API_KEY", set: false, from: null }],
+    models: 1,
+    tiers: ["spark"],
+  },
+  {
+    id: "cohere",
+    anonymous: false,
+    vars: [{ name: "COHERE_API_KEY", set: false, from: null }],
+    models: 2,
+    tiers: ["ember"],
+  },
 ];
+/** The other fields a key carries (by the provider's variable), beside the key's own. */
+const EXTRAS: Record<string, string[]> = { cloudflare: ["CLOUDFLARE_ACCOUNT_ID"] };
+
+/** Whether each provider's terms allow a second account's key (made up for the stand-in). */
+const MULTI: Record<string, WireMultipleKeys> = {
+  groq: { allowed: "yes", note: null },
+  google: {
+    allowed: "check_terms",
+    note: "Limits are per Google Cloud project: a second key in the same project adds nothing.",
+  },
+  cloudflare: {
+    allowed: "no",
+    note: "Cloudflare's terms forbid extra accounts to get around the free plan's limits.",
+  },
+  inception: { allowed: "yes", note: null },
+  cohere: { allowed: "check_terms", note: null },
+};
+/** Offered until then (Inception's API shuts down after it). */
+const UNTIL: Record<string, string> = { inception: "2026-12-28" };
+/** Taken out of the pool. Mistral stays in /pool/keys so a key left saved for it shows. */
+const REMOVED: WireRemovedProvider[] = [
+  { id: "mistral", name: "Mistral", reason: "no free API tier", date: "2026-11-20" },
+  { id: "cerebras", name: "Cerebras", reason: "free tier no longer usable", date: "2026-11-20" },
+];
+
+/** A saved key as the stand-in keeps it: a hash to find a second copy, never the value. */
+interface MockKey {
+  id: string;
+  label: string | null;
+  tier: "free" | "paid" | null;
+  enabled: boolean;
+  added: string;
+  last4: string;
+  hash: string;
+  usable: boolean;
+  reason: string | null;
+  /** The extra variables this key has (Cloudflare's account id), set or not. */
+  extras: Record<string, boolean>;
+}
+const hashOf = (v: string) => createHash("sha256").update(v).digest("hex");
 
 /**
  * GET /pool/help, shaped like provenance-core's pool_help.yaml (the router's `main`), with entries
@@ -193,6 +259,14 @@ const HELP: WirePoolHelpProvider[] = [
     ],
     key_format: "Starts with `gsk_`.",
     key_pattern: "^gsk_\\S+$",
+    experience: {
+      tries: 14,
+      worked: 11,
+      last_worked: "2026-11-21",
+      common_trouble: [
+        { step: 3, note: "the **Display name** field is required now; any name works." },
+      ],
+    },
     gotchas: [
       "Groq says it does not retain inference data by default and may not use inputs or outputs for training unless you allow it.",
     ],
@@ -227,20 +301,36 @@ const HELP: WirePoolHelpProvider[] = [
     checked: "2026-11-23",
   },
   {
-    id: "mistral",
-    name: "Mistral AI",
-    free_tier: "none",
-    recommended: false,
-    why_not: "No free API tier.",
+    id: "inception",
+    name: "Inception (Mercury)",
+    free_tier: "free",
     confidence: "seen",
-    what_you_get: "Mistral's models, paid per token.",
-    needs: "A Mistral account and a payment method.",
-    time_minutes: 5,
-    signup_url: "https://console.mistral.ai",
-    keys_url: "https://console.mistral.ai/api-keys",
-    key_var: "MISTRAL_API_KEY",
-    steps: ["Open the API keys page and click **Create new key**."],
-    key_format: "32 letters and digits.",
+    what_you_get: "Mercury, a fast diffusion model, free for now.",
+    needs: "An Inception account. No card.",
+    time_minutes: 2,
+    signup_url: "https://platform.inceptionlabs.ai",
+    keys_url: "https://platform.inceptionlabs.ai/dashboard/api-keys",
+    key_var: "INCEPTION_API_KEY",
+    steps: ["Open the API keys page and sign in.", "Click **Create API key** and copy it."],
+    key_format: "Starts with `sk_`.",
+    gotchas: [],
+    checked: "2026-11-23",
+  },
+  {
+    id: "cohere",
+    name: "Cohere",
+    free_tier: "trial",
+    recommended: false,
+    why_not: "Trial keys only: 1,000 calls a month.",
+    confidence: "seen",
+    what_you_get: "Command models on a trial key.",
+    needs: "A Cohere account.",
+    time_minutes: 3,
+    signup_url: "https://dashboard.cohere.com",
+    keys_url: "https://dashboard.cohere.com/api-keys",
+    key_var: "COHERE_API_KEY",
+    steps: ["Open the API keys page and copy the trial key."],
+    key_format: "40 letters and digits.",
     gotchas: [],
     checked: "2026-11-23",
   },
@@ -346,8 +436,13 @@ interface State {
   /** provider id -> account id -> account */
   accounts: Record<string, Record<string, Account>>;
   settings: Record<string, Settings>;
-  /** Variable name -> set (values are not kept, as the real router never sends them back). */
-  keys: Record<string, boolean>;
+  /** Provider id -> its keys (values are not kept, as the real router never sends them back). */
+  poolKeys: Record<string, MockKey[]>;
+  nextKey: number;
+  /** Each POST /pool/help/{id}/outcome as it came. */
+  outcomes: { provider: string; body: unknown }[];
+  /** A router with /pool/help but one key per provider (before several keys). */
+  noMultiKey: boolean;
   /** The bounds the last POST /web/login asked for. */
   lastBounds: WindowBounds | null;
   down: boolean;
@@ -408,7 +503,10 @@ function scenario(name: string): State {
     accountIds: ["main"],
     accounts: {},
     settings: {},
-    keys: {},
+    poolKeys: {},
+    nextKey: 1,
+    outcomes: [],
+    noMultiKey: false,
     lastBounds: null,
     down: false,
     legacy: false,
@@ -453,7 +551,20 @@ function scenario(name: string): State {
     });
     Object.assign(st.accounts["gemini-web"].main, { signed_in: false, checked_at: t - 86400 });
     Object.assign(st.accounts["gemini-web"].b, { signed_in: true, checked_at: t - 900, today: 7 });
-    st.keys.GEMINI_API_KEY = true;
+    st.poolKeys.google = [
+      {
+        id: "k0",
+        label: null,
+        tier: null,
+        enabled: true,
+        added: "2026-11-02T10:00:00Z",
+        last4: "x7Qa",
+        hash: hashOf("seeded-google-key"),
+        usable: true,
+        reason: null,
+        extras: {},
+      },
+    ];
   }
   return st;
 }
@@ -593,15 +704,80 @@ function accountsBody(): WireWebAccounts {
   };
 }
 
-function poolBody(): WirePoolProvider[] {
-  return POOL.map((p) => {
-    const vars = p.vars.map((v) => ({
-      ...v,
-      set: !!state.keys[v.name],
-      from: state.keys[v.name] ? ("app" as const) : null,
-    }));
-    return { ...p, vars, usable: p.anonymous || (vars.length > 0 && vars.every((v) => v.set)) };
+const keyVarOf = (p: Omit<WirePoolProvider, "usable">) =>
+  p.vars.find((v) => !(EXTRAS[p.id] ?? []).includes(v.name))?.name ?? p.vars[0]?.name ?? "";
+
+const multiKey = () => !state.older && !state.noMultiKey;
+
+/** The router's check of a key with its provider (made up: REJECT in it fails). */
+const checkOf = (v: string) =>
+  v.includes("REJECT") ? { ok: false, detail: "401: Invalid API Key" } : { ok: true, detail: null };
+
+function keyBody(k: MockKey): WirePoolKey {
+  return {
+    id: k.id,
+    label: k.label,
+    tier: k.tier,
+    usable: k.usable && k.enabled,
+    reason: k.enabled ? k.reason : "Turned off.",
+    added: k.added,
+    last4: k.last4,
+    limits: k.tier === "paid" ? { requests_per_day: 14400 } : { requests_per_day: 1000 },
+    enabled: k.enabled,
+  };
+}
+
+function providerPool(p: Omit<WirePoolProvider, "usable">): WirePoolProvider {
+  const ks = state.poolKeys[p.id] ?? [];
+  const keyVar = keyVarOf(p);
+  const extras = EXTRAS[p.id] ?? [];
+  const vars = p.vars.map((v) => {
+    const set = v.name === keyVar ? ks.length > 0 : ks.some((k) => k.extras[v.name]);
+    return { ...v, set, from: set ? ("app" as const) : null };
   });
+  const usable =
+    p.anonymous ||
+    (vars.length > 0 && ks.some((k) => k.usable && k.enabled && extras.every((x) => k.extras[x])));
+  const body: WirePoolProvider = { ...p, vars, usable };
+  if (!multiKey()) return body;
+  return {
+    ...body,
+    keys: ks.map(keyBody),
+    multiple_keys: MULTI[p.id] ?? { allowed: "yes", note: null },
+    ...(UNTIL[p.id] ? { until: UNTIL[p.id] } : {}),
+  };
+}
+
+function poolBody(): WirePoolProvider[] {
+  return POOL.map(providerPool);
+}
+
+/** Variable name -> set, as the stand-in's state used to keep it (the checks read it). */
+function varsSet(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const p of poolBody()) for (const v of p.vars) if (v.set) out[v.name] = true;
+  return out;
+}
+
+function newKey(
+  value: string,
+  extras: Record<string, boolean>,
+  label: string | null,
+  tier: MockKey["tier"],
+): MockKey {
+  const c = checkOf(value);
+  return {
+    id: `k${state.nextKey++}`,
+    label,
+    tier,
+    enabled: true,
+    added: new Date().toISOString(),
+    last4: value.slice(-4),
+    hash: hashOf(value),
+    usable: c.ok,
+    reason: c.detail,
+    extras,
+  };
 }
 
 function sourcesBody() {
@@ -739,7 +915,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (body.turn) usage[String(body.turn)] = (body.context ?? {}) as Record<string, number>;
       return send(res, 200, { ok: true });
     }
-    if (p === "/mock/state") return send(res, 200, state);
+    if (p === "/mock/state") return send(res, 200, { ...state, keys: varsSet() });
     if (p === "/mock/requests") {
       if (m === "POST") requests = [];
       return send(res, 200, requests);
@@ -747,7 +923,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (p === "/mock/older") {
       state.older = body.older !== false;
       state.noWebOpen = body.noWebOpen === true;
-      return send(res, 200, { older: state.older, noWebOpen: state.noWebOpen });
+      state.noMultiKey = body.noMultiKey === true;
+      return send(res, 200, {
+        older: state.older,
+        noWebOpen: state.noWebOpen,
+        noMultiKey: state.noMultiKey,
+      });
     }
     if (p === "/mock/plan") {
       const { provider, account } = target(body);
@@ -784,7 +965,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       return send(res, 200, {
         checked: "2026-11-23",
         assistant_notes: ASSISTANT_NOTES,
-        providers: HELP,
+        providers: multiKey()
+          ? HELP.map((h) => ({
+              ...h,
+              ...(MULTI[h.id] ? { multiple_keys: MULTI[h.id] } : {}),
+              ...(UNTIL[h.id] ? { until: UNTIL[h.id] } : {}),
+            }))
+          : HELP.map(({ experience: _, ...h }) => h),
+        ...(multiKey() ? { removed: REMOVED } : {}),
       });
     const [provider, account, what] = [
       decodeURIComponent(acct[1]),
@@ -929,29 +1117,119 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     return send(res, 200, { ...providerBody(pr), enabled_by: "app" });
   }
-  if (p === "/pool/keys" && m === "GET") return send(res, 200, { providers: poolBody() });
+  if (p === "/pool/keys" && m === "GET")
+    return send(res, 200, {
+      providers: poolBody(),
+      ...(multiKey() ? { removed: REMOVED } : {}),
+    });
+  const outcome = /^\/pool\/help\/([^/]+)\/outcome$/.exec(p);
+  if (outcome && m === "POST") {
+    if (!multiKey()) return send(res, 404, { detail: "Not Found" });
+    const id = decodeURIComponent(outcome[1]);
+    if (!HELP.some((h) => h.id === id)) return send(res, 404, { detail: "No such provider." });
+    const body = await readJson(req);
+    if (!["saved_working", "saved_rejected", "skipped", "gave_up"].includes(String(body.result)))
+      return send(res, 422, {
+        detail: "result is one of saved_working, saved_rejected, skipped, gave_up.",
+      });
+    if (!["assistant", "manual"].includes(String(body.source)))
+      return send(res, 422, { detail: "source is assistant or manual." });
+    state.outcomes.push({ provider: id, body });
+    return send(res, 200, { ok: true });
+  }
+  const one = /^\/pool\/keys\/([^/]+)\/([^/]+)$/.exec(p);
+  if (one && (m === "PATCH" || m === "DELETE")) {
+    if (!multiKey()) return send(res, 404, { detail: "Not Found" });
+    const pp = POOL.find((x) => x.id === decodeURIComponent(one[1]));
+    const ks = pp ? (state.poolKeys[pp.id] ?? []) : [];
+    const k = ks.find((x) => x.id === decodeURIComponent(one[2]));
+    if (!pp || !k) return send(res, 404, { detail: "There is no such key." });
+    if (m === "DELETE") {
+      state.poolKeys[pp.id] = ks.filter((x) => x !== k);
+      return send(res, 200, providerPool(pp));
+    }
+    const body = await readJson(req);
+    if ("label" in body) {
+      if (body.label !== null && typeof body.label !== "string")
+        return send(res, 422, { detail: "label is text or null." });
+      k.label =
+        typeof body.label === "string" && body.label.trim() ? body.label.trim().slice(0, 60) : null;
+    }
+    if ("tier" in body) {
+      if (body.tier !== null && body.tier !== "free" && body.tier !== "paid")
+        return send(res, 422, { detail: "tier is free, paid or null." });
+      k.tier = body.tier as MockKey["tier"];
+    }
+    if ("enabled" in body) {
+      if (typeof body.enabled !== "boolean")
+        return send(res, 422, { detail: "enabled is true or false." });
+      k.enabled = body.enabled;
+    }
+    return send(res, 200, keyBody(k));
+  }
   const key = /^\/pool\/keys\/([^/]+)$/.exec(p);
-  if (key && (m === "PUT" || m === "DELETE")) {
+  if (key && (m === "PUT" || m === "DELETE" || m === "POST")) {
     const pp = POOL.find((x) => x.id === decodeURIComponent(key[1]));
     if (!pp) return send(res, 404, { detail: "There is no API provider called that." });
-    if (m === "DELETE") for (const v of pp.vars) delete state.keys[v.name];
-    else {
-      const values = ((await readJson(req)).values ?? {}) as Record<string, unknown>;
-      for (const [k, v] of Object.entries(values)) {
-        if (!pp.vars.some((x) => x.name === k))
-          return send(res, 409, { detail: `${pp.id} does not use ${k}.` });
-        if (typeof v !== "string" || !v.trim())
-          return send(res, 409, { detail: `${k} must be one line of text.` });
-        if (v.includes("REVOKED"))
-          return send(res, 409, { detail: `${pp.id} refused this key: it has been revoked.` });
-        state.keys[k] = true;
-      }
+    const ks = (state.poolKeys[pp.id] ??= []);
+    const keyVar = keyVarOf(pp);
+    if (m === "DELETE") {
+      state.poolKeys[pp.id] = [];
+      return send(res, 200, providerPool(pp));
     }
-    return send(
-      res,
-      200,
-      poolBody().find((x) => x.id === pp.id),
-    );
+    if (m === "POST") {
+      if (!multiKey()) return send(res, 405, { detail: "Method Not Allowed" });
+      const body = await readJson(req);
+      const v = typeof body.key === "string" ? body.key.trim() : "";
+      if (!v) return send(res, 409, { detail: "The key must be one line of text." });
+      if (v.includes("REVOKED"))
+        return send(res, 409, { detail: `${pp.id} refused this key: it has been revoked.` });
+      const twin = ks.findIndex((x) => x.hash === hashOf(v));
+      if (twin >= 0)
+        return send(res, 409, {
+          detail: `That key is saved already (${ks[twin].label ?? `Key ${twin + 1}`}).`,
+        });
+      const ex = (body.extras ?? {}) as Record<string, unknown>;
+      const extras: Record<string, boolean> = {};
+      for (const [n, x] of Object.entries(ex)) {
+        if (!(EXTRAS[pp.id] ?? []).includes(n))
+          return send(res, 409, { detail: `${pp.id} does not use ${n}.` });
+        if (typeof x === "string" && x.trim()) extras[n] = true;
+      }
+      const tier = body.tier === "free" || body.tier === "paid" ? body.tier : null;
+      const label =
+        typeof body.label === "string" && body.label.trim() ? body.label.trim().slice(0, 60) : null;
+      ks.push(newKey(v, extras, label, tier));
+      return send(res, 200, { ...providerPool(pp), check: checkOf(v) });
+    }
+    const values = ((await readJson(req)).values ?? {}) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(values)) {
+      if (!pp.vars.some((x) => x.name === k))
+        return send(res, 409, { detail: `${pp.id} does not use ${k}.` });
+      if (typeof v !== "string" || !v.trim())
+        return send(res, 409, { detail: `${k} must be one line of text.` });
+      if (v.includes("REVOKED"))
+        return send(res, 409, { detail: `${pp.id} refused this key: it has been revoked.` });
+    }
+    const v = typeof values[keyVar] === "string" ? (values[keyVar] as string).trim() : "";
+    const extras: Record<string, boolean> = {};
+    for (const n of EXTRAS[pp.id] ?? []) if (values[n]) extras[n] = true;
+    if (v && ks.slice(1).some((x) => x.hash === hashOf(v)))
+      return send(res, 409, { detail: "That key is saved already." });
+    if (v) {
+      const fresh = newKey(
+        v,
+        { ...(ks[0]?.extras ?? {}), ...extras },
+        ks[0]?.label ?? null,
+        ks[0]?.tier ?? null,
+      );
+      if (ks[0]) ks[0] = { ...fresh, id: ks[0].id };
+      else ks.push(fresh);
+    } else if (ks[0]) Object.assign(ks[0].extras, extras);
+    return send(res, 200, {
+      ...providerPool(pp),
+      ...(multiKey() && v ? { check: checkOf(v) } : {}),
+    });
   }
   if (p === "/web/login/show" && m === "POST") {
     const { a } = target(await readJson(req));

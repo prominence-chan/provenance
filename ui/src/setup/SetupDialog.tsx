@@ -21,7 +21,7 @@ import {
   getAccounts,
   getLogin,
   getPoolHelp,
-  getPoolKeys,
+  getPoolKeysAll,
   loginActive,
   nextAccountId,
   prepareBrowser,
@@ -29,6 +29,7 @@ import {
   startLogin,
   type Login,
   type PoolHelpData,
+  type RemovedProvider,
   type PoolProvider,
   type Unavailable,
   type WebAccounts,
@@ -58,6 +59,7 @@ export function SetupDialog() {
   const [data, setData] = useState<WebAccounts | null>(null);
   const [pool, setPool] = useState<PoolProvider[] | null>(null);
   const [help, setHelp] = useState<PoolHelpData | null>(null);
+  const [removed, setRemoved] = useState<RemovedProvider[]>([]);
   const [unavailable, setUnavailable] = useState<Unavailable | null>(null);
   const [view, setView] = useState<View>({ step: "sites" });
   const [login, setLogin] = useState<Login | null>(null);
@@ -75,8 +77,9 @@ export function SetupDialog() {
     return r;
   }, []);
   const reloadPool = useCallback(async () => {
-    const [r, h] = await Promise.all([getPoolKeys(), getPoolHelp()]);
-    setPool(r.ok ? r.value : null); // an older router can't set keys from the app: no pool row
+    const [r, h] = await Promise.all([getPoolKeysAll(), getPoolHelp()]);
+    setPool(r.ok ? r.value.providers : null); // an older router can't set keys from the app: no pool row
+    setRemoved(r.ok ? r.value.removed : []);
     setHelp(h); // an older router has no instructions: the keys page is as it was
     if (r.ok) void refreshSources(); // a key changes what the tier picker offers
   }, []);
@@ -270,6 +273,7 @@ export function SetupDialog() {
     body = pool ? (
       <KeysStep
         pool={pool}
+        removed={removed}
         help={help}
         accounts={data}
         focus={startView === "keys" ? startProvider : null}

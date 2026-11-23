@@ -180,15 +180,80 @@ export interface WirePoolProvider {
   vars: WireKeyVar[];
   models: number;
   tiers: string[];
+  /** Each saved key (several per provider: one per account). Absent on an older router. */
+  keys?: WirePoolKey[];
+  /** Whether the provider's terms allow a second account's key. */
+  multiple_keys?: WireMultipleKeys;
+  /** ISO date: it stops being offered after it (Inception after its API shuts down). */
+  until?: string | null;
+}
+
+export type KeyTier = "free" | "paid";
+
+/** One saved key: never the value, only enough to tell it apart. */
+export interface WirePoolKey {
+  id: string;
+  /** The person's name for it; null: "Key 1", "Key 2" by position. */
+  label: string | null;
+  tier: KeyTier | null;
+  usable: boolean;
+  /** Why it isn't usable (the provider's answer to the check). */
+  reason: string | null;
+  /** ISO time it was saved. */
+  added: string | null;
+  /** The key's last four characters. */
+  last4: string | null;
+  /** The router's view of its limits (shape the router's; the app doesn't read it). */
+  limits?: unknown;
+  /** false: kept but not used (PATCH {enabled}). */
+  enabled?: boolean;
+}
+
+/** yes; check_terms: the person should read the terms first; no: not for more free usage. */
+export interface WireMultipleKeys {
+  allowed: "yes" | "check_terms" | "no";
+  note: string | null;
+}
+
+/** A provider taken out of the pool, and why. */
+export interface WireRemovedProvider {
+  id: string;
+  name: string;
+  reason: string;
+  /** ISO date it was taken out. */
+  date: string;
 }
 
 export interface WirePoolKeys {
   providers: WirePoolProvider[];
+  removed?: WireRemovedProvider[];
 }
 
 /** PUT /pool/keys/{provider}. Values go one way: they are never sent back. */
 export interface KeysPut {
   values: Record<string, string>;
+}
+
+/** What the router found when it tried a key just saved (PUT, POST). */
+export interface WireKeyCheck {
+  ok: boolean;
+  detail: string | null;
+}
+
+/** POST /pool/keys/{provider}: one more key (409 when that key is saved already). */
+export interface KeyPost {
+  key: string;
+  label?: string;
+  tier?: KeyTier;
+  /** The provider's other fields for this key (Cloudflare's account id), by variable name. */
+  extras?: Record<string, string>;
+}
+
+/** PATCH /pool/keys/{provider}/{key_id}. */
+export interface KeyPatch {
+  label?: string | null;
+  tier?: KeyTier | null;
+  enabled?: boolean;
 }
 
 // ---- GET /pool/help: how to get each provider's key, in the order to do them -------------
@@ -242,6 +307,20 @@ export interface WirePoolHelpProvider {
    * in (Google AI Studio with a Gemini account): POST /web/open {provider, account, url}.
    */
   open_with?: { provider: string; account: string }[];
+  multiple_keys?: WireMultipleKeys;
+  until?: string | null;
+  /** What earlier setups (POST …/outcome) came to. */
+  experience?: WirePoolExperience;
+}
+
+/** Where people got stuck: a step (1-based) and what went wrong there, or a line of text. */
+export type WireTrouble = string | { step?: number | null; note?: string; text?: string };
+
+export interface WirePoolExperience {
+  tries: number;
+  worked: number;
+  last_worked: string | null;
+  common_trouble: WireTrouble[];
 }
 
 export interface WirePoolHelp {
@@ -249,6 +328,23 @@ export interface WirePoolHelp {
   /** Rules for an assistant walking someone through these (the app's setup assistant gets them). */
   assistant_notes?: string[];
   providers: WirePoolHelpProvider[];
+  removed?: WireRemovedProvider[];
+}
+
+// ---- POST /pool/help/{provider}/outcome: how a setup went, for the next person's guide -----
+// No key, e-mail or other personal detail: step numbers, the site's control names, a result.
+
+export type OutcomeResult = "saved_working" | "saved_rejected" | "skipped" | "gave_up";
+
+export interface OutcomePost {
+  result: OutcomeResult;
+  /** Roughly, from the key card shown (the provider opened) to saved. */
+  minutes?: number;
+  /** Which steps went as written; where one didn't, what the page showed instead. */
+  step_notes?: { step: number; ok: boolean; note?: string }[];
+  /** The site's control names as the person saw them. */
+  labels_seen?: string[];
+  source: "assistant" | "manual";
 }
 
 // ---- POST/GET /web/open: a provider's key page in a signed-in web account's window ---------
@@ -326,4 +422,8 @@ export const ROUTER_ROUTES: ProxyRoute[] = [
   { method: "GET", path: /^\/pool\/help$/ },
   { method: "PUT", path: new RegExp(`^/pool/keys/${ID}$`) },
   { method: "DELETE", path: new RegExp(`^/pool/keys/${ID}$`) },
+  { method: "POST", path: new RegExp(`^/pool/keys/${ID}$`) },
+  { method: "PATCH", path: new RegExp(`^/pool/keys/${ID}/${ID}$`) },
+  { method: "DELETE", path: new RegExp(`^/pool/keys/${ID}/${ID}$`) },
+  { method: "POST", path: new RegExp(`^/pool/help/${ID}/outcome$`) },
 ];

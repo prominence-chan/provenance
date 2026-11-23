@@ -3397,3 +3397,229 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .key-notworth {
   border-top: 1px solid var(--border);
 }
+/* Several keys per provider (KeysStep.tsx): the open provider's keys as hairline rows, Add
+   another key, the terms' note on a second account, the name and plan of a new key. */
+.key-manage {
+  gap: 6px;
+}
+.key-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.key-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 34px;
+  padding: 3px 0;
+}
+.setup-accounts .key-list li + li {
+  border-top: 1px solid var(--border);
+}
+.key-item-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.key-item-main .setup-plan {
+  margin-left: 0;
+}
+.key-item-label {
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--fs-md);
+  color: var(--text);
+  text-align: left;
+  cursor: text;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--dur-fast) var(--ease);
+}
+.key-item-label:hover,
+.key-item-label:focus-visible {
+  text-decoration-color: var(--muted);
+}
+.key-item-input {
+  width: 180px;
+  height: 24px;
+}
+.key-item-last4 {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.key-item-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: auto;
+}
+.key-item-state .setup-status {
+  white-space: normal;
+}
+.key-item-state .setup-remove {
+  padding: 4px;
+}
+.key-item .setup-confirm {
+  margin-left: auto;
+}
+.key-item-msg {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+}
+.key-add-another {
+  margin-top: 0;
+  padding: 4px 0;
+  font-size: var(--fs-sm);
+}
+.key-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.key-add .setup-key-form {
+  margin: 0;
+}
+.key-terms-note {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border-left: 2px solid var(--warn);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-wrap: pretty;
+}
+.key-terms-note[data-allowed="check_terms"] {
+  border-left-color: var(--border-strong);
+}
+.key-terms-note p {
+  margin: 0;
+}
+.key-terms-note .meta {
+  margin-top: 2px;
+  white-space: normal;
+}
+.key-add-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px 12px;
+}
+.key-add-label {
+  flex: 1 1 180px;
+}
+.key-add-label .setup-input {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+}
+.key-add-tier {
+  flex: 0 0 auto;
+}
+.key-add-hint {
+  flex-basis: 100%;
+  white-space: normal;
+}
+.key-tier-seg {
+  display: inline-flex;
+  height: 26px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.key-tier-seg button {
+  min-width: 52px;
+  padding: 0 10px;
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  background: none;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.key-tier-seg button[aria-checked="true"] {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+/* Where earlier setups got stuck, under that step. */
+.key-trouble {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--fs-sm);
+  color: var(--warn);
+  text-wrap: pretty;
+}
+p.key-trouble {
+  margin: -2px 0 0;
+}
+.key-until {
+  white-space: nowrap;
+}
+/* "No longer in the pool: …": one folded line at the bottom. */
+.key-removed {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-removed > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.key-removed > summary::-webkit-details-marker {
+  display: none;
+}
+.key-removed > summary svg {
+  flex-shrink: 0;
+  transition: transform var(--dur-fast) var(--ease);
+}
+.key-removed[open] > summary svg {
+  transform: rotate(90deg);
+}
+.key-removed-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-removed-list {
+  margin: 0 0 0 17px;
+  padding: 0;
+  list-style: none;
+}
+.key-removed-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 0;
+}
+.key-removed-list li + li {
+  border-top: 1px solid var(--border);
+}
+.key-removed-text {
+  flex: 1 1 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--text);
+}
+.key-removed-text .meta {
+  white-space: normal;
+}

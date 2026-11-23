@@ -1,16 +1,15 @@
 // An assistant message. In the token pool's setup thread, a line `[[provenance:pool-key <id>]]`
-// becomes a key card (setup/PoolAssist.tsx) in place of the text: the newest one, once its turn
-// has finished, takes a key; earlier ones show what came of them.
+// (or `<id> add`) becomes a key card (setup/PoolAssist.tsx) in place of the text: the newest one,
+// once its turn has finished, takes a key; earlier ones show what came of them. A line
+// `[[provenance:pool-steps <id> {…}]]` is the app's (setup/pool-outcome.ts reads it): not shown.
 
 import type { ThreadItem } from "../../protocol";
-import { isAssistView, parseNote, splitMarkers } from "../../setup/assist-text";
+import { HAS_MARKER, isAssistView, parseNote, splitMarkers } from "../../setup/assist-text";
 import { PoolKeyCard } from "../../setup/PoolAssist";
 import { useAppState } from "../../store/store";
 import { Markdown } from "../Markdown";
 
 type AgentItem = Extract<ThreadItem, { type: "agentMessage" }>;
-
-const HAS_MARKER = "[[provenance:pool-key ";
 
 export function AgentMessage({ item }: { item: AgentItem }) {
   const marked = item.text.includes(HAS_MARKER) || item.text.trimEnd().endsWith("[");
@@ -49,10 +48,11 @@ export function AgentMessage({ item }: { item: AgentItem }) {
       {parts.map((p, i) =>
         p.kind === "text" ? (
           <Markdown key={i} text={p.text} />
-        ) : (
+        ) : p.kind === "steps" ? null : (
           <PoolKeyCard
             key={`${item.id}-${i}`}
             id={p.id}
+            add={p.add}
             threadId={threadId}
             live={live === "1" && i === lastCard}
             outcome={i === lastCard && noteText ? { text: noteText, tone } : null}

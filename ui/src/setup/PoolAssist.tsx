@@ -6,12 +6,14 @@
 //   startPoolAssist builds the brief from /pool/help and /pool/keys, makes an empty scratch
 //                   folder (POST /api/scratch), and starts the read-only fallback thread
 //   PoolKeyCard     what `[[provenance:pool-key <id>]]` in the assistant's message becomes: the
-//                   provider's steps, its keys page and the key field; the outcome goes back to
-//                   the assistant as the next message, by itself
+//                   provider's steps, its keys page and the key field (`<id> add`: one more key
+//                   beside the saved ones, with the terms' note on a second account); the outcome
+//                   goes back to the assistant as the next message, by itself, and to the router
+//                   (pool-outcome.ts) with the assistant's notes on the steps
 //   KeyIntercept    a key pasted into the composer of that thread: saved to the provider instead,
 //                   and only a redacted note is sent
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fallbacks, type Fallback } from "../fallback/available";
 import { fallbackModelKey } from "../../shared/fallback-api";
 import { notify, sendMessage, startAssistThread } from "../store/actions";
@@ -20,25 +22,36 @@ import {
   ASSIST_NAME,
   NOTE_PREFIX,
   guided,
+  noteReason,
   outcomeNote,
   poolBrief,
   poolSetUp,
   redact,
   type KeyOutcome,
 } from "./assist-text";
-import { DataUse, GuideFacts, GuideSteps, KeyForm, OpenButtons } from "./KeyGuide";
+import {
+  DataUse,
+  GuideFacts,
+  GuideSteps,
+  KeyForm,
+  OpenButtons,
+  rejectedText,
+  TermsNote,
+} from "./KeyGuide";
 import { providerName, shortName } from "./KeysStep";
+import { assistResult, cardShown } from "./pool-outcome";
 import { closeSetupDialogs } from "./open";
 import { Status } from "./parts";
 import { savePoolKey } from "./pool-save";
 import {
   getAccounts,
   getPoolHelp,
-  getPoolKeys,
+  getPoolKeysAll,
   getWebOpen,
   inUse,
   type PoolHelpData,
   type PoolProvider,
+  type RemovedProvider,
   type WebAccounts,
 } from "./web";
 
@@ -99,7 +112,7 @@ export function AssistNote({
 
 /** Start the assistant's thread. Nothing secret goes in: /pool/keys never sends a value back. */
 export async function startPoolAssist(f: Fallback): Promise<void> {
-  const [help, keys] = await Promise.all([getPoolHelp(), getPoolKeys()]);
+  const [help, keys] = await Promise.all([getPoolHelp(), getPoolKeysAll()]);
   if (!help || !keys.ok) return notify("error", "The router can't explain its keys yet.");
   let cwd: string;
   try {
@@ -118,7 +131,7 @@ export async function startPoolAssist(f: Fallback): Promise<void> {
   await startAssistThread(
     fallbackModelKey(f.mode, ""),
     cwd,
-    poolBrief(help, keys.value, f.name),
+    poolBrief(help, keys.value.providers, f.name, keys.value.removed),
     ASSIST_NAME,
   );
 }
@@ -133,6 +146,7 @@ export async function startPoolAssist(f: Fallback): Promise<void> {
 interface PoolData {
   help: PoolHelpData | null;
   pool: PoolProvider[] | null;
+  removed: RemovedProvider[];
   accounts: WebAccounts | null;
   webOpen: boolean;
 }
@@ -140,11 +154,12 @@ let cache: PoolData | null = null;
 let loading: Promise<void> | null = null;
 const subs = new Set<() => void>();
 export function reloadPoolData(): Promise<void> {
-  loading = Promise.all([getPoolHelp(), getPoolKeys(), getAccounts(), getWebOpen()]).then(
+  loading = Promise.all([getPoolHelp(), getPoolKeysAll(), getAccounts(), getWebOpen()]).then(
     ([help, keys, accounts, open]) => {
       cache = {
         help,
-        pool: keys.ok ? keys.value : null,
+        pool: keys.ok ? keys.value.providers : null,
+        removed: keys.ok ? keys.value.removed : [],
         accounts: accounts.ok ? accounts.value : null,
         webOpen: open !== null,
       };
@@ -210,11 +225,14 @@ function tell(threadId: string, note: string): void {
 
 export function PoolKeyCard({
   id,
+  add = false,
   threadId,
   live,
   outcome,
 }: {
   id: string;
+  /** `[[provenance:pool-key <id> add]]`: one more key beside the saved ones. */
+  add?: boolean;
   threadId: string | null;
   /** The newest card, not answered yet: it takes a key. */
   live: boolean;
@@ -227,11 +245,26 @@ export function PoolKeyCard({
   const pool = data?.pool?.find((p) => p.id === id);
   const name = shortName(help?.name ?? providerName(id));
   const sending = useAppState((s) => s.sending);
+  // A router that keeps several keys per provider; else saving replaces the one there is.
+  const multi = !!pool && pool.keys !== null;
+  const another = add && multi && (pool?.keys?.length ?? 0) > 0;
+
+  // The card is up: the minutes it takes count from here.
+  const counted = useRef(false);
+  useEffect(() => {
+    if (!live || sent || !threadId || !data || counted.current) return;
+    counted.current = true;
+    cardShown(threadId, id, data.help?.providers);
+  }, [live, sent, threadId, id, data]);
 
   const done = (o: KeyOutcome) => {
     setSent(o);
     void reloadPoolData();
-    if (threadId) tell(threadId, outcomeNote(name, o));
+    if (threadId) {
+      // First: the note's own turn is the one whose reply may carry the steps line.
+      assistResult(threadId, id, o);
+      tell(threadId, outcomeNote(name, o));
+    }
   };
 
   if (!live || sent) {
@@ -242,20 +275,27 @@ export function PoolKeyCard({
           ? "off"
           : "warn"
       : outcome?.tone;
-    const why =
-      sent && "reason" in sent
-        ? sent.reason
-        : outcome?.text.match(/(?:rejected|not saved):? (.*)$/)?.[1];
+    const notSaved = sent ? sent.kind === "not_saved" : /not saved/.test(outcome?.text ?? "");
+    const why = sent && "reason" in sent ? sent.reason : noteReason(outcome?.text ?? "");
+    const byRouter = sent
+      ? sent.kind === "rejected" && sent.by === "router"
+      : /can't be used yet/.test(outcome?.text ?? "");
     const t = !tone
       ? null
       : tone === "ok"
         ? "Saved and working"
         : tone === "off"
           ? "Skipped"
-          : `${sent?.kind === "not_saved" || /not saved/.test(outcome?.text ?? "") ? "Not saved" : "Saved, but rejected"}${why ? `: ${why}` : ""}`;
+          : notSaved
+            ? `Not saved${why ? `: ${why}` : ""}`
+            : rejectedText(name, {
+                kind: "rejected",
+                reason: why ?? "it refused the key",
+                by: byRouter ? "router" : "provider",
+              });
     return (
       <div className="key-card key-card-closed" data-key-card={id}>
-        <span className="key-card-title">{name} key</span>
+        <span className="key-card-title">{add ? `Another ${name} key` : `${name} key`}</span>
         {t ? (
           <Status
             cls={tone === "ok" ? "dot-ok" : tone === "off" ? "dot-off" : "dot-warn"}
@@ -286,15 +326,27 @@ export function PoolKeyCard({
         <span className="setup-key-actions">{skip}</span>
       </div>
     );
+  const count = pool.keys?.length ?? 0;
+  const terms = pool.multiple_keys ?? help?.multiple_keys ?? null;
   return (
-    <div className="key-card" data-key-card={id} data-live>
+    <div className="key-card" data-key-card={id} data-live data-add={another || undefined}>
       <div className="key-card-head">
-        <p className="key-card-title">Add your {name} key</p>
+        <p className="key-card-title">
+          {another ? `Add another ${name} key` : `Add your ${name} key`}
+        </p>
         <span className="meta key-card-sub">
-          Paste it here: Provenance saves it, and the assistant only hears whether it works.
+          {another
+            ? `Paste it here: it joins the ${count === 1 ? "key" : `${count} keys`} already saved, and the assistant only hears whether it works.`
+            : "Paste it here: Provenance saves it, and the assistant only hears whether it works."}
         </span>
+        {add && !multi && pool.vars.some((v) => v.set) && (
+          <span className="meta key-card-sub">
+            This router keeps one key per provider: saving replaces the one saved.
+          </span>
+        )}
       </div>
-      {help && <DataUse help={help} />}
+      {another && <TermsNote multi={terms} name={name} />}
+      {help && !another && <DataUse help={help} />}
       {help && (
         <details className="key-card-steps">
           <summary>Steps{help.steps.length ? ` (${help.steps.length})` : ""}</summary>
@@ -310,6 +362,7 @@ export function PoolKeyCard({
         autoFocus
         showRemove={false}
         extraActions={skip}
+        add={another ? { multi: terms, defaultLabel: `Key ${count + 1}` } : undefined}
         onDone={(o) => o !== "removed" && o.kind !== "not_saved" && done(o)}
       />
     </div>
@@ -362,11 +415,17 @@ export function KeyIntercept({
       p.vars[0];
     setBusy(true);
     setErr(null);
-    const { outcome } = await savePoolKey(p.id, { [v.name]: keyText });
+    // Beside the saved ones where the router keeps several; else it sets (replaces) the one.
+    const { outcome } = await savePoolKey(
+      p.id,
+      { [v.name]: keyText },
+      p.keys?.length ? { keyVar: v.name } : undefined,
+    );
     setBusy(false);
     if (outcome.kind === "not_saved") return setErr(outcome.reason);
     void reloadPoolData();
     const note = `${NOTE_PREFIX}A key the person pasted into the chat was taken out and saved by the app. ${outcomeNote(nameOf(p.id), outcome).slice(NOTE_PREFIX.length)}`;
+    assistResult(threadId, p.id, outcome);
     tell(threadId, rest ? `${note}\n\n${redact(text, [keyText])}` : note);
     onDone();
   };

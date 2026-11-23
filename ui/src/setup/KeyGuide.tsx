@@ -5,9 +5,10 @@
 // keys page (KeysStep.tsx) and by the setup assistant's key card (PoolAssist.tsx).
 //
 // Values stay in their own <input>s (uncontrolled: never React state) until Save reads them into
-// the one PUT body; the fields are emptied once the router has them.
+// the one PUT (or POST, for one more key) body; the fields are emptied once the router has them.
 
 import { useEffect, useRef, useState } from "react";
+import type { KeyTier } from "../../shared/router-api";
 import { keyFits, type KeyOutcome } from "./assist-text";
 import { shortName } from "./KeysStep";
 import { usePoolData } from "./PoolAssist";
@@ -19,6 +20,7 @@ import {
   getWebOpen,
   openWebPage,
   siteHost,
+  type MultipleKeys,
   type PoolHelp,
   type PoolProvider,
 } from "./web";
@@ -114,17 +116,56 @@ export function GuideSteps({ help }: { help: PoolHelp }) {
       : help.confidence === "uncertain"
         ? "These steps may be out of date: where the page differs, follow the page."
         : null;
+  // Where earlier setups got stuck (the router's experience): under that step, else after them.
+  const trouble = help.experience?.common_trouble ?? [];
+  const at = (n: number) => trouble.filter((t) => t.step === n);
+  const loose = trouble.filter((t) => !t.step || t.step > help.steps.length);
   return (
     <>
       <ol className="key-steps">
         {help.steps.map((s, i) => (
           <li key={i}>
             <Inline text={s} />
+            {at(i + 1).map((t, j) => (
+              <span key={j} className="key-trouble" data-trouble-step={i + 1}>
+                People often get stuck here: <Inline text={t.note} />
+              </span>
+            ))}
           </li>
         ))}
       </ol>
+      {loose.map((t, j) => (
+        <p key={j} className="key-trouble">
+          People often get stuck{t.step ? ` at step ${t.step}` : ""}: <Inline text={t.note} />
+        </p>
+      ))}
       {note && <p className="meta key-confidence">{note}</p>}
     </>
+  );
+}
+
+/**
+ * Before a second key: what the provider's terms say about a second account, from the router
+ * (`multiple_keys`). Nothing when they allow it.
+ */
+export function TermsNote({ multi, name }: { multi: MultipleKeys | null; name: string }) {
+  if (!multi || multi.allowed === "yes") return null;
+  return (
+    <div className="key-terms-note" role="note" data-allowed={multi.allowed}>
+      {multi.allowed === "no" ? (
+        <p>
+          {name}'s terms don't allow a second account for more free usage. Add another key only if
+          it's from a separate paid account of yours.
+        </p>
+      ) : (
+        <p>Check {name}'s terms before you use a second account.</p>
+      )}
+      {multi.note && (
+        <p className="meta">
+          <Inline text={multi.note} />
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -288,6 +329,22 @@ function fieldsOf(p: PoolProvider, help?: PoolHelp) {
   });
 }
 
+/** "Saved, but Groq rejected it: 401 Invalid API Key." */
+export function rejectedText(name: string, o: Extract<KeyOutcome, { kind: "rejected" }>): string {
+  const why = o.reason.replace(/\.$/, "");
+  return o.by === "router"
+    ? `Saved, but ${name} can't be used yet: ${why}.`
+    : `Saved, but ${name} rejected it: ${why}.`;
+}
+
+/** Adding one more key beside the saved ones (POST), with its name and plan. */
+export interface AddMode {
+  multi: MultipleKeys | null;
+  /** Its default name: "Key 2". */
+  defaultLabel: string;
+  onCancel?: () => void;
+}
+
 export function KeyForm({
   pool: p,
   help,
@@ -296,6 +353,7 @@ export function KeyForm({
   onDone,
   extraActions,
   showRemove = true,
+  add,
 }: {
   pool: PoolProvider;
   help?: PoolHelp;
@@ -306,12 +364,16 @@ export function KeyForm({
   /** Beside Save (the key card's Skip). */
   extraActions?: React.ReactNode;
   showRemove?: boolean;
+  add?: AddMode;
 }) {
   const refs = useRef<Record<string, HTMLInputElement | null>>({});
+  const labelRef = useRef<HTMLInputElement | null>(null);
   const [filled, setFilled] = useState<Record<string, boolean>>({});
   const [misfit, setMisfit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<{ text: string; tone: "bad" | "warn" } | null>(null);
+  // A second account the terms don't allow for free usage is a paid one, if anything.
+  const [tier, setTier] = useState<KeyTier>(add?.multi?.allowed === "no" ? "paid" : "free");
   const fromApp = p.vars.some((v) => v.from === "app");
   const fields = fieldsOf(p, help);
 
@@ -322,17 +384,23 @@ export function KeyForm({
       if (val) vals[f.v.name] = val;
     }
     if (!Object.keys(vals).length) return setErr({ text: "Paste the key first.", tone: "bad" });
+    const keyVar = fields.find((f) => f.isKey)?.v.name ?? fields[0]?.v.name ?? "";
+    if (add && !vals[keyVar]) return setErr({ text: "Paste the key first.", tone: "bad" });
     setBusy(true);
     setErr(null);
-    const { outcome } = await savePoolKey(p.id, vals);
+    const { outcome } = await savePoolKey(
+      p.id,
+      vals,
+      add ? { keyVar, label: labelRef.current?.value, tier } : undefined,
+    );
     setBusy(false);
     if (outcome.kind === "not_saved") setErr({ text: outcome.reason, tone: "bad" });
     else {
       for (const el of Object.values(refs.current)) if (el) el.value = "";
+      if (labelRef.current) labelRef.current.value = "";
       setFilled({});
       setMisfit(false);
-      if (outcome.kind === "rejected")
-        setErr({ text: `Saved, but ${name} can't be used yet: ${outcome.reason}.`, tone: "warn" });
+      if (outcome.kind === "rejected") setErr({ text: rejectedText(name, outcome), tone: "warn" });
     }
     onDone(outcome);
   };
@@ -359,7 +427,7 @@ export function KeyForm({
         <label key={f.v.name} className="setup-key-field">
           <span className="key-label">
             <span>{f.label}</span>
-            {f.v.set && (
+            {f.v.set && !add && (
               <span className="meta">
                 set{f.v.from === "env" ? " by the router's setup" : ""}: paste to replace
               </span>
@@ -395,13 +463,60 @@ export function KeyForm({
           )}
         </label>
       ))}
+      {add && (
+        <div className="key-add-meta">
+          <label className="setup-key-field key-add-label">
+            <span className="key-label">
+              <span>Name</span>
+              <span className="meta">optional</span>
+            </span>
+            <input
+              ref={labelRef}
+              className="setup-input"
+              name="key-label"
+              type="text"
+              maxLength={60}
+              autoComplete="off"
+              placeholder={add.defaultLabel}
+              data-key-label
+            />
+          </label>
+          <div className="setup-key-field key-add-tier">
+            <span className="key-label" id={`key-tier-${p.id}`}>
+              <span>Plan</span>
+            </span>
+            <span className="key-tier-seg" role="radiogroup" aria-labelledby={`key-tier-${p.id}`}>
+              {(["free", "paid"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="radio"
+                  aria-checked={tier === t}
+                  data-tier-choice={t}
+                  onClick={() => setTier(t)}
+                >
+                  {t === "free" ? "Free" : "Paid"}
+                </button>
+              ))}
+            </span>
+          </div>
+          <span className="meta key-add-hint">
+            Paid keys usually have higher limits; Provenance will use both.
+          </span>
+        </div>
+      )}
       {err && (
         <p className={err.tone === "bad" ? "setup-row-msg" : "key-warn"} role="alert">
           {err.text}
         </p>
       )}
       <span className="setup-key-actions">
-        {showRemove && fromApp && (
+        {add?.onCancel && (
+          <button type="button" className="btn" disabled={busy} onClick={add.onCancel}>
+            Cancel
+          </button>
+        )}
+        {showRemove && !add && fromApp && (
           <button
             type="button"
             className="btn btn-danger"

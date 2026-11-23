@@ -25,7 +25,14 @@
 //      prompts before the steps; signed in to Gemini without a Google key: the prompt (welcome
 //      and keys page) and "Open in your signed-in Gemini window" (POST /web/open, closed through
 //      the cancel path), in the key card too
-//   4. a router without /web/open (the button hidden) and one without any of the new endpoints:
+//   3c. several keys per provider: the assistant's `add` card (a second Groq key, named and paid,
+//      rejected by the check, and the assistant told so), the outcome POSTs (an assisted save with
+//      the assistant's steps line scrubbed of the key and e-mail it tried to slip in, a skip, a
+//      manual save); the keys page's list (summed up, renamed in place, one removed after asking),
+//      Add another key with its name and plan, the terms' note for check_terms and no, a provider
+//      offered until a date, the providers no longer in the pool with a leftover key removed
+//   4. a router without /web/open (the button hidden), one with one key per provider (today's
+//      page, no outcome route: nothing sent, no errors) and one without any of the new endpoints:
 //      all of it hidden, no errors
 // Screenshots in dark and light, at the dialog's size and at 390 px.
 
@@ -60,7 +67,12 @@ const { log, shot, check, shots } = kit(
 const PASSWORD = "FAKE-pw-for-tests-only-7Qx2";
 const GROQ_KEY = `gsk_${"FAKEtestKEY0".repeat(4)}0123`; // gsk_ + 52
 const GOOGLE_KEY = `AIza${"FAKEtestKEY".repeat(3)}xy`; // AIza + 35
-const SECRETS = [PASSWORD, GROQ_KEY, GOOGLE_KEY];
+const GROQ_KEY2 = `gsk_${"FAKEsecondKEY".repeat(3)}REJECT9`; // the stand-in's check refuses it
+const GROQ_KEY3 = `gsk_${"FAKEthirdKEY0".repeat(3)}w3rk`;
+const SECRETS = [PASSWORD, GROQ_KEY, GOOGLE_KEY, GROQ_KEY2, GROQ_KEY3];
+// What the assistant's steps line tries to slip in (it never sees a real key): scrubbed out.
+const SLIPPED_KEY = "gsk_ASSISTANTwroteTHISfake0000000000";
+const SLIPPED_EMAIL = "someone.else@example.org";
 
 // Everything this process prints (the UI server runs in it): checked for secrets at the end.
 const printed: string[] = [];
@@ -118,6 +130,11 @@ type MockState = {
   plans: Record<string, Record<string, { needs_confirmation: string | null }>>;
   keys: Record<string, boolean>;
   accounts: Record<string, Record<string, { login: { state: string } }>>;
+  poolKeys: Record<
+    string,
+    { id: string; label: string | null; tier: string | null; usable: boolean }[]
+  >;
+  outcomes: { provider: string; body: Record<string, unknown> }[];
 };
 const mockState = async () => (await fetch(`${mock.url}/mock/state`)).json() as Promise<MockState>;
 const mockRequests = async () =>
@@ -243,6 +260,18 @@ async function allViews(p: Page, name: string) {
   await layoutOk(p, `${name} at 390 px`);
   await shot(p, `${name}-390`);
   await p.setViewportSize({ width: 1280, height: 820 });
+}
+
+/** The stand-in's nth outcome of this result for this provider, once it has come. */
+async function waitOutcome(provider: string, result: string, n = 1) {
+  for (let i = 0; i < 80; i++) {
+    const o = (await mockState()).outcomes.filter(
+      (x) => x.provider === provider && x.body.result === result,
+    );
+    if (o.length >= n) return o[n - 1].body;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`no ${result} outcome for ${provider} reached the router`);
 }
 
 /** Wait for the assistant's next turn to have run and finished. */
@@ -464,7 +493,7 @@ try {
     "the welcome doesn't count it as set up",
   );
   check(
-    /Claude Code can walk you through getting 2 free API keys/.test(
+    /Claude Code can walk you through getting 3 free API keys/.test(
       await page.locator(`${welcomeDialog} .assist-note`).innerText(),
     ) &&
       (await page
@@ -502,10 +531,26 @@ try {
   const order = await page
     .locator(`${dialog} .setup-keys:not(.key-notworth) > li`)
     .evaluateAll((l) => l.map((x) => x.getAttribute("data-pool")));
-  check(order.join() === "kilo,google,groq,cloudflare", `the help's order (${order})`);
+  check(order.join() === "kilo,google,groq,cloudflare,inception", `the help's order (${order})`);
+  check(
+    (await page.locator(`${dialog} li[data-pool="cohere"]`).count()) === 0,
+    "a provider not worth it isn't in the list",
+  );
   check(
     (await page.locator(`${dialog} li[data-pool="mistral"]`).count()) === 0,
-    "a provider not worth it isn't in the list",
+    "nor one taken out of the pool",
+  );
+  const until = page.locator(`${dialog} li[data-pool="inception"] .key-until`);
+  check(
+    (await until.innerText()) === "Available until 28\u00a0Dec\u00a02026",
+    "a provider offered until a date says so, quietly",
+  );
+  const removedLine = page.locator(`${dialog} .key-removed`);
+  check(
+    (await removedLine.locator("summary").innerText()) ===
+      "No longer in the pool: Mistral (no free API tier), Cerebras (free tier no longer usable)" &&
+      (await removedLine.getAttribute("open")) === null,
+    "the providers no longer in the pool: one folded line at the bottom",
   );
   const toggle = page.locator(`${dialog} .key-notworth-toggle`);
   check(
@@ -548,6 +593,12 @@ try {
     "Open console.groq.com opens the keys page outside the app",
   );
   check(/Starts with gsk_/.test(g), "the key format as the field's hint");
+  const trouble = groq.locator('.key-trouble[data-trouble-step="3"]');
+  check(
+    (await trouble.innerText()) ===
+      "People often get stuck here: the Display name field is required now; any name works.",
+    "where earlier setups got stuck: under that step",
+  );
   check((await groq.locator(".key-datause").count()) === 0, "Groq: nothing to warn about prompts");
   await groq.locator("input[data-key-field]").fill("sk-this-is-not-groq");
   await groq.locator(".key-misfit").waitFor();
@@ -574,25 +625,25 @@ try {
   );
   check((await groq.getAttribute("data-open")) === null, "opening Cloudflare closed Groq");
   await toggle.click();
-  const mistral = page.locator(`${dialog} .key-notworth li[data-pool="mistral"]`);
+  const cohere = page.locator(`${dialog} .key-notworth li[data-pool="cohere"]`);
   check(
-    /No free API tier\./.test(await mistral.innerText()) &&
-      (await mistral.locator(".key-badge").innerText()) === "No free tier",
-    "unfolded: Mistral, with why not",
+    /Trial keys only/.test(await cohere.innerText()) &&
+      (await cohere.locator(".key-badge").innerText()) === "Trial credit",
+    "unfolded: Cohere, with why not",
   );
-  await mistral.getByRole("button", { name: "Add key" }).click();
+  await cohere.getByRole("button", { name: "Add key" }).click();
   check(
-    (await mistral.locator("input[data-key-field]").count()) === 1,
+    (await cohere.locator("input[data-key-field]").count()) === 1,
     "still usable for someone who has a key",
   );
   await shot(page, "keys-not-worth");
 
   // The assistant note: without a fallback it leads to Fallbacks.
   check(
-    /Claude Code can walk you through getting 2 free API keys/.test(
+    /Claude Code can walk you through getting 3 free API keys/.test(
       await page.locator(`${dialog} .assist-note`).innerText(),
     ),
-    "the note: Claude Code can walk you through getting 2 free API keys (not the ones not worth it)",
+    "the note: Claude Code can walk you through getting 3 free API keys (not the ones not worth it)",
   );
   await page.getByRole("button", { name: "Close" }).click();
   const nofb = await newPage({ fallbacks: false });
@@ -693,12 +744,12 @@ try {
   check(
     /\(card id: groq\)/.test(first.stdin) &&
       /click \*\*Create API Key\*\*/.test(first.stdin) &&
-      /Not set up yet, in this order \(3/.test(first.stdin) &&
+      /Not set up yet, in this order \(4/.test(first.stdin) &&
       /\[\[provenance:pool-key <id>\]\]/.test(first.stdin),
     "the brief: what's left with its steps, and the marker",
   );
   check(
-    /Mistral AI \(card id: mistral\): No free API tier\./.test(first.stdin) &&
+    /Cohere \(card id: cohere\): Trial keys only/.test(first.stdin) &&
       /Skip the providers listed as not worth it/.test(first.stdin) &&
       /The router's general notes/.test(first.stdin) &&
       /Never create an account, sign in, accept terms/.test(first.stdin) &&
@@ -715,6 +766,36 @@ try {
       /Stop as soon as the person says so/.test(first.stdin) &&
       /sum up/.test(first.stdin),
     "the brief's rules: no keys in chat, no accounts or terms, no reading keys, one at a time, stop, sum up",
+  );
+  check(
+    /\[\[provenance:pool-key <id> add\]\]/.test(first.stdin) &&
+      /Offer another key only when the person says they have another account/.test(first.stdin) &&
+      /pass on that provider's note on more than one key/.test(first.stdin) &&
+      /Several keys: more than one key: the person should check its terms first: Limits are per Google Cloud project/.test(
+        first.stdin,
+      ) &&
+      /Several keys: its terms don't allow a second account for more free usage; another key only from a separate paid account of theirs/.test(
+        first.stdin,
+      ),
+    "the brief: several keys per provider, offered only for another account, with the terms' notes",
+  );
+  check(
+    /\[\[provenance:pool-steps <id> \{"ok":\[1,2,4\]/.test(first.stdin) &&
+      /never a key, an e-mail address, a name or anything else about the person/.test(first.stdin),
+    "the brief asks for the steps line, with only step numbers and control names",
+  );
+  check(
+    /Available only until 28 Dec 2026, then it leaves the pool: mention it once/.test(
+      first.stdin,
+    ) &&
+      /People often get stuck at step 3: the \*\*Display name\*\* field is required now/.test(
+        first.stdin,
+      ) &&
+      /Earlier setups: 11 of 14 got a working key/.test(first.stdin) &&
+      /No longer in the pool \(don't offer them\): Mistral \(no free API tier\), Cerebras/.test(
+        first.stdin,
+      ),
+    "and Inception's end date, where people got stuck, the providers no longer in the pool",
   );
   check(
     !SECRETS.some((s) => first.stdin.includes(s)) && !/FAKE-key/.test(first.stdin),
@@ -750,7 +831,7 @@ try {
   await allViews(page, "assist-thread-card");
   writeFileSync(
     replyFile,
-    "Groq works. Next, Google: you're signed in to Gemini already.\n\n[[provenance:pool-key google]]",
+    `[[provenance:pool-steps groq {"ok":[1,2,4],"differs":{"3":"the button is now called \\"Create key\\"; my key is ${SLIPPED_KEY} and I'm ${SLIPPED_EMAIL}"}}]]\n\nGroq works. Next, Google: you're signed in to Gemini already.\n\n[[provenance:pool-key google]]`,
   );
   await card.locator("input[data-key-field]").fill(GROQ_KEY);
   await card.getByRole("button", { name: "Save" }).click();
@@ -773,6 +854,32 @@ try {
     /Groq key saved and working/.test(await page.locator(".assist-sent").first().innerText()),
     "the note shows as a quiet line, sent by Provenance",
   );
+  check(
+    !(await page.locator(".agent-message").last().innerText()).includes("pool-steps"),
+    "the assistant's steps line isn't shown",
+  );
+  const groqOut = await waitOutcome("groq", "saved_working");
+  check(
+    groqOut.source === "assistant" && typeof groqOut.minutes === "number",
+    `the outcome went to the router (${JSON.stringify(groqOut)})`,
+  );
+  check(
+    JSON.stringify(groqOut.step_notes) ===
+      JSON.stringify([
+        { step: 1, ok: true },
+        { step: 2, ok: true },
+        { step: 3, ok: false, note: 'the button is now called "Create key"; my key is and I\'m' },
+        { step: 4, ok: true },
+      ]) && JSON.stringify(groqOut.labels_seen) === JSON.stringify(["Create key"]),
+    "with the assistant's step notes and the control's name as the page has it",
+  );
+  const groqJson = JSON.stringify(groqOut);
+  check(
+    !groqJson.includes(SLIPPED_KEY) &&
+      !groqJson.includes(SLIPPED_EMAIL) &&
+      !/gsk_|@|example\.org/.test(groqJson),
+    "and nothing of the key or e-mail the assistant's line tried to slip in",
+  );
 
   const gcard = page.locator('.key-card[data-live][data-key-card="google"]');
   check(
@@ -792,6 +899,11 @@ try {
   check(
     runs().some((r) => r.stdin === "[Provenance app] Google Gemini API: skipped by the person."),
     "Skip sends: skipped by the person",
+  );
+  const skipOut = await waitOutcome("google", "skipped");
+  check(
+    skipOut.source === "assistant" && !("step_notes" in skipOut),
+    "and the router hears it was skipped, once the assistant's turn is over without a steps line",
   );
 
   // A key pasted into the composer.
@@ -823,6 +935,74 @@ try {
     "the assistant gets a redacted note",
   );
   await page.waitForTimeout(1500);
+  await waitOutcome("google", "saved_working");
+  check(true, "a key caught in the composer and saved: its outcome too");
+
+  // ---- 3c. several keys per provider: the assistant's add card -------------------------------
+  log("assisted: another key");
+  writeFileSync(
+    replyFile,
+    "A second account adds its own limits. Paste that account's key in this card.\n\n[[provenance:pool-key groq add]]",
+  );
+  const beforeAsk = runs().length;
+  await page.fill(".composer textarea", "I have a second Groq account, from work");
+  await page.keyboard.press("Enter");
+  await turnDone(page, beforeAsk);
+  const addCard = page.locator('.key-card[data-live][data-add][data-key-card="groq"]');
+  await addCard.waitFor({ timeout: 20_000 });
+  const addText = await addCard.innerText();
+  check(
+    /Add another Groq key/.test(addText) && /joins the key already saved/.test(addText),
+    "the add marker: a card that adds a key beside the saved one",
+  );
+  check(
+    (await addCard.locator(".key-terms-note").count()) === 0 &&
+      (await addCard.locator("input[data-key-label]").getAttribute("placeholder")) === "Key 2" &&
+      (await addCard.locator('[data-tier-choice="free"]').getAttribute("aria-checked")) ===
+        "true" &&
+      /Paid keys usually have higher limits; Provenance will use both\./.test(addText),
+    "Groq allows it: no terms note; a name (Key 2 by default) and Free / Paid",
+  );
+  await allViews(page, "assist-add-card");
+  writeFileSync(
+    replyFile,
+    `[[provenance:pool-steps groq {"ok":[1,2,3,4]}]]\n\nGroq refused that key: check it was copied whole.`,
+  );
+  await addCard.locator("input[data-key-field]").fill(GROQ_KEY2);
+  await addCard.locator("input[data-key-label]").fill("Work");
+  await addCard.locator('[data-tier-choice="paid"]').click();
+  const beforeAdd = runs().length;
+  await addCard.getByRole("button", { name: "Save" }).click();
+  await turnDone(page, beforeAdd);
+  check(
+    runs().some(
+      (r) =>
+        r.stdin ===
+        "[Provenance app] Groq key 2: saved, but Groq rejected it: 401: Invalid API Key",
+    ),
+    "the router's check, told to the assistant as it is",
+  );
+  check(
+    /Saved, but Groq rejected it: 401: Invalid API Key/.test(
+      await page.locator('.key-card-closed[data-key-card="groq"]').last().innerText(),
+    ),
+    "and on the answered card",
+  );
+  const st3 = await mockState();
+  check(
+    st3.poolKeys.groq.length === 2 &&
+      st3.poolKeys.groq[0].usable &&
+      st3.poolKeys.groq[1].label === "Work" &&
+      st3.poolKeys.groq[1].tier === "paid" &&
+      !st3.poolKeys.groq[1].usable,
+    "saved beside the first (POST), named Work, paid",
+  );
+  const addOut = await waitOutcome("groq", "saved_rejected");
+  check(
+    addOut.source === "assistant" && (addOut.step_notes as unknown[]).length === 4,
+    "its outcome: saved_rejected, with the steps line of the turn after",
+  );
+  await page.waitForTimeout(800);
 
   // Nowhere in the thread, its files, the CLI's input, or anywhere else.
   check(
@@ -838,7 +1018,182 @@ try {
   );
   const turnText = await page.locator("body").innerText();
   check(!SECRETS.some((s) => turnText.includes(s)), "nor on screen");
-  for (const s of [GROQ_KEY, GOOGLE_KEY]) {
+
+  // ---- 3c. several keys per provider: the keys page ----------------------------------------
+  log("several keys on the keys page");
+  await openSetup(page);
+  await page.click(`${dialog} .setup-pool`);
+  await page.waitForSelector(`${dialog} .setup-keys`);
+  const gq = page.locator(`${dialog} .setup-keys li[data-pool="groq"]`);
+  const summary = (li: typeof gq) =>
+    li.locator(".setup-account-status > .setup-status").innerText();
+  check((await summary(gq)) === "2 keys · 1 working", "the provider's summary adds up");
+  check(
+    (await summary(page.locator(`${dialog} .setup-keys li[data-pool="google"]`))) === "Key set",
+    "one key reads as before: Key set",
+  );
+  await gq.getByRole("button", { name: "Change" }).click();
+  const items = gq.locator(".key-item");
+  await items.first().waitFor();
+  const it0 = await items.nth(0).innerText();
+  const it1 = await items.nth(1).innerText();
+  check(
+    (await items.count()) === 2 &&
+      /Key 1/.test(it0) &&
+      /…0123/.test(it0) &&
+      /Working/.test(it0) &&
+      /Work/.test(it1) &&
+      /Paid/.test(it1) &&
+      /…ECT9/.test(it1) &&
+      /Groq rejected it: 401: Invalid API Key/.test(it1),
+    "its keys: name, plan, last four, working or why not",
+  );
+  await allViews(page, "keys-list");
+  await items.nth(0).locator(".key-item-label").click();
+  const rename = items.nth(0).locator(".key-item-input");
+  await rename.fill("Personal");
+  await rename.press("Enter");
+  await page.waitForFunction(
+    () =>
+      document.querySelector('.setup-keys li[data-pool="groq"] .key-item .key-item-label')
+        ?.textContent === "Personal",
+  );
+  check((await mockState()).poolKeys.groq[0].label === "Personal", "renamed in place (PATCH)");
+  await items.nth(1).hover();
+  await items.nth(1).getByRole("button", { name: "Remove Work" }).click();
+  check(/Remove this key\?/.test(await items.nth(1).innerText()), "Remove asks first");
+  await items.nth(1).getByRole("button", { name: "Remove", exact: true }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('.setup-keys li[data-pool="groq"] .key-item').length === 1,
+  );
+  check(
+    (await mockState()).poolKeys.groq.length === 1 && (await summary(gq)) === "Key set",
+    "the rejected key removed (DELETE …/{key_id}); one key: Key set",
+  );
+  await gq.getByRole("button", { name: "Add another key" }).click();
+  const addf = gq.locator("[data-key-add]");
+  await addf.waitFor();
+  check(
+    (await addf.locator(".key-terms-note").count()) === 0 &&
+      (await addf.locator("input[data-key-label]").getAttribute("placeholder")) === "Key 2" &&
+      /Paid keys usually have higher limits; Provenance will use both\./.test(
+        await addf.innerText(),
+      ) &&
+      (await addf.locator("a.key-open").count()) === 1,
+    "Add another key: the key field, its keys page, a name and Free / Paid; Groq needs no terms note",
+  );
+  await addf.locator("input[data-key-field]").fill("not-a-groq-key");
+  check(await addf.locator(".key-misfit").isVisible(), "with the soft key check");
+  await addf.locator("input[data-key-field]").fill(GROQ_KEY3);
+  await addf.locator("input[data-key-label]").fill("Team");
+  await addf.locator('[data-tier-choice="paid"]').click();
+  await addf.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll('.setup-keys li[data-pool="groq"] .key-item').length === 2,
+  );
+  const it2 = await items.nth(1).innerText();
+  check(
+    /Team/.test(it2) && /Paid/.test(it2) && /Working/.test(it2) && /…w3rk/.test(it2),
+    "saved: Team, Paid, Working, in the list where the form was",
+  );
+  check((await summary(gq)) === "2 keys · 2 working", "2 keys · 2 working");
+  const manual = await waitOutcome("groq", "saved_working", 2);
+  check(
+    manual.source === "manual" && typeof manual.minutes === "number" && !("step_notes" in manual),
+    "a manual save posts a minimal outcome",
+  );
+
+  // Google: check its terms first.
+  const gg = page.locator(`${dialog} .setup-keys li[data-pool="google"]`);
+  await gg.getByRole("button", { name: "Change" }).click();
+  await gg.getByRole("button", { name: "Add another key" }).click();
+  const gNote = gg.locator("[data-key-add] .key-terms-note");
+  check(
+    (await gNote.getAttribute("data-allowed")) === "check_terms" &&
+      /Check Google Gemini API's terms before you use a second account\./.test(
+        await gNote.innerText(),
+      ) &&
+      /Limits are per Google Cloud project/.test(await gNote.innerText()),
+    "check_terms: the router's note, the moment Add another key is chosen",
+  );
+  check(
+    await gg.evaluate((li) => {
+      const add = li.querySelector("[data-key-add]");
+      return add?.firstElementChild?.classList.contains("key-terms-note") ?? false;
+    }),
+    "first in the add form, not buried",
+  );
+  await gg.locator("[data-key-add]").getByRole("button", { name: "Cancel" }).click();
+  check((await gg.locator("[data-key-add]").count()) === 0, "Cancel closes it");
+  await page.getByRole("button", { name: "Close" }).click();
+
+  // Cloudflare: its terms don't allow a second account for free usage. A leftover Mistral key.
+  await post(
+    "/pool/keys/cloudflare",
+    {
+      values: {
+        CLOUDFLARE_API_TOKEN: "FAKE-cloudflare-token-for-tests-00000000",
+        CLOUDFLARE_ACCOUNT_ID: "fake-account",
+      },
+    },
+    "PUT",
+  );
+  await post("/pool/keys/mistral", { values: { MISTRAL_API_KEY: "FAKE-mistral-leftover" } }, "PUT");
+  await openSetup(page);
+  await page.click(`${dialog} .setup-pool`);
+  const cfr = page.locator(`${dialog} .setup-keys li[data-pool="cloudflare"]`);
+  await cfr.waitFor();
+  if ((await cfr.getAttribute("data-open")) === null)
+    await cfr.getByRole("button", { name: "Change" }).click();
+  await cfr.getByRole("button", { name: "Add another key" }).click();
+  const cNote = cfr.locator("[data-key-add] .key-terms-note");
+  const cText = await cNote.innerText();
+  check(
+    (await cNote.getAttribute("data-allowed")) === "no" &&
+      /Cloudflare Workers AI's terms don't allow a second account for more free usage\. Add another key only if it's from a separate paid account of yours\./.test(
+        cText,
+      ) &&
+      /forbid extra accounts/.test(cText),
+    "no: said plainly, with adding one described only for a separate paid account",
+  );
+  check(
+    (await cfr.locator('[data-tier-choice="paid"]').getAttribute("aria-checked")) === "true" &&
+      (await cfr.locator("[data-key-add] input[data-key-field]").isEnabled()) &&
+      /Account ID/.test(await cfr.locator("[data-key-add]").innerText()),
+    "not blocked: Paid chosen, the key field and its account id there",
+  );
+  await allViews(page, "keys-add-terms-no");
+  await cfr.locator("[data-key-add]").getByRole("button", { name: "Cancel" }).click();
+
+  const rem = page.locator(`${dialog} .key-removed`);
+  check(
+    (await rem.getAttribute("open")) !== null &&
+      /Key still saved/.test(await rem.locator('li[data-removed="mistral"]').innerText()) &&
+      /since 20\u00a0Nov\u00a02026/.test(await rem.innerText()),
+    "a key left saved for a provider no longer in the pool: shown there, unfolded",
+  );
+  check(
+    (await page.locator(`${dialog} .setup-keys li[data-pool="mistral"]`).count()) === 0,
+    "and not among the providers",
+  );
+  await rem.scrollIntoViewIfNeeded();
+  await allViews(page, "keys-removed");
+  await rem.locator('li[data-removed="mistral"]').getByRole("button", { name: "Remove" }).click();
+  check(/Remove its saved key\?/.test(await rem.innerText()), "Remove asks first");
+  await rem
+    .locator('li[data-removed="mistral"]')
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await page.waitForFunction(
+    () => !/Key still saved/.test(document.querySelector(".key-removed")?.textContent ?? ""),
+  );
+  check(
+    !(await mockState()).poolKeys.mistral?.length && (await rem.getAttribute("open")) !== null,
+    "removed; the line stays where it was",
+  );
+  await page.getByRole("button", { name: "Close" }).click();
+
+  for (const s of SECRETS.slice(1)) {
     const h = await pageHolds(page, s);
     check(!h.length, `the key …${s.slice(-4)} is nowhere in the page${h.length ? ` (${h})` : ""}`);
   }
@@ -847,8 +1202,20 @@ try {
   );
   check(
     keyReqs.map((r) => `${r.method} ${r.url}`).join() ===
-      "PUT /web/accounts/chatgpt-web/main/autologin,PUT /pool/keys/groq,PUT /pool/keys/google",
-    `the router got each secret only in its one PUT (${keyReqs.map((r) => `${r.method} ${r.url}`).join(", ")})`,
+      "PUT /web/accounts/chatgpt-web/main/autologin,PUT /pool/keys/groq,PUT /pool/keys/google,POST /pool/keys/groq,POST /pool/keys/groq",
+    `the router got each secret only in its one PUT or POST (${keyReqs.map((r) => `${r.method} ${r.url}`).join(", ")})`,
+  );
+  check(
+    SECRETS.every((s) => keyReqs.filter((r) => r.body.includes(s)).length === 1),
+    "each key exactly once",
+  );
+  const outs = JSON.stringify((await mockState()).outcomes);
+  check(
+    (await mockState()).outcomes.length >= 5 &&
+      !SECRETS.some((s) => outs.includes(s)) &&
+      !outs.includes(SLIPPED_KEY) &&
+      !/@/.test(outs),
+    "no key or e-mail in any outcome the router got",
   );
 
   // ---- 4. a router without the new endpoints ----------------------------------------------
@@ -877,6 +1244,52 @@ try {
   );
   await page.getByRole("button", { name: "Close" }).click();
   await post("/mock/older", { older: false, noWebOpen: false });
+
+  log("a router with one key per provider");
+  await post("/mock/reset", { scenario: "signed" });
+  await post("/mock/older", { older: false, noMultiKey: true });
+  await post("/mock/requests");
+  await page.reload();
+  await page.waitForSelector(".composer textarea");
+  await openSetup(page);
+  await page.click(`${dialog} .setup-pool`);
+  await page.waitForSelector(`${dialog} .setup-keys li[data-pool="groq"][data-open]`);
+  check(
+    (await page
+      .locator(
+        `${dialog} .key-list, ${dialog} .key-add-another, ${dialog} .key-removed, ${dialog} .key-until, ${dialog} .key-trouble`,
+      )
+      .count()) === 0,
+    "today's one-key page: no keys list, Add another key, removed line, end date or experience",
+  );
+  const g1 = page.locator(`${dialog} .setup-keys li[data-pool="google"]`);
+  check(
+    (await g1.locator(".setup-account-status > .setup-status").innerText()) === "Key set",
+    "a saved key: Key set",
+  );
+  const groq1 = page.locator(`${dialog} .setup-keys li[data-pool="groq"]`);
+  await groq1.locator("input[data-key-field]").fill("gsk_FAKEoneKEYrouter00000000000000");
+  await groq1.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() =>
+    /Key set/.test(document.querySelector('.setup-keys li[data-pool="groq"]')?.textContent ?? ""),
+  );
+  await g1.getByRole("button", { name: "Change" }).click();
+  check(
+    /set: paste to replace/.test(await g1.innerText()) &&
+      (await g1.getByRole("button", { name: "Remove key" }).count()) === 1,
+    "Change: the one key's field to replace it, and Remove key, as before",
+  );
+  await g1.locator("input[data-key-field]").fill("AIza-FAKE-one-key-router-replacement");
+  await g1.getByRole("button", { name: "Save" }).click();
+  await page.waitForTimeout(1200);
+  const tries = (await mockRequests()).filter((r) => /\/outcome$/.test(r.url));
+  check(
+    tries.length === 1 && (await mockState()).outcomes.length === 0,
+    `no outcome route: tried once, then left alone, nothing shown (${tries.length} tries)`,
+  );
+  check((await page.locator(`${dialog} .setup-row-msg`).count()) === 0, "no error on the page");
+  await page.getByRole("button", { name: "Close" }).click();
+  await post("/mock/older", { older: false, noMultiKey: false });
 
   log("older router");
   await post("/mock/reset", { scenario: "signed" });

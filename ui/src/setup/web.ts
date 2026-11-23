@@ -7,7 +7,11 @@ import type {
   AccountPlan,
   AutologinPut,
   AutologinResult,
+  KeyPatch,
+  KeyPost,
   KeysPut,
+  KeyTier,
+  OutcomePost,
   LoginState,
   ProviderPatch,
   WindowBounds,
@@ -17,8 +21,12 @@ import type {
   WireLogin,
   WebOpenPost,
   WireAutologin,
+  WireKeyCheck,
+  WireMultipleKeys,
   WirePoolHelpProvider,
+  WirePoolKey,
   WirePoolProvider,
+  WireRemovedProvider,
   WireProvider,
   WireWebModel,
 } from "../../shared/router-api";
@@ -31,10 +39,31 @@ export type WebAccount = Omit<Required<WireAccount>, "autologin"> & {
   autologin: WireAutologin | null;
 };
 export type Autologin = WireAutologin;
-export type PoolHelp = Omit<WirePoolHelpProvider, "needs" | "recommended"> & {
+export type PoolHelp = Omit<
+  WirePoolHelpProvider,
+  "needs" | "recommended" | "multiple_keys" | "until" | "experience"
+> & {
   needs: string[];
   recommended: boolean;
+  multiple_keys: MultipleKeys | null;
+  until: string | null;
+  experience: Experience | null;
 };
+export type MultipleKeys = WireMultipleKeys;
+export type RemovedProvider = WireRemovedProvider;
+export type KeyCheck = WireKeyCheck;
+export type PoolKey = Omit<Required<WirePoolKey>, "limits"> & { limits: unknown };
+/** Where people got stuck: at a step (1-based), or anywhere (null). */
+export interface Trouble {
+  step: number | null;
+  note: string;
+}
+export interface Experience {
+  tries: number;
+  worked: number;
+  last_worked: string | null;
+  common_trouble: Trouble[];
+}
 export type WebModel = WireWebModel;
 export type WebProvider = Required<Omit<WireProvider, "accounts">> & {
   accounts: WebAccount[];
@@ -42,7 +71,12 @@ export type WebProvider = Required<Omit<WireProvider, "accounts">> & {
   changeable: boolean;
 };
 export type BrowserStatus = Required<WireBrowser>;
-export type PoolProvider = WirePoolProvider;
+export type PoolProvider = Omit<WirePoolProvider, "keys" | "multiple_keys" | "until"> & {
+  /** null: a router from before several keys per provider (one key, set with PUT). */
+  keys: PoolKey[] | null;
+  multiple_keys: MultipleKeys | null;
+  until: string | null;
+};
 
 export interface WebAccounts {
   browser: BrowserStatus;
@@ -300,6 +334,73 @@ export interface PoolHelpData {
   checked: string;
   notes: string[];
   providers: PoolHelp[];
+  removed: RemovedProvider[];
+}
+
+const ALLOWED = ["yes", "check_terms", "no"];
+function parseMultiple(v: unknown): MultipleKeys | null {
+  const o = (v ?? {}) as Obj;
+  if (!ALLOWED.includes(o.allowed as string)) return null;
+  return { allowed: o.allowed as MultipleKeys["allowed"], note: strOrNull(o.note) };
+}
+
+/** A date the router gives (2026-12-28), or null when it isn't one. */
+function isoDate(v: unknown): string | null {
+  const s = strOrNull(v);
+  return s && !Number.isNaN(Date.parse(s)) ? s : null;
+}
+
+function parseRemoved(v: unknown): RemovedProvider[] {
+  return objs(v).map((r) => ({
+    id: r.id as string,
+    name: str(r.name, r.id as string),
+    reason: str(r.reason),
+    date: str(r.date),
+  }));
+}
+
+function parseExperience(v: unknown): Experience | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Obj;
+  const trouble = (Array.isArray(o.common_trouble) ? o.common_trouble : [])
+    .map((t): Trouble | null => {
+      if (typeof t === "string") return t.trim() ? { step: null, note: t.trim() } : null;
+      const x = (t ?? {}) as Obj;
+      const note = str(x.note, str(x.text)).trim();
+      const step = num(x.step);
+      return note ? { step: step && step >= 1 ? Math.round(step) : null, note } : null;
+    })
+    .filter((t) => t !== null);
+  return {
+    tries: num(o.tries) ?? 0,
+    worked: num(o.worked) ?? 0,
+    last_worked: strOrNull(o.last_worked),
+    common_trouble: trouble,
+  };
+}
+
+const TIERS: KeyTier[] = ["free", "paid"];
+function parseKey(k: Obj): PoolKey {
+  return {
+    id: k.id as string,
+    label: strOrNull(k.label),
+    tier: TIERS.includes(k.tier as KeyTier) ? (k.tier as KeyTier) : null,
+    usable: k.usable === true,
+    reason: strOrNull(k.reason),
+    added: strOrNull(k.added),
+    last4: strOrNull(k.last4)?.slice(-4) ?? null,
+    limits: k.limits ?? null,
+    enabled: k.enabled !== false,
+  };
+}
+
+function parsePoolProvider(p: Obj): PoolProvider {
+  return {
+    ...(p as unknown as WirePoolProvider),
+    keys: Array.isArray(p.keys) ? objs(p.keys).map(parseKey) : null,
+    multiple_keys: parseMultiple(p.multiple_keys),
+    until: isoDate(p.until),
+  };
 }
 
 const FREE_TIERS = ["anonymous", "free", "trial", "none"];
@@ -340,8 +441,16 @@ export async function getPoolHelp(): Promise<PoolHelpData | null> {
     open_with: (Array.isArray(p.open_with) ? (p.open_with as Obj[]) : [])
       .filter((o) => typeof o?.provider === "string" && typeof o?.account === "string")
       .map((o) => ({ provider: o.provider as string, account: o.account as string })),
+    multiple_keys: parseMultiple(p.multiple_keys),
+    until: isoDate(p.until),
+    experience: parseExperience(p.experience),
   }));
-  return { checked: str(r.value.checked), notes: strs(r.value.assistant_notes), providers };
+  return {
+    checked: str(r.value.checked),
+    notes: strs(r.value.assistant_notes),
+    providers,
+    removed: parseRemoved(r.value.removed),
+  };
 }
 
 /** POST /web/open: a provider's key page in a signed-in web account's own window. */
@@ -377,19 +486,101 @@ function safeUrl(v: unknown): string {
   }
 }
 
-export async function getPoolKeys(): Promise<Result<PoolProvider[]>> {
-  const r = await call<{ providers?: unknown }>("GET", "/pool/keys");
+/** GET /pool/keys: each provider, its keys, and the providers taken out of the pool. */
+export async function getPoolKeysAll(): Promise<
+  Result<{ providers: PoolProvider[]; removed: RemovedProvider[] }>
+> {
+  const r = await call<Obj>("GET", "/pool/keys");
   if (!r.ok) return r;
-  return { ok: true, value: objs(r.value?.providers) as unknown as PoolProvider[] };
+  return {
+    ok: true,
+    value: {
+      providers: objs(r.value?.providers).map(parsePoolProvider),
+      removed: parseRemoved(r.value?.removed),
+    },
+  };
 }
 
-export function setPoolKeys(provider: string, values: Record<string, string>) {
+export async function getPoolKeys(): Promise<Result<PoolProvider[]>> {
+  const r = await getPoolKeysAll();
+  return r.ok ? { ok: true, value: r.value.providers } : r;
+}
+
+/** What a save answers: the provider as the router has it now (when it says), and its check. */
+export interface SaveAnswer {
+  provider: PoolProvider | null;
+  check: KeyCheck | null;
+  /** The key's own answer to POST, when the router answers with the key. */
+  key: PoolKey | null;
+}
+
+function saveAnswer(v: unknown): SaveAnswer {
+  const o = (v ?? {}) as Obj;
+  const c = (o.check ?? null) as Obj | null;
+  const check =
+    c && typeof c === "object" && typeof c.ok === "boolean"
+      ? { ok: c.ok, detail: strOrNull(c.detail) }
+      : null;
+  const isProvider = Array.isArray(o.vars);
+  const k = (o.key ?? (!isProvider && typeof o.id === "string" ? o : null)) as Obj | null;
+  return {
+    provider: isProvider && typeof o.id === "string" ? parsePoolProvider(o) : null,
+    check,
+    key: k && typeof k.id === "string" ? parseKey(k) : null,
+  };
+}
+
+/** PUT: set (or replace) the provider's first key. */
+export async function setPoolKeys(
+  provider: string,
+  values: Record<string, string>,
+): Promise<Result<SaveAnswer>> {
   const body: KeysPut = { values };
-  return call<PoolProvider>("PUT", `/pool/keys/${encodeURIComponent(provider)}`, body);
+  const r = await call<unknown>("PUT", `/pool/keys/${encodeURIComponent(provider)}`, body);
+  return r.ok ? { ok: true, value: saveAnswer(r.value) } : r;
 }
 
+/** POST: one more key beside the saved ones. */
+export async function addPoolKey(provider: string, body: KeyPost): Promise<Result<SaveAnswer>> {
+  const r = await call<unknown>("POST", `/pool/keys/${encodeURIComponent(provider)}`, body);
+  return r.ok ? { ok: true, value: saveAnswer(r.value) } : r;
+}
+
+const keyPath = (provider: string, key: string) =>
+  `/pool/keys/${encodeURIComponent(provider)}/${encodeURIComponent(key)}`;
+
+export function updatePoolKey(provider: string, key: string, patch: KeyPatch) {
+  return call<unknown>("PATCH", keyPath(provider, key), patch);
+}
+
+export function removePoolKey(provider: string, key: string) {
+  return call<unknown>("DELETE", keyPath(provider, key));
+}
+
+/** All of a provider's keys. */
 export function clearPoolKeys(provider: string) {
-  return call<PoolProvider>("DELETE", `/pool/keys/${encodeURIComponent(provider)}`);
+  return call<unknown>("DELETE", `/pool/keys/${encodeURIComponent(provider)}`);
+}
+
+/** POST /pool/help/{provider}/outcome. false: this router doesn't take outcomes (an older one). */
+export async function postPoolOutcome(provider: string, body: OutcomePost): Promise<boolean> {
+  const r = await call<unknown>("POST", `/pool/help/${encodeURIComponent(provider)}/outcome`, body);
+  return r.ok || !(r.status === 404 || r.status === 405);
+}
+
+/** "Key 1", "Key 2": a key's name when the person gave it none. */
+export const keyName = (k: PoolKey, i: number): string => k.label?.trim() || `Key ${i + 1}`;
+
+/** "Available until 28 Dec 2026" (the date's spaces bound). */
+export function untilText(iso: string): string {
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T00:00:00Z` : iso);
+  const day = d.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  return `Available until ${day.replace(/ /g, "\u00a0")}`;
 }
 
 // ---- small helpers the screen shares -----------------------------------------------
