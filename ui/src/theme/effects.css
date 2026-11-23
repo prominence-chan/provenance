@@ -7,7 +7,8 @@
    places that canvas, plus the static fallback that replaces it under
    prefers-reduced-motion or without WebGL2 (.main[data-fx="static"]).
 
-   Colours: --fx-<tier>-deep/mid/hot/core in tokens.css. */
+   Colours: --fx-<tier>-deep/mid/hot/core in tokens.css; a fallback (data-fallback, Claude Code
+   or Codex) has its own ramp, --fx-claude-* / --fx-codex-*, and draws ember's style in it. */
 
 .flame-fx {
   position: absolute;
@@ -37,16 +38,24 @@
   --fx-hot: var(--fx-nova-hot);
   --fx-mid: var(--fx-nova-mid);
 }
+.composer-shell[data-fallback="claude"] {
+  --fx-hot: var(--fx-claude-hot);
+  --fx-mid: var(--fx-claude-mid);
+}
+.composer-shell[data-fallback="codex"] {
+  --fx-hot: var(--fx-codex-hot);
+  --fx-mid: var(--fx-codex-mid);
+}
 
 /* Static fallback: a faint tier tint on the border, a little stronger while a turn
    streams. No movement. */
-.main[data-fx="static"] .composer-shell[data-tier] .composer {
+.main[data-fx="static"] .composer-shell:is([data-tier], [data-fallback]) .composer {
   border-color: color-mix(in srgb, var(--fx-hot) 35%, var(--border-strong));
   box-shadow:
     var(--composer-shadow),
     0 0 calc(18px * var(--fx-glow-strength)) color-mix(in srgb, var(--fx-mid) 14%, transparent);
 }
-.main[data-fx="static"] .composer-shell[data-tier][data-streaming] .composer {
+.main[data-fx="static"] .composer-shell:is([data-tier], [data-fallback])[data-streaming] .composer {
   border-color: color-mix(in srgb, var(--fx-hot) 60%, var(--border-strong));
   box-shadow:
     var(--composer-shadow),

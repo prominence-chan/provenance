@@ -66,6 +66,15 @@ select {
 .spacer {
   flex: 1;
 }
+/* Read out, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 /* Small secondary text around the composer, tier picker and header (tier blurbs, effort,
    source usage, context use): one size, weight, colour and casing, written in sentence case.
    Use this class instead of styling such text per component. */
@@ -80,7 +89,9 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- tier color plumbing: data-tier sets --tier-color for descendants ---- */
+/* ---- tier color plumbing: data-tier sets --tier-color for descendants ----
+   A fallback (Claude Code, Codex) sets the same variables through data-fallback, so every part
+   that takes a tier's colour takes a fallback's too. */
 [data-tier="ember"] {
   --tier-color: var(--tier-ember);
   --tier-grad: var(--tier-ember-grad);
@@ -96,6 +107,14 @@ select {
 [data-tier="nova"] {
   --tier-color: var(--tier-nova);
   --tier-grad: var(--tier-nova-grad);
+}
+[data-fallback="claude"] {
+  --tier-color: var(--fallback-claude);
+  --tier-grad: var(--fallback-claude-grad);
+}
+[data-fallback="codex"] {
+  --tier-color: var(--fallback-codex);
+  --tier-grad: var(--fallback-codex-grad);
 }
 
 /* ---- layout ------------------------------------------------------------ */
@@ -395,6 +414,22 @@ select {
   background: var(--hover);
   color: var(--text);
 }
+/* "Finish setting up": a quiet row over the foot while something is missing (Sidebar.tsx). */
+.sidebar-setup {
+  flex-shrink: 0;
+  margin: 0 6px 6px;
+}
+.setup-ring circle {
+  fill: none;
+  stroke-width: 1.5;
+}
+.setup-ring-track {
+  stroke: var(--border-strong);
+}
+.setup-ring-fill {
+  stroke: var(--ember);
+  stroke-linecap: round;
+}
 .sidebar-foot {
   height: 36px;
   flex-shrink: 0;
@@ -511,8 +546,8 @@ select {
 }
 
 /* ---- tier badge -------------------------------------------------------- */
-.tier-badge:not([data-tier]),
-.tier-option:not([data-tier]) {
+.tier-badge:not([data-tier], [data-fallback]),
+.tier-option:not([data-tier], [data-fallback]) {
   --tier-color: var(--muted);
 }
 .tier-badge {
@@ -536,7 +571,8 @@ select {
   justify-content: center;
   background: none;
 }
-.tier-badge .tier-glyph {
+.tier-badge .tier-glyph,
+.tier-badge[data-fallback] > svg {
   color: var(--tier-color);
   flex-shrink: 0;
 }
@@ -1043,6 +1079,9 @@ select {
 }
 .turn[data-tier="nova"] .shimmer {
   --shimmer-hi: var(--magenta);
+}
+.turn[data-fallback] .shimmer {
+  --shimmer-hi: var(--tier-color);
 }
 @keyframes shimmer {
   from {
@@ -1963,6 +2002,11 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .setup-rail li.done .setup-rail-num {
   border-color: var(--text-2);
 }
+/* A step already set up: a check in place of its number. */
+.setup-rail li[data-set] .setup-rail-num {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 60%, transparent);
+}
 .setup-rail li.current {
   color: var(--text);
   font-weight: 500;
@@ -2551,14 +2595,12 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 /* ---- fallbacks: Claude Code, Codex (src/fallback/) --------------------------
    In the model picker below the tiers, on their own Models & accounts page and in the welcome,
    and as one line under a thread that has outgrown the free models. Same parts as the tiers
-   and the setup steps; no colour of their own (they are not tiers). */
+   and the setup steps, and a colour each like a tier's (data-fallback, tokens.css); a fallback
+   that is off or not ready stays uncoloured. */
 .tier-section {
   margin: 4px -4px 2px;
   padding: 7px 10px 3px;
   border-top: 1px solid var(--border);
-}
-.fallback-option .tier-option-glyph {
-  color: var(--text-2);
 }
 .fallback-option.muted .tier-option-name,
 .fallback-option.muted .tier-option-glyph {
@@ -2581,7 +2623,7 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   border-top: 1px solid var(--border);
 }
 .tier-picker-btn[data-fallback] > svg:first-child {
-  color: var(--text-2);
+  color: var(--tier-color);
 }
 
 .fallback-row .setup-switch-row {

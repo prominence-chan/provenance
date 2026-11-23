@@ -4,7 +4,6 @@ import { App } from "./App";
 import { applyShell, appShell } from "./app-shell";
 import { maybeOpenWelcome, openSetup, openWelcome } from "./setup/open";
 import { boot, newThread, updateSettings } from "./store/actions";
-import { getState } from "./store/store";
 import "./styles.css";
 import { applyTheme } from "./theme/theme";
 
@@ -21,11 +20,8 @@ appShell?.onOpenAccounts?.(() => openSetup());
 appShell?.onOpenWelcome?.(() => openWelcome());
 
 void boot();
-// First run: nothing set up (no site, no API key, no fallback) -> the welcome, once.
-void maybeOpenWelcome(() => {
-  const f = getState().settings.fallbacks;
-  return f.claude || f.codex !== "off";
-});
+// Something not set up yet (a site, an API key, a fallback) -> the welcome, once.
+void maybeOpenWelcome();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -25,6 +25,8 @@ const log = (...a: unknown[]) => console.log("[e2e]", ...a);
 const executablePath = findChromium();
 const browser = await chromium.launch({ headless: true, executablePath });
 const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+// The welcome opens while anything is still not set up; this check is about a thread.
+await page.addInitScript(() => localStorage.setItem("provenance-ui.welcome-done", "1"));
 page.on("pageerror", (e) => log("page error:", e.message));
 
 /** The tier picker is a custom listbox: open it, click the option. */

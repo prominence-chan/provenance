@@ -32,8 +32,13 @@
 // seconds unfocused), nothing runs while the tab is hidden. pointer-events: none. Under
 // prefers-reduced-motion, or without WebGL2, nothing runs and effects.css draws a static tier
 // tint instead.
+//
+// The fallbacks (Claude Code, Codex) have an effect too: ember's style (a layer's `tier`) drawn
+// in their own colour ramp (its `id`, a palette slot of its own), so a selected fallback looks
+// as selected as a tier without a style of its own.
 import { useEffect, useRef } from "react";
 import { useTheme } from "../../theme/theme";
+import type { FallbackCli } from "../../../shared/fallback-api";
 import type { TierId } from "../../theme/tiers";
 import { useReducedMotion, type FxState } from "./useFx";
 
@@ -42,7 +47,7 @@ export function FlameFx({ fx }: { fx: FxState }) {
   const engine = useRef<Engine | null>(null);
   const theme = useTheme();
   const reduced = useReducedMotion();
-  const tier = fx.tier?.id ?? null;
+  const id: FxId | null = fx.tier?.id ?? fx.fallback ?? null;
 
   useEffect(() => {
     const canvas = ref.current;
@@ -72,8 +77,8 @@ export function FlameFx({ fx }: { fx: FxState }) {
   }, [theme]);
 
   useEffect(() => {
-    engine.current?.set(tier, fx.streaming, fx.flareKey);
-  }, [tier, fx.streaming, fx.flareKey, reduced]);
+    engine.current?.set(id, fx.streaming, fx.flareKey);
+  }, [id, fx.streaming, fx.flareKey, reduced]);
 
   return <canvas ref={ref} className="flame-fx" aria-hidden />;
 }
@@ -86,6 +91,21 @@ const TIER_INDEX: Record<TierId, number> = { spark: 0, ember: 1, solstice: 2, no
 const TIER_IDS: TierId[] = ["spark", "ember", "solstice", "nova"];
 /** Point palette slot for nova's off-palette debris (violet / cyan). */
 const OFF = 4;
+
+/** What an effect is for: a tier, or a fallback. */
+type FxId = TierId | FallbackCli;
+const FALLBACK_IDS: FallbackCli[] = ["claude", "codex"];
+/** Which style draws it: a tier's own; a fallback's, ember's (hairline cracks, in its colour). */
+const STYLE: Record<FxId, TierId> = {
+  spark: "spark",
+  ember: "ember",
+  solstice: "solstice",
+  nova: "nova",
+  claude: "ember",
+  codex: "ember",
+};
+/** Its colour ramp's palette slot: the tiers', OFF, then the fallbacks'. */
+const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6 };
 
 /**
  * Flare envelope per tier, in seconds: an optional charge (`pre`) before the peak, a smooth
@@ -600,7 +620,7 @@ in vec4 aP;            // x, y, size, temperature (0..1)
 in vec3 aQ;            // alpha, palette slot, sharpness (0 soft glow .. 1 hard spark)
 uniform vec2 uRes;
 uniform float uDpr;
-uniform vec3 uPal[20]; // 5 slots x deep, mid, hot, core
+uniform vec3 uPal[28]; // 7 slots x deep, mid, hot, core
 out vec3 vC;
 out float vA;
 out float vS;
@@ -676,6 +696,9 @@ interface Arc {
 }
 
 interface Layer {
+  /** What it is for (its colours). */
+  id: FxId;
+  /** Which style draws it (STYLE[id]). */
   tier: TierId;
   seed: number;
   fade: number;
@@ -826,7 +849,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   let w = 0;
   let h = 0;
   let dpr = 1;
-  let pal = new Float32Array(60);
+  let pal = new Float32Array(84);
   let off = { a: [0.5, 0.3, 1], b: [0.2, 0.8, 1], dusk: [0.5, 0.15, 0.4] };
   let alphaK = 0;
   let gain = 1;
@@ -857,14 +880,17 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       ...off.a,
       ...off.b,
       ...novaCore,
+      ...FALLBACK_IDS.flatMap((t) =>
+        ["deep", "mid", "hot", "core"].flatMap((k) => readColor(`--fx-${t}-${k}`, probe)),
+      ),
     ]);
     const light = document.documentElement.dataset.theme === "light";
     alphaK = light ? 1 : 0.12;
     gain = light ? 1 : 0.9;
   };
   setPalette();
-  const color = (tier: TierId, k: number) =>
-    pal.subarray(TIER_INDEX[tier] * 12 + k * 3, TIER_INDEX[tier] * 12 + k * 3 + 3);
+  const color = (id: FxId, k: number) =>
+    pal.subarray(PAL[id] * 12 + k * 3, PAL[id] * 12 + k * 3 + 3);
 
   const resize = () => {
     dpr = Math.min(1.5, window.devicePixelRatio || 1);
@@ -1031,7 +1057,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         temp: small ? rand(0.7, 0.95) : rand(0.75, 1),
         cool: small ? rand(0.16, 0.3) : rand(0.32, 0.77),
         size: small ? rand(2.4, 3.6) : (burst ? 3.4 : 3) + Math.random() * (nova ? 4.5 : 3.5),
-        pal: TIER_INDEX[l.tier],
+        pal: PAL[l.id],
         kind: 0,
       });
     }
@@ -1268,7 +1294,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     0.62 + 0.4 * noise1(now * 0.13 + l.seed) + 0.14 * noise1(now * 0.41 + l.seed * 3);
 
   const drawLayer = (l: Layer, now: number, r: Rect) => {
-    const c = (k: number) => color(l.tier, k);
+    const c = (k: number) => color(l.id, k);
     gl.uniform1f(fu.uTime, l.time);
     gl.uniform1f(fu.uFT, l.ft);
     gl.uniform1f(fu.uFl, l.fl);
@@ -1386,7 +1412,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       n++;
     };
     const fadeOf = (p: number) =>
-      layers.find((l) => TIER_INDEX[l.tier] === (p === OFF ? TIER_INDEX.nova : p))?.fade ?? 1;
+      layers.find((l) => PAL[l.id] === (p === OFF ? PAL.nova : p))?.fade ?? 1;
 
     for (const e of particles) {
       const fade = fadeOf(e.pal);
@@ -1567,14 +1593,15 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   };
 
   return {
-    set(tier: TierId | null, isActive: boolean, key: number) {
+    set(id: FxId | null, isActive: boolean, key: number) {
       active = isActive;
       const cur = layers.find((l) => !l.fading);
-      if (cur?.tier !== tier) {
+      if (cur?.id !== id) {
         if (cur) cur.fading = true;
-        if (tier) {
+        if (id) {
           const l: Layer = {
-            tier,
+            id,
+            tier: STYLE[id],
             seed: Math.random() * 100,
             fade: 1,
             fading: false,

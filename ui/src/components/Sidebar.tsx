@@ -18,7 +18,7 @@ import {
   IconSun,
 } from "./icons";
 import { SolarMark } from "./SolarMark";
-import { openSetup } from "../setup/open";
+import { firstGapStep, openSetup, openWelcome, useSetupGaps, type SetupGaps } from "../setup/open";
 import { IconAccounts } from "../setup/SetupDialog";
 
 const GROUPS_KEY = "provenance-ui.collapsed-projects";
@@ -161,6 +161,7 @@ export function Sidebar() {
             </div>
           )}
         </nav>
+        <SetupHint />
         <div className="sidebar-foot">
           <ConnectionStatus />
           <button
@@ -255,6 +256,55 @@ function Highlight({ text, query }: { text: string; query: string }) {
 
 export function threadTitle(t: Thread): string {
   return t.name || t.preview?.split("\n")[0] || "Untitled thread";
+}
+
+/**
+ * "Finish setting up", above the sidebar foot, only while something is still missing (a site, an
+ * API key of your own, a fallback): opens the welcome on the first step with something left. The
+ * ring shows how much is set up; it never moves and goes away once everything is.
+ */
+function SetupHint() {
+  const gaps = useSetupGaps();
+  if (!gaps) return null;
+  const parts: [keyof SetupGaps, string][] = [
+    ["sites", "a chat site"],
+    ["keys", "API keys"],
+    ["fallbacks", "a fallback"],
+  ];
+  const left = parts.filter(([k]) => gaps[k]).map(([, name]) => name);
+  const done = parts.length - left.length;
+  return (
+    <button
+      className="side-item btn-new sidebar-setup"
+      title={`Still to set up: ${left.join(", ")}`}
+      onClick={() => {
+        openWelcome(firstGapStep(gaps));
+        closeDrawer();
+      }}
+    >
+      <SetupRing done={done} of={parts.length} />
+      <span>Finish setting up</span>
+    </button>
+  );
+}
+
+/** A small ring, filled as far as the setup has got. */
+function SetupRing({ done, of }: { done: number; of: number }) {
+  const r = 5.25;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg width={14} height={14} viewBox="0 0 14 14" aria-hidden className="setup-ring">
+      <circle cx="7" cy="7" r={r} className="setup-ring-track" />
+      <circle
+        cx="7"
+        cy="7"
+        r={r}
+        className="setup-ring-fill"
+        strokeDasharray={`${(c * done) / of} ${c}`}
+        transform="rotate(-90 7 7)"
+      />
+    </svg>
+  );
 }
 
 function ConnectionStatus() {

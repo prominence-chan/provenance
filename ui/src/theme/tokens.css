@@ -72,6 +72,12 @@
   --tier-solstice-grad: linear-gradient(135deg, #ffc061, #ff6a3d 50%, #e23a52);
   --tier-nova: #ff4fa3;
   --tier-nova-grad: linear-gradient(135deg, #ffe3f1, #ff4fa3 45%, #c2185b 80%, #7a1fa2);
+  /* ---- fallbacks: Claude Code (violet), Codex (teal), apart from the tiers' warm hues and
+     spark's sky blue; they colour a selected fallback the way a tier colours a tier. */
+  --fallback-claude: #b794ff;
+  --fallback-claude-grad: linear-gradient(135deg, #e9e0ff, #b794ff 50%, #7d55f0);
+  --fallback-codex: #45d3c7;
+  --fallback-codex-grad: linear-gradient(135deg, #dcfff9, #45d3c7 50%, #129488);
 
   /* ---- effects (see src/theme/effects.css + src/components/effects/) ---- */
   /* Per-tier effect ramps, coolest to hottest (deep -> mid -> hot -> core). */
@@ -91,6 +97,14 @@
   --fx-nova-mid: #e0287f;
   --fx-nova-hot: #ff9ab8;
   --fx-nova-core: #f6f1ff;
+  --fx-claude-deep: #1d1145; /* the fallbacks draw ember's hairline cracks in their own colour */
+  --fx-claude-mid: #7f5cf6;
+  --fx-claude-hot: #c4a8ff;
+  --fx-claude-core: #f2ecff;
+  --fx-codex-deep: #062b28;
+  --fx-codex-mid: #13a091;
+  --fx-codex-hot: #82e8dc;
+  --fx-codex-core: #e9fffb;
   /* Off-palette accents, only for a moment: nova's plasma cooling through violet and cyan,
      solstice's dusk clouds. */
   --fx-nova-off1: #7a52ff;
@@ -182,6 +196,10 @@
   --tier-spark: #2f6fd6;
   --tier-solstice: #e2531f;
   --tier-nova: #d6307f;
+  --fallback-claude: #7445e0;
+  --fallback-claude-grad: linear-gradient(135deg, #9a6ff0, #5a2fc4);
+  --fallback-codex: #0a7a70;
+  --fallback-codex-grad: linear-gradient(135deg, #13a394, #075f57);
 
   /* On paper the ramp runs the other way: pale tips, deep saturated base. */
   --fx-ember-deep: #fed7aa;
@@ -200,6 +218,14 @@
   --fx-nova-mid: #ec4899;
   --fx-nova-hot: #be185d;
   --fx-nova-core: #701a75;
+  --fx-claude-deep: #ddd3ff;
+  --fx-claude-mid: #9b7bf5;
+  --fx-claude-hot: #6d3fe0;
+  --fx-claude-core: #3b1d8f;
+  --fx-codex-deep: #c9f2ec;
+  --fx-codex-mid: #2cc2b0;
+  --fx-codex-hot: #0b8275;
+  --fx-codex-core: #0b3f3a;
   --fx-nova-off1: #6d28d9;
   --fx-nova-off2: #0891b2;
   --fx-solstice-dusk: #9d174d;

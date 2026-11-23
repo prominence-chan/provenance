@@ -220,7 +220,8 @@ async function check(): Promise<void> {
   chmodSync(bin, 0o755);
 
   const mock = await startMockRouter(0);
-  // Something signed in, so the first-run "Models & accounts" dialog stays shut.
+  // Something signed in (the welcome, which would still open for the missing fallbacks, is
+  // marked seen below: this check is about the conversation).
   await fetch(`${mock.url}/mock/reset`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -251,6 +252,7 @@ async function check(): Promise<void> {
 
   const browser = await chromium.launch({ headless: true, executablePath: findChromium() });
   const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+  await page.addInitScript(() => localStorage.setItem("provenance-ui.welcome-done", "1"));
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const turn = page.locator(".turn").last();

@@ -6,14 +6,18 @@
 //
 // Walks: first launch with nothing set up -> the welcome opens -> Models (a site row opens
 // Models & accounts there and comes back) -> Fallbacks (health, switches, Codex's two modes)
-// -> Done; it doesn't open again. The model picker's Fallbacks section and its model lists; a
+// -> Done; it doesn't open again, and the sidebar's "Finish setting up" (no site or key yet)
+// opens it on Models. The model picker's Fallbacks section and its model lists; a picked
+// fallback's colour on the picker row, the button, the composer and the turn; a
 // Claude Code thread (streamed items, a resumed second turn; "Ask every time" warns that it runs
 // without asking and runs it like Auto); opening a tier thread points the
 // picker back at its tier; a thread that has outgrown the free models shows the suggestion
 // (router flags + repeated commands + compactions), a calm one doesn't; "Continue in Codex"
 // carries a brief over to Codex through Provenance (its app-server pointed at the router's
 // pass-through, the turn's saved history in the footer); dismissing it sticks. Then a Mac with
-// neither CLI: "Not installed" with how to get each, and the picker's muted rows.
+// neither CLI: "Not installed" with how to get each, and the picker's muted rows. Then when the
+// welcome opens by itself: sites signed in but no fallback -> it opens, reading as partly set up,
+// and "Finish setting up" leads to what is left until nothing is; everything set up -> it doesn't.
 
 import {
   appendFileSync,
@@ -91,9 +95,36 @@ async function layoutOk(page: Page, where: string): Promise<void> {
   const bad = await layoutProblems(page);
   check(!bad.length, `layout at ${where}${bad.length ? ` (${bad.join("; ")})` : ""}`);
 }
+/** The rail's steps already set up, as read out ("Models (set up)"). */
+async function railSet(page: Page): Promise<string> {
+  const t = await page.locator(`${welcome} .setup-rail li[data-set]`).allTextContents();
+  return t.map((x) => x.trim()).join();
+}
 async function railStep(page: Page): Promise<string> {
   return page.locator(`${welcome} .setup-rail li.current`).innerText();
 }
+/** An element's computed text colour is the given colour token's. */
+async function colourIs(page: Page, sel: string, token: string): Promise<boolean> {
+  return page.evaluate(
+    ([sel, token]) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      const probe = document.createElement("span");
+      probe.style.color = `var(${token})`;
+      document.body.append(probe);
+      const want = getComputedStyle(probe).color;
+      probe.remove();
+      return getComputedStyle(el).color === want;
+    },
+    [sel, token] as const,
+  );
+}
+const post = (route: string, body: unknown, method = "POST") =>
+  fetch(`${mock.url}${route}`, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
 
 const browser = await chromium.launch({ headless: true, executablePath: findChromium() });
 const context = await browser.newContext({ viewport: { width: 1280, height: 820 } });
@@ -179,6 +210,22 @@ try {
   await page.waitForSelector(".composer textarea");
   await page.waitForTimeout(2500);
   check((await page.locator(welcome).count()) === 0, "it doesn't open again after finishing");
+  // Fallbacks on, but no site or API key yet: the sidebar keeps a way back in.
+  const hint = page.locator(".sidebar-setup");
+  await hint.waitFor();
+  check(
+    (await hint.innerText()).trim() === "Finish setting up",
+    "the sidebar says Finish setting up",
+  );
+  await hint.click();
+  await page.waitForSelector(`${welcome} .setup-sites`);
+  check((await railStep(page)).includes("Models"), "which opens the welcome on Models");
+  check(
+    (await railSet(page)) === "Fallbacks (set up)",
+    "the rail ticks the fallbacks, already set up",
+  );
+  await page.locator(welcome).getByRole("button", { name: "Close" }).click();
+  await page.waitForSelector(welcome, { state: "detached" });
 
   // ---- 2. the picker's Fallbacks section --------------------------------------------
   log("picker");
@@ -217,6 +264,48 @@ try {
     /Claude Code\s*· Opus/.test(await page.locator(".tier-picker-btn").innerText()),
     "picked: the button says Claude Code · Opus",
   );
+  // Picked like a tier: its own colour on the button, the composer and the picker's row.
+  check(
+    (await page.locator('.tier-picker-btn[data-fallback="claude"]').count()) === 1 &&
+      (await colourIs(page, ".tier-picker-btn > svg", "--fallback-claude")),
+    "the button carries Claude Code's colour",
+  );
+  check(
+    (await page.locator('.composer-shell[data-fallback="claude"]').count()) === 1,
+    "so does the composer (its effect)",
+  );
+  await page.click('button[title="Model tier"]');
+  await page.waitForSelector('.tier-menu [data-fallback="claude"][aria-selected="true"]');
+  check(
+    (await colourIs(
+      page,
+      '.tier-menu [data-fallback="claude"] .tier-option-glyph',
+      "--fallback-claude",
+    )) &&
+      (await colourIs(
+        page,
+        '.tier-menu [data-fallback="claude"] .tier-option-check',
+        "--fallback-claude",
+      )) &&
+      (await colourIs(
+        page,
+        '.tier-menu [data-fallback="codex"] .tier-option-glyph',
+        "--fallback-codex",
+      )),
+    "the picker's rows: Claude Code's glyph and check in its colour, Codex's glyph in its own",
+  );
+  await page.hover('.tier-menu [data-fallback="claude"]');
+  await page.waitForSelector('.tier-sub[data-fallback="claude"]');
+  check(
+    await colourIs(
+      page,
+      '.tier-sub [data-source-model="claude:opus"] .tier-option-check',
+      "--fallback-claude",
+    ),
+    "and the submenu's check",
+  );
+  await shot(page, "picker-claude-selected");
+  await page.keyboard.press("Escape");
 
   // ---- 3. a Claude Code thread ---------------------------------------------------------
   log("claude thread");
@@ -245,6 +334,15 @@ try {
   check(
     /Claude Code\s*· Opus/.test(await page.locator(".turn-footer").last().innerText()),
     "the turn footer says Claude Code · Opus",
+  );
+  check(
+    (await page.locator('.turn[data-fallback="claude"]').count()) > 0 &&
+      (await colourIs(
+        page,
+        '.turn-footer .tier-badge[data-fallback="claude"] > svg',
+        "--fallback-claude",
+      )),
+    "the turn carries Claude Code's colour (its shimmer while it runs, the footer's badge)",
   );
   await shot(page, "claude-thread");
   let r = runs()
@@ -339,6 +437,12 @@ try {
     /Codex\s*· Default/.test(await page.locator(".tier-picker-btn").innerText()),
     "the picker follows the new thread",
   );
+  check(
+    (await page.locator('.tier-picker-btn[data-fallback="codex"]').count()) === 1 &&
+      (await page.locator('.composer-shell[data-fallback="codex"]').count()) === 1 &&
+      (await page.locator('.turn[data-fallback="codex"]').count()) > 0,
+    "Codex through Provenance carries Codex's colour on the button, the composer and the turn",
+  );
   await page.waitForSelector(
     '.thread-title:has-text("Refactor the parser into modules (continued)")',
   );
@@ -417,6 +521,95 @@ try {
   check(true, "a muted row opens the Fallbacks page");
   await p2.close();
   await bare.close();
+
+  // ---- 7. when the welcome opens by itself --------------------------------------------
+  log("opening rule");
+  /** A fresh install's page (its own storage), with these settings saved. */
+  const freshPage = async (settings?: object, theme?: "light") => {
+    const c = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+    c.setDefaultTimeout(20_000);
+    await c.addInitScript(
+      ([s, t]) => {
+        if (s) localStorage.setItem("provenance-ui.settings", s);
+        if (t) localStorage.setItem("provenance-ui.theme", t);
+      },
+      [settings ? JSON.stringify(settings) : "", theme ?? ""] as const,
+    );
+    const p = await c.newPage();
+    p.on("pageerror", (e) => errors.push(e.message));
+    await p.goto(ui.url);
+    await p.waitForSelector(".composer textarea");
+    return p;
+  };
+  const opened = async (p: Page) => {
+    await p.waitForSelector(welcome, { timeout: 4000 }).catch(() => undefined);
+    return (await p.locator(welcome).count()) === 1;
+  };
+  await post("/mock/reset", { scenario: "signed" }); // sites signed in, and an API key...
+  await post("/pool/keys/google", {}, "DELETE"); // ...taken away for now
+  const p3 = await freshPage();
+  check(await opened(p3), "sites signed in, no fallback switched on: it opens");
+  check(
+    !/nothing|not set up/i.test(await p3.locator(`${welcome} .welcome-intro`).innerText()),
+    "the intro doesn't say nothing is set up",
+  );
+  await p3.getByRole("button", { name: "Get started" }).click();
+  await p3.waitForSelector(`${welcome} .setup-sites .setup-site`);
+  check(
+    /what's ready/.test(await p3.locator(`${welcome} .setup-lead`).innerText()),
+    "Models reads as partly done",
+  );
+  check(
+    (await p3.locator(`${welcome} .setup-site[data-provider="chatgpt-web"]`).innerText()).includes(
+      "Ready",
+    ),
+    "the signed-in site reads Ready",
+  );
+  await layoutOk(p3, "welcome models, partly set up");
+  await shot(p3, "welcome-partly-models-dark");
+  await p3.locator(welcome).getByRole("button", { name: "Close" }).click();
+  await p3.reload();
+  await p3.waitForSelector(".composer textarea");
+  check(!(await opened(p3)), "closed once: it doesn't open again");
+  // No API key yet: "Finish setting up" leads to Models; with one, to Fallbacks.
+  await p3.click(".sidebar-setup");
+  await p3.waitForSelector(`${welcome} .setup-sites`);
+  check((await railStep(p3)).includes("Models"), "Finish setting up: Models first (no API key)");
+  await p3.locator(welcome).getByRole("button", { name: "Close" }).click();
+  await post("/pool/keys/google", { values: { GEMINI_API_KEY: "test-key" } }, "PUT");
+  await p3.reload();
+  await p3.waitForSelector(".composer textarea");
+  await p3.click(".sidebar-setup");
+  await p3.waitForSelector(`${welcome} .fallback-row`);
+  check(
+    (await railStep(p3)).includes("Fallbacks"),
+    "with a site and a key: Finish setting up opens on Fallbacks",
+  );
+  check((await railSet(p3)) === "Models (set up)", "the rail ticks Models");
+  await p3.waitForSelector(`${welcome} .fallback-row[data-cli="claude"] .dot-ok`);
+  await layoutOk(p3, "welcome fallbacks, partly set up");
+  await shot(p3, "welcome-partly-fallbacks-dark");
+  await p3.locator(welcome).getByRole("switch", { name: "Use Claude Code" }).check();
+  await p3.locator(welcome).getByRole("button", { name: "Close" }).click();
+  await p3.waitForSelector(".sidebar-setup", { state: "detached" });
+  check(true, "everything set up: Finish setting up goes away");
+  await p3.context().close();
+
+  const p4 = await freshPage({ fallbacks: { claude: true, codex: "off" } });
+  check(!(await opened(p4)), "everything set up on a fresh install: it doesn't open");
+  check((await p4.locator(".sidebar-setup").count()) === 0, "and there is nothing to finish");
+  await p4.context().close();
+
+  // The same partly set-up welcome on paper.
+  await post("/pool/keys/google", {}, "DELETE");
+  const p5 = await freshPage(undefined, "light");
+  check(await opened(p5), "light theme, partly set up: it opens");
+  await p5.getByRole("button", { name: "Get started" }).click();
+  await p5.waitForSelector(`${welcome} .setup-sites .setup-site`);
+  await shot(p5, "welcome-partly-models-light");
+  await p5.locator(welcome).getByRole("button", { name: "Close" }).click();
+  await shot(p5, "sidebar-finish-light");
+  await p5.context().close();
 
   check(!errors.length, `no page errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
   log("all good");

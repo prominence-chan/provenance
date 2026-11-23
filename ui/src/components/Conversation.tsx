@@ -13,6 +13,7 @@ import { tierOf } from "../theme/tiers";
 import { TierBadge } from "./TierBadge";
 import { TurnModels } from "./TurnModels";
 import { StrainNote } from "../fallback/StrainNote";
+import { fallbackOf } from "../fallback/model";
 
 /** Centered, scrolling transcript of one thread. */
 export function Conversation({ threadId }: { threadId: string }) {
@@ -96,7 +97,11 @@ function Turn({
   const streamingText = running && last?.type === "agentMessage" && !last.completedAtMs;
   const groups = groupItems(turn.items);
   return (
-    <section className="turn" data-tier={tierOf(model)?.id}>
+    <section
+      className="turn"
+      data-tier={tierOf(model)?.id}
+      data-fallback={fallbackOf(model) ?? undefined}
+    >
       {groups.map((g, i) =>
         Array.isArray(g) ? (
           <ToolGroup key={g[0].id} items={g} collapsed={!running || textAfter(groups, i)} />

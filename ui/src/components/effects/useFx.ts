@@ -1,21 +1,27 @@
-// Which tier effect should be showing right now, derived from the selected thread.
+// Which tier effect should be showing right now, derived from the selected thread. A fallback
+// (Claude Code, Codex) has an effect of its own too, in its own colour.
 //
-// The effect is always on for the selected tier: FlameFx flares when the tier changes
+// The effect is always on for the selected tier or fallback: FlameFx flares when the tier changes
 // (and on first load), idles quietly, and rises while a turn streams.
 //
 // Dev-only preview (stripped from production builds):
 //   ?fx=nova            nova, active (as if a turn were streaming)
 //   ?fx=nova:idle       nova, idle (after the load flare)
 //   ?fx=nova:flare      same as idle; the page load plays the flare
+//   ?fx=claude          a fallback: claude or codex
 //   __provenanceFx("spark", "flare")   replay spark's switch flare, then idle
 //   __provenanceFx("spark", "active")  / "idle"
 //   __provenanceFx(null)               back to the real state
 import { useSyncExternalStore } from "react";
+import type { FallbackCli } from "../../../shared/fallback-api";
+import { fallbackOf } from "../../fallback/model";
 import { useAppState } from "../../store/store";
 import { tierOf, type TierInfo } from "../../theme/tiers";
 
 export interface FxState {
   tier: TierInfo | null;
+  /** The selected model is a fallback instead (tier is null then). */
+  fallback: FallbackCli | null;
   /** A turn is in flight (or being started) on the selected thread. */
   streaming: boolean;
   /** Bumped to replay the switch flare without a tier change (dev preview). */
@@ -69,14 +75,22 @@ export function useFx(): FxState {
     s.selectedThreadId ? s.views[s.selectedThreadId]?.model : null,
   );
   if (import.meta.env.DEV && dev)
-    return { tier: tierOf(dev.tier), streaming: dev.mode === "active", flareKey: dev.key };
+    return {
+      ...identity(dev.tier === "claude" || dev.tier === "codex" ? `${dev.tier}:` : dev.tier),
+      streaming: dev.mode === "active",
+      flareKey: dev.key,
+    };
   if (running)
     return {
-      tier: tierOf(running.model ?? threadModel ?? settingsModel),
+      ...identity(running.model ?? threadModel ?? settingsModel),
       streaming: true,
       flareKey: 0,
     };
-  return { tier: tierOf(settingsModel), streaming: sending, flareKey: 0 };
+  return { ...identity(settingsModel), streaming: sending, flareKey: 0 };
+}
+
+function identity(model: string | null | undefined): Pick<FxState, "tier" | "fallback"> {
+  return { tier: tierOf(model), fallback: fallbackOf(model) };
 }
 
 export function prefersReducedMotion(): boolean {

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { parseFallbackModel } from "../../shared/fallback-api";
 import { fallbacks, type Fallback } from "../fallback/available";
-import { fallbackLabel } from "../fallback/model";
+import { fallbackLabel, fallbackOf } from "../fallback/model";
 import { openSetup } from "../setup/open";
 import {
   refreshFallbacks,
@@ -305,7 +305,7 @@ export function TierPicker() {
         aria-expanded={open}
         aria-activedescendant={activeId}
         data-tier={current?.id}
-        data-fallback={picked?.mode}
+        data-fallback={fallbackOf(model) ?? undefined}
         onClick={() => setOpen((o) => !o)}
       >
         {fbLabel ? (

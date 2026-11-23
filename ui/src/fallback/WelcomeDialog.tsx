@@ -1,13 +1,17 @@
 // The welcome: what Provenance is -> free models (the sites and the token pool, each row opening
 // Models & accounts there and coming back here) -> fallbacks (Claude Code, Codex: health and a
-// switch each) -> done. Opens by itself once when nothing is set up (setup/open.ts), and from
-// the app menu (Provenance > Welcome…). Closing it at any step skips the rest.
+// switch each) -> done. Opens by itself once while something is not set up (setup/open.ts), and
+// from the app menu (Provenance > Welcome…) and the sidebar's "Finish setting up". On a Mac
+// where some of it is set up already, the rail ticks those steps and the rows say Ready.
+// Closing it at any step skips the rest.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HeroSun } from "../components/effects/HeroSun";
 import { IconBack, IconClose, IconNext, Monogram, SiteStatus } from "../setup/parts";
 import {
   closeWelcome,
+  fallbacksDecided,
+  noteSetup,
   openWelcome,
   useWelcomeOpen,
   welcomeToSetup,
@@ -22,6 +26,7 @@ import {
   type PoolProvider,
   type WebAccounts,
 } from "../setup/web";
+import { IconCheck } from "../components/icons";
 import { useAppState } from "../store/store";
 import { fallbacks } from "./available";
 import { FallbacksStep } from "./FallbacksStep";
@@ -40,12 +45,14 @@ export function WelcomeDialog() {
   const [data, setData] = useState<WebAccounts | null>(null);
   const [pool, setPool] = useState<PoolProvider[] | null>(null);
   const [down, setDown] = useState(false);
+  const prefs = useAppState((s) => s.settings.fallbacks);
 
   const reload = useCallback(async () => {
     const [a, p] = await Promise.all([getAccounts(), getPoolKeys()]);
     setData(a.ok ? a.value : null);
     setDown(!a.ok && a.why === "down");
     setPool(p.ok ? p.value : null);
+    if (a.ok) noteSetup(a.value, p.ok ? p.value : null);
   }, []);
 
   useEffect(() => {
@@ -63,6 +70,11 @@ export function WelcomeDialog() {
   }, [open, step]);
 
   const index = STEPS.findIndex((s) => s.id === step);
+  // Already set up: a site signed in and a key of your own; a fallback switched on.
+  const set: Partial<Record<WelcomeStep, boolean>> = {
+    models: !!data && anySignedIn(data) && keyed(pool) > 0,
+    fallbacks: fallbacksDecided(prefs),
+  };
   const go = (to: WelcomeStep) => {
     setStep(to);
     openWelcome(to); // remembered, so coming back from Models & accounts lands here
@@ -126,11 +138,15 @@ export function WelcomeDialog() {
           {STEPS.map((s, i) => (
             <li
               key={s.id}
-              className={i < index ? "done" : i === index ? "current" : ""}
+              className={i === index ? "current" : i < index || set[s.id] ? "done" : ""}
               aria-current={i === index ? "step" : undefined}
+              data-set={set[s.id] || undefined}
             >
-              <span className="setup-rail-num">{i + 1}</span>
+              <span className="setup-rail-num">
+                {set[s.id] && i !== index ? <IconCheck size={10} /> : i + 1}
+              </span>
               {s.label}
+              {set[s.id] && <span className="visually-hidden"> (set up)</span>}
             </li>
           ))}
         </ol>
@@ -175,10 +191,13 @@ function Models({
   onNext: () => void;
 }) {
   const fresh = !data || !anySignedIn(data);
+  const some = !fresh || keyed(pool) > 0;
   return (
     <div className="setup-step">
       <p className="setup-lead">
-        Sign in to a chat site or add free API keys. One is enough to start.
+        {some
+          ? "You can start with what's ready. Another site or free API keys add more."
+          : "Sign in to a chat site or add free API keys. One is enough to start."}
       </p>
       {down ? (
         <p className="setup-note">
@@ -250,8 +269,7 @@ function Done({
         .filter((p) => p.enabled && p.accounts.some((a) => a.signed_in === true))
         .map((p) => p.name)
     : [];
-  const keyed = (pool ?? []).filter((p) => p.usable && !p.anonymous).length;
-  const models = [...sites, ...(keyed ? ["Token pool"] : [])];
+  const models = [...sites, ...(keyed(pool) ? ["Token pool"] : [])];
   const fbs = fallbacks(prefs, info)
     .filter((f) => f.ready)
     .map((f) => (f.mode === "codex-pv" ? "Codex through Provenance" : f.name));
@@ -272,4 +290,9 @@ function Done({
       </div>
     </div>
   );
+}
+
+/** Token pool providers with a usable key of your own. */
+function keyed(pool: PoolProvider[] | null): number {
+  return (pool ?? []).filter((p) => p.usable && !p.anonymous).length;
 }

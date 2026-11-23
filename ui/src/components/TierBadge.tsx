@@ -1,6 +1,7 @@
-import { fallbackLabel } from "../fallback/model";
+import { fallbackLabel, fallbackOf } from "../fallback/model";
 import { useAppState } from "../store/store";
 import { splitModel, tierOf, type TierId } from "../theme/tiers";
+import { IconTerminal } from "./icons";
 
 /**
  * Per-tier glyph, brighter as the tier rises: a small spark, a glowing coal (ember),
@@ -72,7 +73,10 @@ export function useSourceLabel(model: string | null | undefined): string | null 
   });
 }
 
-/** Small pill: glyph + tier name (+ pinned source), tinted by tier. Unknown models render neutral. */
+/**
+ * Small pill: glyph + tier name (+ pinned source), tinted by tier; a fallback's terminal glyph and
+ * name, tinted by its own colour. Unknown models render neutral.
+ */
 export function TierBadge({ model, compact }: { model: string | null; compact?: boolean }) {
   const source = useSourceLabel(model);
   const info = useAppState((s) => s.fallbackInfo);
@@ -80,8 +84,12 @@ export function TierBadge({ model, compact }: { model: string | null; compact?: 
   const fb = fallbackLabel(model, info);
   if (fb)
     return (
-      <span className={`tier-badge ${compact ? "compact" : ""}`} title={`${fb.name} · ${fb.model}`}>
-        <TierGlyph tier={null} size={compact ? 10 : 11} />
+      <span
+        className={`tier-badge ${compact ? "compact" : ""}`}
+        data-fallback={fallbackOf(model) ?? undefined}
+        title={`${fb.name} · ${fb.model}`}
+      >
+        <IconTerminal size={compact ? 10 : 11} />
         {!compact && (
           <span className="tier-name">
             {fb.name}

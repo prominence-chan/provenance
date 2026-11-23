@@ -6,6 +6,7 @@
 
 import {
   parseFallbackModel,
+  type FallbackCli,
   type FallbackMode,
   type FallbacksInfo,
 } from "../../shared/fallback-api";
@@ -21,6 +22,16 @@ export function backendOfModel(model: string | null | undefined): BackendId {
 /** A fallback thread's id says where it lives before any list has loaded (server/fallback/backend.ts). */
 export function backendOfThreadId(id: string): BackendId | null {
   return id.startsWith("fb-") ? "fallback" : null;
+}
+
+/**
+ * Which fallback a model runs on, as its colour and effect know it ("codex-pv:" is Codex too);
+ * null for a tier. The fallbacks' counterpart of tierOf (theme/tiers.ts): a model has one or
+ * the other, and `data-fallback` carries it the way `data-tier` carries a tier.
+ */
+export function fallbackOf(model: string | null | undefined): FallbackCli | null {
+  const f = parseFallbackModel(model);
+  return f ? (f.mode === "claude" ? "claude" : "codex") : null;
 }
 
 export const MODE_NAME: Record<FallbackMode, string> = {
