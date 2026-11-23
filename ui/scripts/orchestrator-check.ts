@@ -618,6 +618,8 @@ function answer(role: string, whole: string, instructions = ""): string | number
   switch (role) {
     case "planner":
       if (/r503/.test(input)) return 503;
+      if (/notools always/.test(input)) return "TASK 1: NOTOOLS ALWAYS do it\nDONE WHEN: ok";
+      if (/notools/.test(input)) return "TASK 1: NOTOOLS write it\nDONE WHEN: ok";
       if (/hello/.test(input)) return "ANSWER: Hi! Nothing to do in the folder.";
       if (/declinetwice/.test(input)) return "I cannot access your files or run anything here.";
       if (/decline/.test(input))
@@ -2213,7 +2215,61 @@ check(
   "archive hides a thread",
 );
 
-log("a concrete model name is passed through unchanged; every call can be found in the router's ledger");
+log(
+  "experimental: a worker that ran nothing is run again once, and its excuse stays out of the notes",
+);
+seen.length = 0;
+let idleFrom = fake().filter((l) => l.turnStart).length;
+const nt = await start("experimental");
+await say(nt.id, "notools job");
+turn = await turnDone(nt.id);
+let idleBriefs = fake()
+  .filter((l) => l.turnStart)
+  .slice(idleFrom)
+  .map((l) => l.turnStart!.brief);
+check(
+  turn.status === "completed" &&
+    idleBriefs.length === 2 &&
+    !/ran no command/.test(idleBriefs[0]) &&
+    /RECORDED: an earlier worker on this task ran no command/.test(idleBriefs[1]) &&
+    idleBriefs[1].length <= BRIEF_BUDGET,
+  "the task got a second worker, whose brief records that the first ran nothing",
+);
+check(
+  !seen.some((s) => s.role === "revise") &&
+    stored(nt.id).notes.problems.length === 0 &&
+    stored(nt.id).notes.done.length === 1,
+  "no revision and no problem noted: the second worker's work is the task's result",
+);
+seen.length = 0;
+idleFrom = fake().filter((l) => l.turnStart).length;
+const nta = await start("experimental");
+await say(nta.id, "notools always job");
+turn = await turnDone(nta.id);
+idleBriefs = fake()
+  .filter((l) => l.turnStart)
+  .slice(idleFrom)
+  .map((l) => l.turnStart!.brief);
+const idleRevise = seen.find((s) => s.role === "revise")?.input ?? "";
+check(
+  /YOUR TASK \(1 of 1\): NOTOOLS ALWAYS/.test(idleBriefs[0]) &&
+    /YOUR TASK \(1 of 1\): NOTOOLS ALWAYS/.test(idleBriefs[1]) &&
+    /YOUR TASK \(1 of 2\): Do the thing another way/.test(idleBriefs[2] ?? "") &&
+    /\(recorded\) Twice a worker given this task stopped without running any command/.test(
+      idleRevise,
+    ),
+  "the same twice goes to the planner as a record that nothing was tried",
+);
+check(
+  stored(nta.id).notes.problems.some((p) =>
+    /two workers stopped without running any command/.test(p),
+  ) && !stored(nta.id).notes.problems.some((p) => /unavailable/i.test(p)),
+  "the notes say nothing was tried, not that the terminal is missing",
+);
+
+log(
+  "a concrete model name is passed through unchanged; every call can be found in the router's ledger",
+);
 seen.length = 0;
 const tracesBefore = traces.length;
 const startsBefore = fake().filter((l) => l.threadStart).length;
@@ -2241,7 +2297,9 @@ check(
 const workerTraces = namedTraces.filter((t) => t.type === "worker");
 check(
   workerTraces.length === 4 &&
-    workerTraces.every((t, i) => t.type === "worker" && !!t.threadId && t.threadId === namedStarts[i].threadId),
+    workerTraces.every(
+      (t, i) => t.type === "worker" && !!t.threadId && t.threadId === namedStarts[i].threadId,
+    ),
   "each worker's trace carries its harness thread id (the key of its requests in the ledger)",
 );
 const colon = await call("thread/start", {

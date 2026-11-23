@@ -223,6 +223,8 @@ export async function runExperimental(run: Run): Promise<void> {
   /** The last command a worker of this turn ran that was a check (not a look around). */
   let lastCheck: { cmd: string; ok: boolean } | null = null;
   let wait: ModelWait | null = null;
+  /** Tasks whose worker once ended without using a tool at all (run again once, saying so). */
+  const idled = new Set<string>();
   const showPlan = (current: MiniTask | null) =>
     run.plan([
       ...finished.map((t) => ({ step: t.title, status: "completed" as const })),
@@ -269,6 +271,7 @@ export async function runExperimental(run: Run): Promise<void> {
         // (the goal has its own line in the brief, and the later tasks theirs)
         notes: notesText(notes, NOTES_LIMIT, false).replace(/^GOAL: .*\n?/, ""),
         cwd: run.cwd,
+        idleBefore: idled.has(key),
       });
       const snap = snapshot(run.cwd);
       const res = await runWorker(run, brief, ++started);
@@ -322,6 +325,26 @@ export async function runExperimental(run: Run): Promise<void> {
       }
       const rep = parseReport(res.report);
       const sec = reportSections(res.report);
+      // A worker that ran no command and changed no file, and does not report done, never
+      // started (a chat model that looked for the shell among its own tools and gave up). What
+      // it says about missing tools is no fact about this machine and must not reach the notes,
+      // where the planner would plan around it: the task is run once more, with that recorded
+      // in the brief. Not a try of the task and not one of the turn's worker runs.
+      const idleWorker =
+        res.status === "completed" &&
+        !res.budget &&
+        res.commands.length === 0 &&
+        res.files.length === 0 &&
+        rep.status !== "done";
+      if (idleWorker && !idled.has(key)) {
+        idled.add(key);
+        attempts.set(key, tries - 1);
+        ran--;
+        queue.unshift(task);
+        run.say("The worker stopped without running anything. Running the task again.");
+        run.save();
+        continue;
+      }
       lastReport = res.report;
       // A report is a claim; the last command's exit code is a record. "Done" over a failed last
       // command is treated as not done.
@@ -356,7 +379,13 @@ export async function runExperimental(run: Run): Promise<void> {
           (res.lastFailure
             ? `(no report) The last command, ${clip(res.lastFailure.cmd, 160)}, failed with:\n${res.lastFailure.output}`
             : "");
-      addProblem(notes, `${clip(task.title, 80)}: ${why}`);
+      // The same twice: recorded as what it is, not as the missing tool it names.
+      addProblem(
+        notes,
+        idleWorker
+          ? `${clip(task.title, 80)}: two workers stopped without running any command (the shell works; nothing was tried)`
+          : `${clip(task.title, 80)}: ${why}`,
+      );
       if (rep.status === "partial" && sec.result)
         addDone(notes, `${task.title} (partly)`, sec.result);
       else if (res.budget && res.report.trim())
@@ -369,7 +398,18 @@ export async function runExperimental(run: Run): Promise<void> {
         );
       replans++;
       const revised = parsePlan(
-        await run.model("revise", revisePrompt(job, notesText(notes), task, evidence, queue)),
+        await run.model(
+          "revise",
+          revisePrompt(
+            job,
+            notesText(notes),
+            task,
+            idleWorker
+              ? `(recorded) Twice a worker given this task stopped without running any command or changing any file. Workers here have a working shell and can create files with it; whatever the worker said about missing tools or access is not a fact about this machine.${res.report ? `\nWhat it said: ${clip(res.report, 300)}` : ""}`
+              : evidence,
+            queue,
+          ),
+        ),
         5,
       );
       if (!revised.tasks.length) {
