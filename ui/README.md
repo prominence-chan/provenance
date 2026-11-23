@@ -36,6 +36,7 @@ Other scripts:
 | `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's setup API                 |
 | `npm run check:fallback`      | Claude Code / Codex fallbacks, server side, against stand-in CLIs (no browser)                |
 | `npm run e2e:welcome`         | Welcome, fallbacks, picker, "too large" suggestion, headless (needs `npm run build`)          |
+| `npm run check:orchestrator`  | The two experimental orchestrators, server side, against a stand-in router and app-server     |
 | `npm run check:presence`      | Discord Rich Presence against a stand-in Discord socket, plus the page's reports (below)      |
 
 `smoke` and `e2e` expect the server to already be running; `e2e:setup` starts its own UI
@@ -500,6 +501,40 @@ Checks: `npm run check:fallback` (server side against stand-in CLIs), `npm run e
 page end to end, stand-in claude / codex / provenance; needs `npm run build`),
 `node scripts/fallback-real-check.ts` (one tiny real turn each through the real CLIs and your
 Codex sign-in; spends a little usage).
+
+## Orchestrators
+
+Who drives a thread on the tiers (`shared/orchestrator-api.ts`; the composer's choice,
+`settings.orchestrator`). **Provenance** is the stock harness on `/rpc`. The other two live in
+`server/orchestrator/` and are served on WebSocket `/rpc/orchestrator` with app-server's methods
+and notifications, like `/rpc/fallback`; their thread ids start with `orc-`, `thread/start` takes
+the choice in `config.orchestrator`, and a thread keeps the one it was started with. Threads are
+JSON files in `<data>/orchestrator/threads`. Both use a third `provenance app-server`
+(`appserver.ts`: same binary, home and router as the main one, started on first use, run in an
+empty folder) that only the backend talks to, and call the router directly for plain model calls
+(`router.ts`: `POST /v1/responses`, one user message, streamed, not stored, a session key per
+call, so each lands in a new chat). Every prompt is in `prompts.ts`; a plain call is held to 8,000
+characters.
+
+- **Experimental** (`experimental.ts`): a planner call returns a short list of mini tasks in plain
+  text (`parse.ts` reads it leniently); each task runs as a worker, a fresh ephemeral thread of
+  the stock harness with the thread's sandbox and approval preset, given a brief (goal, task,
+  done-criteria, notes); its commands, edits and approval requests show in the visible thread;
+  its last message is its report. The notes (`notes.ts`, at most 2,400 characters, oldest folded
+  first) are the only thing carried between tasks and turns: files and commands as recorded,
+  one line per task as reported. A blocked task sends the remaining list back to the planner.
+- **Hyperexperimental** (`hyper.ts`): per step, three new chats (think in plain words → translate
+  into `RUN / READ / LIST / SEARCH / WRITE / REPLACE` → summarize) and one execution through
+  app-server's `command/exec` under the thread's sandbox as an explicit policy (reads always
+  read-only; "Ask every time" shows each command and file change for approval first). Only the
+  summary (2,500 characters) and the last step's results are carried.
+
+Loop guards are `Caps` in `backend.ts` (tasks, tries per task, plan revisions, steps, model calls
+per turn); one that stops the work ends the turn with a plain message. A router that can't serve
+(503 / 429) fails the turn with its message. `npm run check:orchestrator` checks all of it against
+a stand-in router and app-server; `node scripts/orchestrator-real-check.ts sandbox` runs the
+execute step against the real binary's sandbox (no model), and `… experimental | hyperexperimental
+| stock [model]` one small real job each (they spend the free allowance).
 
 ## Tool runs and model attribution
 

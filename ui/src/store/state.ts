@@ -197,7 +197,7 @@ export function initialState(): AppState {
     usage: {},
     fallbackInfo: null,
     threadBackend: {},
-    backendReady: { main: false, codex: false, fallback: false },
+    backendReady: { main: false, codex: false, fallback: false, orchestrator: false },
   };
 }
 

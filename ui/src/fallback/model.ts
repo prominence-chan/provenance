@@ -2,6 +2,8 @@
 //   "solstice", "luna/solstice"  -> main      provenance app-server on provenance-core's tiers (/rpc)
 //   "codex-pv:<model>"           -> codex     a second provenance app-server on your Codex login (/rpc/codex)
 //   "claude:<model>", "codex:<model>" -> fallback  the claude / codex CLI runs it (/rpc/fallback)
+// A tier thread started with the Experimental or Hyperexperimental orchestrator lives on a fourth
+// backend, "orchestrator" (/rpc/orchestrator): the model doesn't say so, the thread's id does.
 // (shared/fallback-api.ts has the key format; server/app.ts the three endpoints.)
 
 import {
@@ -10,8 +12,9 @@ import {
   type FallbackMode,
   type FallbacksInfo,
 } from "../../shared/fallback-api";
+import { ORCHESTRATOR_ID_PREFIX } from "../../shared/orchestrator-api";
 
-export type BackendId = "main" | "codex" | "fallback";
+export type BackendId = "main" | "codex" | "fallback" | "orchestrator";
 
 export function backendOfModel(model: string | null | undefined): BackendId {
   const f = parseFallbackModel(model);
@@ -21,6 +24,7 @@ export function backendOfModel(model: string | null | undefined): BackendId {
 
 /** A fallback thread's id says where it lives before any list has loaded (server/fallback/backend.ts). */
 export function backendOfThreadId(id: string): BackendId | null {
+  if (id.startsWith(ORCHESTRATOR_ID_PREFIX)) return "orchestrator";
   return id.startsWith("fb-") ? "fallback" : null;
 }
 

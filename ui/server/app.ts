@@ -15,6 +15,10 @@
 //                        model requests through the router's pass-through (fallback/codex-route.ts);
 //                        started on first use
 //   - WS  /rpc/fallback -> threads run by the claude / codex CLIs, same protocol (fallback/backend.ts)
+//   - WS  /rpc/orchestrator -> tier threads driven by the Experimental / Hyperexperimental
+//                        orchestrators, same protocol (orchestrator/backend.ts); they use a third
+//                        `provenance app-server` of their own (orchestrator/appserver.ts), started
+//                        on first use
 //
 // Used by server/main.ts (the `npm run dev` / `npm start` CLI) and by the desktop
 // app (electron/main.ts), which runs it inside Electron's own Node.
@@ -36,6 +40,9 @@ import { defaultSearchPath } from "./fallback/cli.ts";
 import { codexHomeEnv, prepareCodexHome } from "./fallback/codex-home.ts";
 import { codexPvArgs, maskCodexSubKey } from "./fallback/codex-route.ts";
 import { getFallbacks, type FallbackEnv } from "./fallback/health.ts";
+import { AppServerProcess } from "./orchestrator/appserver.ts";
+import { OrchestratorBackend } from "./orchestrator/backend.ts";
+import { makeCallModel } from "./orchestrator/router.ts";
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
 const FALLBACK_TIERS = ["nova", "solstice", "ember", "spark"];
@@ -157,6 +164,27 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     codexBridge.start();
     return codexBridge;
   };
+
+  // ---- orchestrators: Experimental / Hyperexperimental threads on the tiers ----------------
+  // Their own app-server: same binary, home and router as the main one, run in an empty folder.
+  let orchestratorServer: AppServerProcess | null = null;
+  const orchestrator = new OrchestratorBackend({
+    dir: path.join(dataDir, "orchestrator"),
+    appServer: () =>
+      (orchestratorServer ??= new AppServerProcess({
+        bin: opts.bin,
+        runDir: path.join(dataDir, "orchestrator", "run"),
+        env: () => {
+          const { url, token } = conn();
+          return {
+            ...opts.appServerEnv,
+            TIERLM_BASE_URL: `${url}/v1`,
+            ...(token ? { TIERLM_TOKEN: token } : {}),
+          };
+        },
+      })),
+    callModel: makeCallModel(conn),
+  });
 
   async function fetchTiers(): Promise<{ tiers: string[]; source: string }> {
     try {
@@ -400,13 +428,20 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
     const where = new URL(req.url ?? "/", "http://localhost").pathname;
-    if (where !== "/rpc" && where !== "/rpc/codex" && where !== "/rpc/fallback") return; // Vite HMR handles its own
+    if (
+      where !== "/rpc" &&
+      where !== "/rpc/codex" &&
+      where !== "/rpc/fallback" &&
+      where !== "/rpc/orchestrator"
+    )
+      return; // Vite HMR handles its own
     if (!sameOrigin(req)) {
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       if (where === "/rpc/fallback") fallback.attach(ws);
+      else if (where === "/rpc/orchestrator") orchestrator.attach(ws);
       else if (where === "/rpc/codex") codexServer().attach(ws);
       else bridge.attach(ws);
     });
@@ -431,6 +466,8 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       bridge.stop();
       codexBridge?.stop();
       fallback.stop();
+      orchestrator.stop();
+      orchestratorServer?.stop();
       // ws 8 leaves open sockets alone on close(); upgraded sockets would keep server.close() waiting.
       for (const c of wss.clients) c.terminate();
       wss.close();
