@@ -2302,6 +2302,12 @@ check(
     ),
   "each worker's trace carries its harness thread id (the key of its requests in the ledger)",
 );
+check(
+  workerTraces.every(
+    (t) => t.type === "worker" && /STATUS: DONE/.test(t.report) && t.commands === 1,
+  ),
+  "and the worker's own report and how many commands it ran",
+);
 const colon = await call("thread/start", {
   model: "solstice:none",
   cwd: work,

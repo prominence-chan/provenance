@@ -176,6 +176,9 @@ export type TraceEvent =
       status: string;
       /** The worker's harness thread: the key of its requests in the router's usage ledger. */
       threadId: string | null;
+      /** The worker's last message as it wrote it, and how many commands it ran. */
+      report: string;
+      commands: number;
     };
 
 /** Ends the turn: "cap" with a plain message as the answer, the others as a failed turn. */

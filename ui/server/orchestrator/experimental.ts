@@ -286,6 +286,8 @@ export async function runExperimental(run: Run): Promise<void> {
         maxInputTokens: res.maxInputTokens,
         status: res.budget ? `stopped (${res.budget})` : res.modelFailure ? "no model" : res.status,
         threadId: res.threadId,
+        report: res.report,
+        commands: res.commands.length,
       });
       // Recorded facts first: they hold whatever the report says, and whatever stopped the worker.
       for (const c of res.commands) {
