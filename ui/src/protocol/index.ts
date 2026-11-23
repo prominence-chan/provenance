@@ -43,6 +43,9 @@ export interface ResponseMap {
   "thread/turns/list": v2.ThreadTurnsListResponse;
   "thread/archive": v2.ThreadArchiveResponse;
   "thread/name/set": v2.ThreadSetNameResponse;
+  "project/list": v2.ProjectListResponse;
+  "project/move": v2.ProjectMoveResponse;
+  "project/delete": v2.ProjectDeleteResponse;
   "turn/start": v2.TurnStartResponse;
   "turn/interrupt": v2.TurnInterruptResponse;
   "model/list": v2.ModelListResponse;

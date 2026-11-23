@@ -136,3 +136,16 @@ export const IconStack = ({ size }: P) => (
     <path d="M3 13l9 5 9-5" />
   </svg>
 );
+
+export const IconTrash = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14" />
+  </svg>
+);
+
+export const IconClock = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);

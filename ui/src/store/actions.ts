@@ -723,4 +723,28 @@ export function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+export async function projectMove(params: { projectId: string; beforeProjectId?: string }): Promise<void> {
+  setState((s) => ({ ...s, threadsLoading: true }));
+  try {
+    await rpc.request("project/move", params);
+    await refreshThreads();
+  } catch (e) {
+    notify("error", `Couldn't move project: ${errText(e)}`);
+  } finally {
+    setState((s) => ({ ...s, threadsLoading: false }));
+  }
+}
+
+export async function projectDelete(projectId: string): Promise<void> {
+  setState((s) => ({ ...s, threadsLoading: true }));
+  try {
+    await rpc.request("project/delete", { projectId });
+    await refreshThreads();
+  } catch (e) {
+    notify("error", `Couldn't delete project: ${errText(e)}`);
+  } finally {
+    setState((s) => ({ ...s, threadsLoading: false }));
+  }
+}
+
 export type { AppState };
