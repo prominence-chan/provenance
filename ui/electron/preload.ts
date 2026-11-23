@@ -19,6 +19,6 @@ contextBridge.exposeInMainWorld("provenanceApp", {
   onNewThread: (cb: () => void) => on("app:new-thread", () => cb()),
   onOpenAccounts: (cb: () => void) => on("app:open-accounts", () => cb()),
   onOpenWelcome: (cb: () => void) => on("app:open-welcome", () => cb()),
-  // Discord presence: only {kind, working, since}; the main process drops anything else.
+  // Discord presence: only {kind, orchestrator, working, since}; the main process drops anything else.
   setPresence: (s: unknown) => ipcRenderer.send("app:presence", s),
 });
