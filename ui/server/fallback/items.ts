@@ -202,3 +202,13 @@ export function unwrapShell(cmd: string): string {
   const m = /^\/bin\/(?:ba|z)?sh -l?c '([\s\S]*)'$/.exec(cmd);
   return m ? m[1].replace(/'\\''/g, "'") : cmd;
 }
+
+/** turn/start's additionalContext ({key: {value, kind}}) as one text, in key order. */
+export function contextText(ctx: unknown): string {
+  if (!ctx || typeof ctx !== "object") return "";
+  return Object.keys(ctx as Record<string, unknown>)
+    .sort()
+    .map((k) => (ctx as Record<string, { value?: unknown } | null>)[k]?.value)
+    .filter((v): v is string => typeof v === "string" && v.trim() !== "")
+    .join("\n\n");
+}

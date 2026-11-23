@@ -7,6 +7,8 @@
 //   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage), and what
 //                        fitting its history took (its "context" flags)
 //   - GET /api/fallbacks -> Claude Code / Codex health and models (fallback/health.ts; ?refresh=1)
+//   - GET /api/links, PUT /api/links/<id> {segments}, DELETE /api/links/<id> -> which backend
+//                        sessions make up one conversation (shared/thread-links.ts, links.ts)
 //   - POST /api/scratch?purpose=pool-setup -> an empty folder of the app's own
 //                        (<data>/scratch/Token pool setup, emptied each time): the working folder
 //                        of a thread that needs no project (the token pool's setup assistant)
@@ -46,6 +48,8 @@ import { getFallbacks, type FallbackEnv } from "./fallback/health.ts";
 import { AppServerProcess } from "./orchestrator/appserver.ts";
 import { capsFromEnv, OrchestratorBackend } from "./orchestrator/backend.ts";
 import { makeCallModel } from "./orchestrator/router.ts";
+import { ThreadLinkStore } from "./links.ts";
+import { parseSegments } from "../shared/thread-links.ts";
 
 /** POST /api/scratch?purpose=…: the app's own empty working folders, by purpose. */
 const SCRATCH: Record<string, string> = { "pool-setup": "Token pool setup" };
@@ -145,6 +149,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     dir: path.join(dataDir, "fallback"),
     searchPath: () => fallbackEnv().searchPath,
   });
+  const links = new ThreadLinkStore(path.join(dataDir, "thread-links.json"));
   /** The second app-server, started when the page first opens /rpc/codex. */
   let codexBridge: AppServerBridge | null = null;
   const codexServer = (): AppServerBridge => {
@@ -359,6 +364,55 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       sendJson(res, { path: realpathSync(dir) });
+      return true;
+    }
+    if (url.pathname === "/api/links") {
+      sendJson(res, { links: links.all() });
+      return true;
+    }
+    if (url.pathname.startsWith("/api/links/")) {
+      const reply = (status: number, body: unknown) => {
+        res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(body));
+      };
+      const id = decodeURIComponent(url.pathname.slice("/api/links/".length));
+      // Writes come from our own page only, as JSON.
+      if (!req.headers.origin || !sameOrigin(req) || !id || id.length > 200) {
+        reply(403, { detail: "Forbidden" });
+        return true;
+      }
+      if (req.method === "DELETE") {
+        links.set(id, null);
+        reply(200, {});
+        return true;
+      }
+      if (
+        req.method !== "PUT" ||
+        !String(req.headers["content-type"] ?? "").startsWith("application/json")
+      ) {
+        reply(415, { detail: "Send JSON" });
+        return true;
+      }
+      let raw = "";
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 65_536) {
+          reply(413, { detail: "Too large" });
+          return true;
+        }
+      }
+      let segments: ReturnType<typeof parseSegments> = null;
+      try {
+        segments = parseSegments((JSON.parse(raw) as { segments?: unknown }).segments);
+      } catch {
+        // not JSON
+      }
+      if (!segments || segments[0].threadId !== id) {
+        reply(400, { detail: "Not a list of segments starting with this thread" });
+        return true;
+      }
+      links.set(id, segments);
+      reply(200, {});
       return true;
     }
     if (url.pathname === "/api/fallbacks") {

@@ -687,6 +687,22 @@ select {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Where a conversation moved to another model (Conversation.tsx), or the first message of a
+   thread carried over before conversations stayed one (UserMessage.tsx): one faint line, close
+   over the message it marks. Nothing opens from it. */
+.carry-line {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--faint);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.carry-line[data-side="agent"] {
+  text-align: left;
+}
+.carry-line + .user-message {
+  margin-top: -4px;
+}
 .chip {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);

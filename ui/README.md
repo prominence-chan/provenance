@@ -36,6 +36,7 @@ Other scripts:
 | `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's setup API                 |
 | `npm run check:fallback`      | Claude Code / Codex fallbacks, server side, against stand-in CLIs (no browser)                |
 | `npm run e2e:welcome`         | Welcome, fallbacks, picker, "too large" suggestion, headless (needs `npm run build`)          |
+| `npm run e2e:carry`           | One conversation moving between tiers, Claude Code and Codex, headless (needs `npm run build`) |
 | `npm run check:orchestrator`  | The two experimental orchestrators, server side, against a stand-in router and app-server     |
 | `npm run check:presence`      | Discord Rich Presence against a stand-in Discord socket, plus the page's reports (below)      |
 
@@ -484,21 +485,42 @@ provenance binary's catalog through Provenance), and for Codex the two modes. Of
 a muted row that opens the Fallbacks page. The model key says where a thread runs:
 `solstice` / `luna/solstice` (tiers, `/rpc`), `claude:<m>` and `codex:<m>` (`/rpc/fallback`),
 `codex-pv:<m>` (`/rpc/codex`); the store keeps all three backends' threads in one list. A thread
-stays on its backend: opening one points the picker at its model; sending with another backend
-picked starts a new thread there, its first message a brief of the old one (`fallback/brief.ts`,
-folded in the bubble), named "… (continued)".
+stays on its backend: opening one points the picker at its model.
+
+**Moving a conversation** (`shared/thread-links.ts`, `store/segments.ts`, `actions.ts`
+`handOver`): sending with another backend picked moves the conversation there and it stays one
+thread: same sidebar entry and title, the earlier turns where they were. Behind it each backend
+that served it has its own session ("segment"): a new thread on the target, linked to the
+conversation in `<data>/thread-links.json` (`GET /api/links`, `PUT`/`DELETE /api/links/<id>`), its
+model handed a brief of everything so far (`fallback/brief.ts`: the goal, requests since, what the
+agent reported, files, commands, the plan, where it stands, the latest request verbatim; 16,000
+characters at most). The brief never shows and is never stored as an item: Claude Code, Codex in
+the background and the orchestrators get it in turn/start's `additionalContext` (the CLI reads it
+on stdin before the message, once, until it has a session), an app-server (Codex through
+Provenance, or back on the tiers) in thread/start's `developerInstructions`. The page lists one
+entry per conversation, shows a later session's events in it, sends each message to the latest
+session, and stitches all sessions' turns into one view; one faint line marks where it moved
+("Continued in Claude Code from the conversation above"). Back on a tier is a new tier session
+(the old one is the history that outgrew the free models, and it would need the brief as a visible
+message). A turn still running is stopped first. Archive archives every session; a rename names
+the conversation's own thread. Threads carried over before this (two threads, the brief as the new
+one's first message) show only what the person wrote, under "This was continued from another
+conversation", titled "… (continued)".
 
 **"Too large" suggestion** (`fallback/strain.ts`, `StrainNote.tsx`): under a tier thread, when
 its history has outgrown the free models. Per finished turn: provenance-core's context flags
 (`/api/usage` → `context`: `over` 3, `trimmed` 2, `restarted` 2; `compacted` alone is normal and
 counts 0), a context-window error 3, app-server compacting twice in the turn 2 (once 1), the same
 command with the same result 3+ times 2. Shown when the last three turns add to 4+ with the latest
-at 2+, or one of the last two at 3. One line, a button per ready fallback (a new thread there
-with a brief), or "Set up Codex or Claude Code…"; dismissed, it comes back for that thread only
+at 2+, or one of the last two at 3. One line, a button per ready fallback (the conversation moves there
+and the model carries on with the work, no message of the person's), or "Set up Codex or Claude
+Code…"; dismissed, it comes back for that thread only
 when the score rises by 4.
 
 Checks: `npm run check:fallback` (server side against stand-in CLIs), `npm run e2e:welcome` (the
-page end to end, stand-in claude / codex / provenance; needs `npm run build`),
+page end to end, stand-in claude / codex / provenance; needs `npm run build`), `npm run e2e:carry`
+(a conversation moved tier → Claude Code → restart → tier → Codex mid-turn → archive, and the brief
+nowhere in the page, the store or the thread files),
 `node scripts/fallback-real-check.ts` (one tiny real turn each through the real CLIs and your
 Codex sign-in; spends a little usage).
 

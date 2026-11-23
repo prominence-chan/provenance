@@ -1558,6 +1558,29 @@ check(
   "the next turn's first think gets the stored summary and the new message",
 );
 
+log("hyperexperimental: a conversation moved here starts from its hand-over");
+seen.length = 0;
+const hh = await start("hyperexperimental");
+await say(hh.id, "anything else?", {
+  additionalContext: {
+    provenance_handover: { value: "HANDOVER-QUUX: the parser was split", kind: "application" },
+  },
+});
+turn = await turnDone(hh.id);
+check(
+  turn.status === "completed" && /SUMMARY SO FAR:\nHANDOVER-QUUX/.test(seen[0]?.input ?? ""),
+  "its first think gets the hand-over as the summary so far",
+);
+const typedItem = turn.items[0] as { type: string; content?: { text: string }[] };
+check(
+  typedItem.type === "userMessage" && typedItem.content?.[0]?.text === "anything else?",
+  "the turn's user message is exactly what was typed",
+);
+check(
+  !JSON.stringify(stored(hh.id).turns).includes("HANDOVER-QUUX"),
+  "the hand-over is in none of the thread's items",
+);
+
 log("hyperexperimental: loop guards");
 const ag = await start("hyperexperimental");
 await say(ag.id, "again and again");
