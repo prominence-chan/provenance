@@ -30,7 +30,8 @@ function unquote(s: string): string {
   return (m ? m[2] : t).trim();
 }
 
-const TASK_RE = /^(?:(?:mini[- ]?)?(?:task|step)\s*#?\s*(\d+)?\s*[:.)\-–—]+|(\d+)\s*[.):\-–—]+)\s*(.*)$/i;
+const TASK_RE =
+  /^(?:(?:mini[- ]?)?(?:task|step)\s*#?\s*(\d+)?\s*[:.)\-–—]+|(\d+)\s*[.):\-–—]+)\s*(.*)$/i;
 const DONE_RE =
   /^(?:done[- ]?(?:when|if|criteria|criterion|means)?|definition of done|acceptance(?: criteria)?|success(?: criteria)?|verify|check)\s*[:\-–—]+\s*(.*)$/i;
 const INLINE_DONE_RE =
@@ -183,7 +184,8 @@ const VERB_RE = new RegExp(
 );
 // "RUN npm test" without the colon: only for the vocabulary's own words, in capitals.
 const BARE_RE = /^(?:\d+\s*[.)]\s*)?(RUN|READ|LIST|SEARCH|WRITE|REPLACE)\s+(\S.*)$/;
-const NONE_RE = /^(?:none|no actions?(?: needed| required)?|nothing(?: to (?:do|run))?|done)\s*[.!]?$/i;
+const NONE_RE =
+  /^(?:none|no actions?(?: needed| required)?|nothing(?: to (?:do|run))?|done)\s*[.!]?$/i;
 const SEP_RE = /^\s*(?:={3,}|-{3,}\s*(?:with|new)?\s*-*|with:|new:|into:|by:)\s*$/i;
 
 interface Block {
@@ -231,7 +233,11 @@ function unfence(body: string[]): string[] {
   const b = body.slice();
   while (b.length && !b[0].trim()) b.shift();
   while (b.length && !b[b.length - 1].trim()) b.pop();
-  if (b.length >= 2 && /^(`{3,}|~{3,})/.test(b[0].trim()) && /^(`{3,}|~{3,})\s*$/.test(b.at(-1)!.trim()))
+  if (
+    b.length >= 2 &&
+    /^(`{3,}|~{3,})/.test(b[0].trim()) &&
+    /^(`{3,}|~{3,})\s*$/.test(b.at(-1)!.trim())
+  )
     return b.slice(1, -1);
   return body;
 }
@@ -361,7 +367,9 @@ export function parseActions(text: string, max = 8): ParsedActions {
           }
         }
         if (!parts || !parts.find.trim())
-          problems.push(`REPLACE ${p}: the block needs the old text, a === line, then the new text`);
+          problems.push(
+            `REPLACE ${p}: the block needs the old text, a === line, then the new text`,
+          );
         else actions.push({ kind, path: p, find: parts.find, with: parts.with });
         break;
       }
@@ -404,9 +412,10 @@ export interface Report {
  * that line, wording decides (a report that says it couldn't is not "done").
  */
 export function parseReport(text: string): Report {
-  const m = /^\W*status\W+(done|complete[d]?|success|ok|blocked|failed|fail|partial|incomplete)\b/im.exec(
-    text,
-  );
+  const m =
+    /^\W*status\W+(done|complete[d]?|success|ok|blocked|failed|fail|partial|incomplete)\b/im.exec(
+      text,
+    );
   let status: Report["status"];
   if (m) {
     const w = m[1].toLowerCase();
@@ -438,7 +447,8 @@ export interface Thought {
  */
 export function parseThought(text: string): Thought {
   const t = text.trim();
-  const m = /^\W{0,4}(?:finished|final answer|all done|task complete[d]?)\W{0,4}\s*[:\-–—]\s*/im.exec(t);
+  const m =
+    /^\W{0,4}(?:finished|final answer|all done|task complete[d]?)\W{0,4}\s*[:\-–—]\s*/im.exec(t);
   if (m) {
     const final = t
       .slice(m.index + m[0].length)

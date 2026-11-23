@@ -8,7 +8,8 @@
 // Words in a worker's task:
 //   BLOCKME    reports STATUS: BLOCKED          SLOWTASK   runs until interrupted
 //   ASKME      asks approval for its command    NOCAP      the turn fails: no model available
-//   LOOPCALLS  keeps making "model requests"    (anything else: a command, an edit, STATUS: DONE)
+//   LOOPCALLS  keeps making "model requests"    IDLETASK   says nothing until interrupted
+//   (anything else: a command, an edit, STATUS: DONE)
 // Appends what it was asked to $FAKE_ORC_LOG as JSON lines.
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -16,7 +17,8 @@ import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 
 if (process.argv[2] !== "app-server") process.exit(2);
-const log = (o) => process.env.FAKE_ORC_LOG && appendFileSync(process.env.FAKE_ORC_LOG, JSON.stringify(o) + "\n");
+const log = (o) =>
+  process.env.FAKE_ORC_LOG && appendFileSync(process.env.FAKE_ORC_LOG, JSON.stringify(o) + "\n");
 const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
 const note = (method, params) => send({ method, params });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,15 +39,40 @@ const usage = (threadId, turnId, input) =>
     threadId,
     turnId,
     tokenUsage: {
-      total: { totalTokens: input + 50, inputTokens: input, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 50, reasoningOutputTokens: 0 },
-      last: { totalTokens: input + 50, inputTokens: input, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 50, reasoningOutputTokens: 0 },
+      total: {
+        totalTokens: input + 50,
+        inputTokens: input,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 50,
+        reasoningOutputTokens: 0,
+      },
+      last: {
+        totalTokens: input + 50,
+        inputTokens: input,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 50,
+        reasoningOutputTokens: 0,
+      },
       modelContextWindow: 16000,
     },
   });
 
 const cmdItem = (id, command, cwd, status, output = null, exitCode = null) => ({
-  id, type: "commandExecution", command: `/bin/zsh -lc '${command}'`, cwd, processId: null, pluginId: null, scriptPath: null,
-  source: "agent", status, commandActions: [], aggregatedOutput: output, exitCode, durationMs: status === "inProgress" ? null : 5,
+  id,
+  type: "commandExecution",
+  command: `/bin/zsh -lc '${command}'`,
+  cwd,
+  processId: null,
+  pluginId: null,
+  scriptPath: null,
+  source: "agent",
+  status,
+  commandActions: [],
+  aggregatedOutput: output,
+  exitCode,
+  durationMs: status === "inProgress" ? null : 5,
 });
 
 async function workerTurn(threadId, turnId, brief) {
@@ -56,17 +83,46 @@ async function workerTurn(threadId, turnId, brief) {
     th.turnId = null;
     note("turn/completed", {
       threadId,
-      turn: { id: turnId, rootTurnId: null, items: [], itemsView: "notLoaded", status, error: error ? { message: error, codexErrorInfo: null, additionalDetails: null, misalignment: null } : null, startedAt: 0, completedAt: 0, durationMs: 1 },
+      turn: {
+        id: turnId,
+        rootTurnId: null,
+        items: [],
+        itemsView: "notLoaded",
+        status,
+        error: error
+          ? { message: error, codexErrorInfo: null, additionalDetails: null, misalignment: null }
+          : null,
+        startedAt: 0,
+        completedAt: 0,
+        durationMs: 1,
+      },
     });
   };
-  const say = (text) => item("item/completed", { id: randomUUID(), type: "agentMessage", text, phase: null });
-  note("turn/started", { threadId, turn: { id: turnId, items: [], status: "inProgress", error: null } });
-  item("item/completed", { id: randomUUID(), type: "userMessage", content: [{ type: "text", text: brief }] });
+  const say = (text) =>
+    item("item/completed", { id: randomUUID(), type: "agentMessage", text, phase: null });
+  note("turn/started", {
+    threadId,
+    turn: { id: turnId, items: [], status: "inProgress", error: null },
+  });
+  item("item/completed", {
+    id: randomUUID(),
+    type: "userMessage",
+    content: [{ type: "text", text: brief }],
+  });
   await sleep(10);
   usage(threadId, turnId, 6000 + brief.length / 4);
   if (/NOCAP/.test(task)) {
-    note("error", { threadId, turnId, willRetry: false, error: { message: "no model in spark (or below) could serve this: [pool: 429]" } });
+    note("error", {
+      threadId,
+      turnId,
+      willRetry: false,
+      error: { message: "no model in spark (or below) could serve this: [pool: 429]" },
+    });
     return finish("failed", "no model in spark (or below) could serve this: [pool: 429]");
+  }
+  if (/IDLETASK/.test(task)) {
+    while (!th.interrupted) await sleep(20); // the model never answers
+    return finish("interrupted");
   }
   if (/LOOPCALLS/.test(task)) {
     while (!th.interrupted) {
@@ -84,39 +140,70 @@ async function workerTurn(threadId, turnId, brief) {
   const command = `echo ${task.replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 30)}`;
   item("item/started", cmdItem(cid, command, th.cwd, "inProgress"));
   if (/ASKME/.test(task)) {
-    const answer = await ask("item/commandExecution/requestApproval", { threadId, turnId, itemId: cid, command, cwd: th.cwd, reason: "fake needs approval" });
+    const answer = await ask("item/commandExecution/requestApproval", {
+      threadId,
+      turnId,
+      itemId: cid,
+      command,
+      cwd: th.cwd,
+      reason: "fake needs approval",
+    });
     log({ approval: answer });
     if (answer?.decision !== "accept" && answer?.decision !== "acceptForSession") {
       item("item/completed", cmdItem(cid, command, th.cwd, "declined"));
-      say("RESULT: the command was not allowed\nCHANGES: none\nVALIDATION: none\nBLOCKERS: the user declined the command\nSTATUS: BLOCKED");
+      say(
+        "RESULT: the command was not allowed\nCHANGES: none\nVALIDATION: none\nBLOCKERS: the user declined the command\nSTATUS: BLOCKED",
+      );
       return finish("completed");
     }
   }
   note("item/commandExecution/outputDelta", { threadId, turnId, itemId: cid, delta: "out\n" });
   item("item/completed", cmdItem(cid, command, th.cwd, "completed", "out\n", 0));
   const fid = randomUUID();
-  const file = { id: fid, type: "fileChange", changes: [{ path: `${th.cwd}/f-${task.length}.txt`, kind: { type: "add" }, diff: "+x" }], status: "completed" };
+  const file = {
+    id: fid,
+    type: "fileChange",
+    changes: [{ path: `${th.cwd}/f-${task.length}.txt`, kind: { type: "add" }, diff: "+x" }],
+    status: "completed",
+  };
   item("item/started", { ...file, status: "inProgress" });
   item("item/completed", file);
   usage(threadId, turnId, 7500 + brief.length / 4);
   if (th.interrupted) return finish("interrupted");
   if (/BLOCKME/.test(task))
-    say(`**RESULT:** could not do "${task}"\n**BLOCKERS:** the dependency frobnicate is missing\n**STATUS:** BLOCKED`);
+    say(
+      `**RESULT:** could not do "${task}"\n**BLOCKERS:** the dependency frobnicate is missing\n**STATUS:** BLOCKED`,
+    );
   else
-    say(`Done.\n\nRESULT: finished "${task}"\nCHANGES: f-${task.length}.txt\nVALIDATION: ran ${command}, passed\nBLOCKERS: none\nSTATUS: DONE`);
+    say(
+      `Done.\n\nRESULT: finished "${task}"\nCHANGES: f-${task.length}.txt\nVALIDATION: ran ${command}, passed\nBLOCKERS: none\nSTATUS: DONE`,
+    );
   finish("completed");
 }
 
 function exec(id, p) {
-  log({ exec: { command: p.command, cwd: p.cwd, sandboxPolicy: p.sandboxPolicy, timeoutMs: p.timeoutMs } });
+  log({
+    exec: {
+      command: p.command,
+      cwd: p.cwd,
+      sandboxPolicy: p.sandboxPolicy,
+      timeoutMs: p.timeoutMs,
+    },
+  });
   const type = p.sandboxPolicy?.type;
   const script = p.command.join(" ");
   const writes =
     script.includes("base64 --decode") ||
     (p.command[1] === "-lc" && /(^|\s)(touch|rm|mkdir)\s|>/.test(p.command[2] ?? ""));
   if (type === "readOnly" && writes)
-    return send({ id, result: { exitCode: 1, stdout: "", stderr: "sh: Operation not permitted\n" } });
-  const child = spawn(p.command[0], p.command.slice(1), { cwd: p.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    return send({
+      id,
+      result: { exitCode: 1, stdout: "", stderr: "sh: Operation not permitted\n" },
+    });
+  const child = spawn(p.command[0], p.command.slice(1), {
+    cwd: p.cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   if (p.processId) procs.set(p.processId, child);
   let stdout = "";
   let stderr = "";

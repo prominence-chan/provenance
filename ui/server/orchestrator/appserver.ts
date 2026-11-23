@@ -29,6 +29,8 @@ export interface ServerMessage {
 export interface AppServer {
   request(method: string, params: unknown): Promise<Json>;
   respond(id: number | string, result: unknown): void;
+  /** Refuse a server request (one the page has no answer for). */
+  respondError(id: number | string, code: number, message: string): void;
   /** Notifications and server requests; returns the unsubscribe. */
   listen(fn: (msg: ServerMessage) => void): () => void;
   /** Called when the process goes away (everything in flight is lost). */
@@ -85,6 +87,10 @@ export class AppServerProcess implements AppServer {
     this.write({ id, result });
   }
 
+  respondError(id: number | string, code: number, message: string): void {
+    this.write({ id, error: { code, message } });
+  }
+
   async request(method: string, params: unknown): Promise<Json> {
     const p = this.start();
     await p.ready;
@@ -103,7 +109,8 @@ export class AppServerProcess implements AppServer {
 
   private start(): Proc {
     if (this.proc) return this.proc;
-    if (!existsSync(this.opts.bin)) throw new Error(`The provenance binary isn't at ${this.opts.bin}`);
+    if (!existsSync(this.opts.bin))
+      throw new Error(`The provenance binary isn't at ${this.opts.bin}`);
     mkdirSync(this.opts.runDir, { recursive: true });
     const child = spawn(this.opts.bin, ["app-server", ...(this.opts.args ?? [])], {
       cwd: this.opts.runDir,

@@ -60,7 +60,8 @@ export function routerProblem(status: number, detail: string): string {
     return `No free model could take this right now (the router answered 503${d ? `: ${d}` : ""}). Try again in a while, or pick another tier.`;
   if (status === 429)
     return `The model is rate limited right now (429${d ? `: ${d}` : ""}). Try again in a while, or pick another tier.`;
-  if (status === 401 || status === 403) return "The router refused the request (its token didn't match).";
+  if (status === 401 || status === 403)
+    return "The router refused the request (its token didn't match).";
   if (status === 0) return `The router isn't answering${d ? ` (${d})` : ""}.`;
   return `The router answered ${status}${d ? `: ${d}` : ""}.`;
 }

@@ -63,6 +63,8 @@ export interface Caps {
   modelCalls: number;
   /** One worker's turn. */
   workerMs: number;
+  /** A worker with nothing running and no word from the model for this long is stopped. */
+  workerIdleMs: number;
   /** One RUN action. */
   commandMs: number;
 }
@@ -74,6 +76,7 @@ export const DEFAULT_CAPS: Caps = {
   steps: 14,
   modelCalls: 80,
   workerMs: 20 * 60_000,
+  workerIdleMs: 5 * 60_000,
   commandMs: 120_000,
 };
 
@@ -104,7 +107,14 @@ export type TraceEvent =
       ms: number;
       servedBy: string | null;
     }
-  | { type: "worker"; task: string; brief: string; calls: number; maxInputTokens: number; status: string };
+  | {
+      type: "worker";
+      task: string;
+      brief: string;
+      calls: number;
+      maxInputTokens: number;
+      status: string;
+    };
 
 /** Ends the turn: "cap" with a plain message as the answer, the others as a failed turn. */
 export class StopTurn extends Error {
@@ -230,15 +240,17 @@ export class OrchestratorBackend {
       if (typeof msg.method !== "string") {
         // The answer to one of our requests (an approval).
         const r = this.requests.get(String(msg.id));
-        if (r) r.resolve(msg.error ? { decision: "decline" } : ((msg.result ?? {}) as Json));
+        // (the page refuses request types it has no card for with a JSON-RPC error: kept as such)
+        if (r)
+          r.resolve(
+            msg.error ? { decision: "decline", rpcError: msg.error } : ((msg.result ?? {}) as Json),
+          );
         return;
       }
       const id = msg.id;
       this.handle(msg.method, (msg.params ?? {}) as Json)
         .then((result) => this.send(ws, { id, result }))
-        .catch((e: unknown) =>
-          this.send(ws, { id, error: { code: -32000, message: errText(e) } }),
-        );
+        .catch((e: unknown) => this.send(ws, { id, error: { code: -32000, message: errText(e) } }));
     });
     ws.on("close", () => this.clients.delete(ws));
   }
@@ -309,9 +321,12 @@ export class OrchestratorBackend {
   private startThread(p: Json): unknown {
     const want = (p.config as Json | null | undefined)?.orchestrator ?? p.orchestrator;
     if (!isOrchestrator(want) || want === "provenance")
-      throw new Error("An orchestrator thread needs config.orchestrator: experimental or hyperexperimental");
+      throw new Error(
+        "An orchestrator thread needs config.orchestrator: experimental or hyperexperimental",
+      );
     const model = typeof p.model === "string" ? p.model.trim() : "";
-    if (!model || model.includes(":")) throw new Error("An orchestrator thread needs a tier as its model");
+    if (!model || model.includes(":"))
+      throw new Error("An orchestrator thread needs a tier as its model");
     const cwd = typeof p.cwd === "string" && p.cwd ? p.cwd : process.env.HOME || "/";
     if (!isDir(cwd)) throw new Error(`The folder ${cwd} doesn't exist`);
     const now = Math.floor(Date.now() / 1000);
@@ -498,7 +513,11 @@ export class OrchestratorBackend {
   // ---- approvals: our requests to the page ------------------------------------------
 
   /** Ask the page (an approval). Resolves with its answer; `cancel()` withdraws the question. */
-  request(threadId: string, method: string, params: Json): { answer: Promise<Json>; cancel: () => void } {
+  request(
+    threadId: string,
+    method: string,
+    params: Json,
+  ): { answer: Promise<Json>; cancel: () => void } {
     const id = `orc-req-${this.requestSeq++}`;
     const msg = { id, method, params };
     let settle!: (r: Json) => void;
@@ -583,6 +602,7 @@ export class Run {
   private ac = new AbortController();
   private open = new Set<() => void>();
   private seq = 0;
+  private savedAt = 0;
 
   constructor(backend: OrchestratorBackend, thread: ThreadRecord, turn: TurnRecord, text: string) {
     this.backend = backend;
@@ -639,6 +659,7 @@ export class Run {
   }
 
   save(): void {
+    this.savedAt = Date.now();
     this.backend.save(this.thread);
   }
 
@@ -659,8 +680,18 @@ export class Run {
     const known = this.turn.items.some((x) => x.id === item.id);
     this.upsert(item);
     if (fresh || !known)
-      this.backend.broadcast("item/started", { threadId: this.threadId, turnId: this.turn.id, item });
-    this.backend.broadcast("item/completed", { threadId: this.threadId, turnId: this.turn.id, item });
+      this.backend.broadcast("item/started", {
+        threadId: this.threadId,
+        turnId: this.turn.id,
+        item,
+      });
+    this.backend.broadcast("item/completed", {
+      threadId: this.threadId,
+      turnId: this.turn.id,
+      item,
+    });
+    // Keep the file close to what is on screen (a crash mid-task then loses a second, not the task).
+    if (Date.now() - this.savedAt > 1000) this.save();
   }
 
   /** A finished assistant message in the visible thread. */
@@ -746,7 +777,9 @@ export class Run {
         if (!final) continue;
         throw new StopTurn(
           "router",
-          e instanceof RouterError ? routerProblem(e.status, e.message) : `The model call failed: ${errText(e)}`,
+          e instanceof RouterError
+            ? routerProblem(e.status, e.message)
+            : `The model call failed: ${errText(e)}`,
         );
       }
     }

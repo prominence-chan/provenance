@@ -107,7 +107,10 @@ export async function runHyper(run: Run): Promise<void> {
         "No action could be read from the last plan. Say the commands and the file content concretely.",
       );
       if (empty >= 2)
-        throw new StopTurn("cap", "Stopped: two steps in a row produced nothing that could be run.");
+        throw new StopTurn(
+          "cap",
+          "Stopped: two steps in a row produced nothing that could be run.",
+        );
     } else empty = 0;
     const sig = parsed.actions.map(signature).join("\n");
     if (sig && sig === lastSig) {
@@ -168,7 +171,12 @@ let processSeq = 0;
  * One sandboxed command through app-server (command/exec): `policy` is always explicit, the
  * thread's folder is the working directory, and an interrupt terminates the process.
  */
-async function sandboxed(run: Run, argv: string[], policy: Json, timeoutMs: number): Promise<ExecResult> {
+async function sandboxed(
+  run: Run,
+  argv: string[],
+  policy: Json,
+  timeoutMs: number,
+): Promise<ExecResult> {
   run.check();
   const processId = `orc-${process.pid}-${++processSeq}`;
   const as = run.appServer;
@@ -251,7 +259,14 @@ async function execute(run: Run, a: Action): Promise<string> {
       const shown = describeAction(a);
       const actions =
         a.kind === "read"
-          ? [{ type: "read" as const, command: shown, name: a.path.split("/").pop() ?? a.path, path: a.path }]
+          ? [
+              {
+                type: "read" as const,
+                command: shown,
+                name: a.path.split("/").pop() ?? a.path,
+                path: a.path,
+              },
+            ]
           : a.kind === "list"
             ? [{ type: "listFiles" as const, command: shown, path: a.path }]
             : [{ type: "search" as const, command: shown, query: a.pattern, path: a.path }];
@@ -301,7 +316,12 @@ async function execute(run: Run, a: Action): Promise<string> {
     }
     case "write":
     case "replace": {
-      const before = await sandboxed(run, ["/bin/sh", "-c", 'cat "$1"', "sh", a.path], READ_ONLY, 30_000);
+      const before = await sandboxed(
+        run,
+        ["/bin/sh", "-c", 'cat "$1"', "sh", a.path],
+        READ_ONLY,
+        30_000,
+      );
       const exists = before.exitCode === 0;
       let content: string;
       if (a.kind === "write") content = a.content;
@@ -313,7 +333,10 @@ async function execute(run: Run, a: Action): Promise<string> {
         }
         const replaced = replaceIn(before.stdout, a.find, a.with);
         if (replaced === null) {
-          run.complete(fileChange(id, [{ path: a.path, kind: "update", diff: "" }], "failed"), true);
+          run.complete(
+            fileChange(id, [{ path: a.path, kind: "update", diff: "" }], "failed"),
+            true,
+          );
           return `[failed: the old text was not found in ${a.path}; READ the file and copy the exact text]`;
         }
         content = replaced;
@@ -324,7 +347,9 @@ async function execute(run: Run, a: Action): Promise<string> {
         return `[failed: ${content.length} characters is more than one write takes (${MAX_WRITE_CHARS})]`;
       }
       const kind = exists ? "update" : "add";
-      const change = [{ path: a.path, kind, diff: lineDiff(exists ? before.stdout : "", content) } as const];
+      const change = [
+        { path: a.path, kind, diff: lineDiff(exists ? before.stdout : "", content) } as const,
+      ];
       const item = (status: "inProgress" | "completed" | "failed" | "declined"): Item =>
         fileChange(id, [...change], status);
       run.start(item("inProgress"));
@@ -384,9 +409,11 @@ export function replaceIn(text: string, find: string, to: string): string | null
         }
       if (!same) continue;
       const repl = to.replace(/\n+$/, "");
-      return [...lines.slice(0, i), ...(repl === "" ? [] : repl.split("\n")), ...lines.slice(i + w.length)].join(
-        "\n",
-      );
+      return [
+        ...lines.slice(0, i),
+        ...(repl === "" ? [] : repl.split("\n")),
+        ...lines.slice(i + w.length),
+      ].join("\n");
     }
   }
   return null;

@@ -432,7 +432,11 @@ export async function openThread(threadId: string, opts: { force?: boolean } = {
     // A thread stays on what it runs on: opening one that lives elsewhere (Claude Code, Codex)
     // points the picker at its model, so the next message continues it there.
     const cur = getState().settings.model;
-    if (model && getState().selectedThreadId === threadId && targetBackend(cur, threadId) !== backend)
+    if (
+      model &&
+      getState().selectedThreadId === threadId &&
+      targetBackend(cur, threadId) !== backend
+    )
       updateSettings({ model });
   } catch (e) {
     setState((s) => {

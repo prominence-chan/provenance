@@ -25,7 +25,9 @@
 // turn (workers' requests counted as app-server reports them), time per worker. A guard that
 // stops the work ends the turn with a plain message and the notes.
 
-import { unwrapShell, type Item } from "../fallback/items.ts";
+import { readdirSync, statSync } from "node:fs";
+import path from "node:path";
+import type { Item } from "../fallback/items.ts";
 import type { ServerMessage } from "./appserver.ts";
 import { folderBrief, Interrupted, StopTurn, errText, type Run } from "./backend.ts";
 import {
@@ -45,9 +47,16 @@ import { routerProblem } from "./router.ts";
 type Json = Record<string, unknown>;
 
 /** Worker items mirrored into the visible thread (its messages and thinking stay with it). */
-const SHOWN = new Set(["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch"]);
+const SHOWN = new Set([
+  "commandExecution",
+  "fileChange",
+  "mcpToolCall",
+  "dynamicToolCall",
+  "webSearch",
+]);
 
-const CAPACITY_RE = /no model in|no[_ ]capacity|none available|could serve this|\b503\b|rate limit|\b429\b/i;
+const CAPACITY_RE =
+  /no model in|no[_ ]capacity|none available|could serve this|\b503\b|rate limit|\b429\b/i;
 
 export interface WorkerResult {
   status: "completed" | "failed" | "interrupted";
@@ -94,7 +103,9 @@ export async function runExperimental(run: Run): Promise<void> {
       ...queue.map((t) => ({ step: t.title, status: "pending" as const })),
     ]);
   if (queue.length > 1)
-    run.say(`Plan, ${queue.length} tasks:\n\n${queue.map((t, i) => `${i + 1}. ${t.title}`).join("\n")}`);
+    run.say(
+      `Plan, ${queue.length} tasks:\n\n${queue.map((t, i) => `${i + 1}. ${t.title}`).join("\n")}`,
+    );
 
   while (queue.length) {
     run.check();
@@ -105,7 +116,10 @@ export async function runExperimental(run: Run): Promise<void> {
         "cap",
         `Stopped after ${ran} tasks, the limit for one message. Not done: ${left()}. Send another message to go on.`,
       );
-    const key = task.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const key = task.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
     const tries = (attempts.get(key) ?? 0) + 1;
     attempts.set(key, tries);
     if (tries > caps.attempts)
@@ -127,7 +141,11 @@ export async function runExperimental(run: Run): Promise<void> {
       notes: notesText(notes).replace(/^GOAL: .*\n?/, ""),
       cwd: run.cwd,
     });
+    const snap = snapshot(run.cwd);
     const res = await runWorker(run, brief, ran);
+    // Files a command wrote (a heredoc, a generator) never show as file changes: compare the folder.
+    for (const f of changedSince(run.cwd, snap))
+      if (!res.files.some((x) => x.path === f.path)) res.files.push(f);
     run.backend.trace({
       type: "worker",
       task: task.title,
@@ -160,7 +178,8 @@ export async function runExperimental(run: Run): Promise<void> {
         ? `the worker stopped: ${res.error ?? "no reason given"}`
         : sec.blockers || sec.result || "no reason given";
     addProblem(notes, `${clip(task.title, 80)}: ${why}`);
-    if (rep.status === "partial" && sec.result) addDone(notes, `${task.title} (partly)`, sec.result);
+    if (rep.status === "partial" && sec.result)
+      addDone(notes, `${task.title} (partly)`, sec.result);
     run.save();
     if (replans >= caps.replans)
       throw new StopTurn(
@@ -181,7 +200,9 @@ export async function runExperimental(run: Run): Promise<void> {
       break;
     }
     queue = revised.tasks;
-    run.say(`That hit a problem (${clip(why, 200)}). Revised plan:\n\n${queue.map((t, i) => `${i + 1}. ${t.title}`).join("\n")}`);
+    run.say(
+      `That hit a problem (${clip(why, 200)}). Revised plan:\n\n${queue.map((t, i) => `${i + 1}. ${t.title}`).join("\n")}`,
+    );
   }
   showPlan(null);
 
@@ -240,20 +261,34 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
   let settle!: (status: WorkerResult["status"]) => void;
   const done = new Promise<WorkerResult["status"]>((res) => (settle = res));
   const interruptWorker = () => {
-    if (workerTurn) as.request("turn/interrupt", { threadId: wid, turnId: workerTurn }).catch(() => {});
+    if (workerTurn)
+      as.request("turn/interrupt", { threadId: wid, turnId: workerTurn }).catch(() => {});
     // If it doesn't confirm, don't wait for it.
     setTimeout(() => settle("interrupted"), 4000).unref();
   };
 
+  // For the idle guard: when the worker last said anything, and what is legitimately pending.
+  let lastWord = Date.now();
+  let asking = 0;
+  const busy = new Set<string>();
   const onMessage = (m: ServerMessage) => {
     const p = m.params;
     if ((p.threadId ?? p.conversationId) !== wid) return;
+    lastWord = Date.now();
     if (m.id !== undefined) {
       // The harness asks before running or changing something: the user answers in the visible thread.
       const params: Json = { ...p };
       if (typeof p.itemId === "string") params.itemId = prefix + p.itemId;
       const id = m.id;
-      void run.ask(m.method, params).then((answer) => as.respond(id, answer));
+      asking++;
+      void run.ask(m.method, params).then((answer) => {
+        asking--;
+        lastWord = Date.now();
+        const refused = answer.rpcError as { code?: number; message?: string } | undefined;
+        if (refused)
+          as.respondError(id, refused.code ?? -32601, refused.message ?? "not supported");
+        else as.respond(id, answer);
+      });
       return;
     }
     switch (m.method) {
@@ -268,11 +303,15 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
         }
         if (!SHOWN.has(item.type)) return;
         const shown = { ...item, id: prefix + item.id };
-        if (m.method === "item/started") return run.start(shown);
+        if (m.method === "item/started") {
+          busy.add(item.id);
+          return run.start(shown);
+        }
+        busy.delete(item.id);
         run.complete(shown);
         if (item.type === "commandExecution" && typeof item.command === "string")
           out.commands.push({
-            cmd: unwrapShell(item.command),
+            cmd: unwrap(item.command),
             ok: item.status === "completed" && (item.exitCode ?? 0) === 0,
           });
         if (item.type === "fileChange" && item.status === "completed")
@@ -289,7 +328,10 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
         const usage = p.tokenUsage as { last?: { inputTokens?: number } } | undefined;
         out.calls++;
         out.maxInputTokens = Math.max(out.maxInputTokens, usage?.last?.inputTokens ?? 0);
-        run.stats.workerMaxInputTokens = Math.max(run.stats.workerMaxInputTokens, out.maxInputTokens);
+        run.stats.workerMaxInputTokens = Math.max(
+          run.stats.workerMaxInputTokens,
+          out.maxInputTokens,
+        );
         run.notify("thread/tokenUsage/updated", { tokenUsage: p.tokenUsage });
         try {
           run.spend(1, true);
@@ -326,6 +368,13 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
   });
   const onAbort = () => interruptWorker();
   run.signal.addEventListener("abort", onAbort, { once: true });
+  let idle = false;
+  const idleTimer = setInterval(() => {
+    // A command that runs long or a question to the user is not silence; a model that says nothing is.
+    if (idle || busy.size || asking || Date.now() - lastWord < run.caps.workerIdleMs) return;
+    idle = true;
+    interruptWorker();
+  }, 1000);
   let tooLong = false;
   const timer = setTimeout(() => {
     tooLong = true;
@@ -348,6 +397,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
     }
   } finally {
     clearTimeout(timer);
+    clearInterval(idleTimer);
     off();
     offExit();
     run.signal.removeEventListener("abort", onAbort);
@@ -356,6 +406,11 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
   }
   if (run.signal.aborted) throw new Interrupted();
   if (capStop) throw capStop;
+  if (idle)
+    throw new StopTurn(
+      "router",
+      `The model stopped answering: a worker heard nothing from it for ${Math.round(run.caps.workerIdleMs / 60_000)} minutes and was stopped. Try again in a while, or pick another tier.`,
+    );
   if (tooLong) {
     out.status = "failed";
     out.error = `it ran longer than ${Math.round(run.caps.workerMs / 60_000)} minutes and was stopped`;
@@ -365,6 +420,59 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
     out.error ??= "it was interrupted";
   }
   return out;
+}
+
+/** "/bin/zsh -lc 'npm test'" or '… -lc "npm test"' -> "npm test" (the harness wraps every command). */
+export function unwrap(cmd: string): string {
+  const m = /^\S*\/(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/.exec(cmd);
+  if (!m) return cmd;
+  return m[1] === "'" ? m[2].replace(/'\\''/g, "'") : m[2].replace(/\\(["$`\\])/g, "$1");
+}
+
+const SKIP_DIRS = new Set(["node_modules", "__pycache__", "target", "dist", "build", "venv"]);
+
+/** Size and time of the folder's files (bounded), to see what a worker changed. */
+export function snapshot(cwd: string, limit = 4000): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (dir: string, depth: number) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (out.size >= limit) return;
+      if (e.name.startsWith(".") || SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth < 6) walk(full, depth + 1);
+      } else if (e.isFile()) {
+        try {
+          const st = statSync(full);
+          out.set(path.relative(cwd, full), `${st.size}:${st.mtimeMs}`);
+        } catch {
+          // gone already
+        }
+      }
+    }
+  };
+  walk(cwd, 0);
+  return out;
+}
+
+export function changedSince(
+  cwd: string,
+  before: Map<string, string>,
+): { path: string; kind: string }[] {
+  const now = snapshot(cwd);
+  const out: { path: string; kind: string }[] = [];
+  for (const [p, sig] of now) {
+    if (!before.has(p)) out.push({ path: p, kind: "add" });
+    else if (before.get(p) !== sig) out.push({ path: p, kind: "update" });
+  }
+  for (const p of before.keys()) if (!now.has(p)) out.push({ path: p, kind: "delete" });
+  return out.slice(0, 30);
 }
 
 function relative(cwd: string, p: string): string {
