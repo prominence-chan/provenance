@@ -20,6 +20,13 @@
 //
 // Threads are JSON files in <dir>/threads, written when a turn starts and ends. Ids start with
 // "fb-" so the page can tell where a thread lives before the lists have loaded.
+//
+// A conversation moved here from another backend (shared/thread-links.ts) is a thread whose
+// first turn carries the hand-over brief in turn/start's `additionalContext` (app-server's field:
+// {key: {value, kind}}): it goes to the CLI on stdin before the person's message, and nowhere
+// else: not into the turn's items, not into the thread file. Once the CLI has a session the
+// brief is in it, and a context sent again is left out. A turn with a context and no message of
+// its own (carry on with the work) shows no user message at all.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -40,7 +47,7 @@ import { isFallbackEffort, type FallbackEffort } from "../../shared/orchestrator
 import { ClaudeStream } from "./claude-stream.ts";
 import { findCli } from "./cli.ts";
 import { CodexStream } from "./codex-stream.ts";
-import { userMessage, type Item, type Sink } from "./items.ts";
+import { contextText, userMessage, type Item, type Sink } from "./items.ts";
 
 type Json = Record<string, unknown>;
 type Mode = "claude" | "codex";
@@ -298,7 +305,9 @@ export class FallbackBackend {
     const t = this.get(p.threadId);
     if (this.running.has(t.thread.id)) throw new Error("A turn is already running in this thread");
     const text = inputText(p.input);
-    if (!text.trim()) throw new Error("Nothing to send");
+    // What the model is told before the message (a hand-over brief): only into a new session.
+    const context = t.session ? "" : contextText(p.additionalContext);
+    if (!text.trim() && !context.trim()) throw new Error("Nothing to send");
     if (typeof p.model === "string" && p.model) {
       const m = parseFallbackModel(p.model);
       if (!m || m.mode !== t.mode)
@@ -325,7 +334,7 @@ export class FallbackBackend {
       durationMs: null,
     };
     t.turns.push(turn);
-    if (!t.thread.preview) t.thread.preview = text.slice(0, 400);
+    if (!t.thread.preview && text.trim()) t.thread.preview = text.slice(0, 400);
     t.thread.updatedAt = now;
     const run: Running = { child: null, turn, interrupted: false };
     this.running.set(t.thread.id, run);
@@ -337,13 +346,17 @@ export class FallbackBackend {
       status: { type: "active", activeFlags: [] },
     });
     this.broadcast("turn/started", { threadId, turn: { ...turn, items: [] } });
-    const user = userMessage(`${turn.id}-user`, text);
-    this.upsert(turn, user);
-    this.broadcast("item/started", { threadId, turnId: turn.id, item: user });
-    this.broadcast("item/completed", { threadId, turnId: turn.id, item: user });
+    // The person's message exactly as typed; none when the turn only carries on.
+    const user = text.trim() ? userMessage(`${turn.id}-user`, text) : null;
+    if (user) {
+      this.upsert(turn, user);
+      this.broadcast("item/started", { threadId, turnId: turn.id, item: user });
+      this.broadcast("item/completed", { threadId, turnId: turn.id, item: user });
+    }
+    const prompt = context ? (text.trim() ? `${context}\n\n${text}` : context) : text;
     // Answer turn/start first, then run (a spawn error still ends the turn the usual way).
-    setImmediate(() => this.runTurn(t, run, text));
-    return { turn: { ...turn, items: [user] } };
+    setImmediate(() => this.runTurn(t, run, prompt));
+    return { turn: { ...turn, items: user ? [user] : [] } };
   }
 
   private runTurn(t: ThreadRecord, run: Running, prompt: string): void {

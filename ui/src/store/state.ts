@@ -10,6 +10,7 @@ import {
   type Orchestrator,
 } from "../../shared/orchestrator-api";
 import type { SourceNeeds, WireSource } from "../../shared/router-api";
+import type { ThreadLinks } from "../../shared/thread-links";
 import type { BackendId } from "../fallback/model";
 import type {
   AskForApproval,
@@ -42,6 +43,11 @@ export interface TurnView {
   /** Unix seconds, from app-server (null while unknown). */
   startedAt?: number | null;
   completedAt?: number | null;
+  /**
+   * Which of the conversation's backend sessions served it (store/segments.ts), absent = the
+   * first. The first turn of a later one shows where the conversation moved.
+   */
+  segment?: number;
 }
 
 /** One concrete model that served requests in a turn (provenance-core's usage ledger). */
@@ -148,6 +154,11 @@ export interface AppState {
   fallbackInfo: FallbacksInfo | null;
   /** Which backend each known thread lives on (fallback/model.ts). */
   threadBackend: Record<string, BackendId>;
+  /**
+   * Conversations that moved between backends: id -> the backend sessions that served it
+   * (shared/thread-links.ts; kept by the UI server, read at boot).
+   */
+  links: ThreadLinks;
   /** Per backend: connected and ready. The main one is `bridge` / `socketOpen`. */
   backendReady: Record<BackendId, boolean>;
 }
@@ -197,6 +208,7 @@ export function initialState(): AppState {
     usage: {},
     fallbackInfo: null,
     threadBackend: {},
+    links: {},
     backendReady: { main: false, codex: false, fallback: false, orchestrator: false },
   };
 }

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { carriedTitle } from "../fallback/brief";
 import type { Thread } from "../protocol";
 import { archiveThread, newThread, openThread, refreshThreads } from "../store/actions";
 import { isThreadActive } from "../store/state";
@@ -423,7 +424,8 @@ function Highlight({ text, query }: { text: string; query: string }) {
 }
 
 export function threadTitle(t: Thread): string {
-  return t.name || t.preview?.split("\n")[0] || "Untitled thread";
+  // (a thread carried over before conversations stayed one never shows its brief, title included)
+  return t.name || carriedTitle(t.preview) || t.preview?.split("\n")[0] || "Untitled thread";
 }
 
 /**

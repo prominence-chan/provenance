@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { appShell } from "../app-shell";
 import type { SandboxMode } from "../protocol";
-import { backendOfModel, MODE_NAME } from "../fallback/model";
+import { backendOfModel, MODE_NAME, servedByName } from "../fallback/model";
 import { parseFallbackModel } from "../../shared/fallback-api";
 import { findKey, isAssistView } from "../setup/assist-text";
 import { KeyIntercept, usePoolData } from "../setup/PoolAssist";
-import { backendOf, interrupt, sendMessage, updateSettings } from "../store/actions";
+import { interrupt, sendMessage, updateSettings } from "../store/actions";
+import { movesConversation } from "../store/segments";
 import type { Settings } from "../store/state";
 import { useAppState } from "../store/store";
 import { useFx } from "./effects/useFx";
@@ -34,15 +35,21 @@ export function Composer() {
   const assist = useAppState((s) =>
     s.selectedThreadId ? isAssistView(s.views[s.selectedThreadId]) : false,
   );
-  // The open thread runs elsewhere than the picker says: sending starts a new thread there.
-  const handoff = !!selected && !assist && backendOf(selected) !== target;
+  // The open conversation runs elsewhere than the picker says: sending moves it there, in this
+  // same thread (store/actions.ts handOver).
+  const handoff = useAppState((s) =>
+    s.selectedThreadId && !assist
+      ? movesConversation(s, s.selectedThreadId, s.settings.model)
+      : false,
+  );
   const fb = parseFallbackModel(settings.model);
+  const movedTo = servedByName(settings.model);
   const placeholder = !selected
     ? "Ask Provenance anything"
     : assist
       ? "Answer the assistant, or tell it to stop"
       : handoff
-        ? `Continue in a new ${fb ? MODE_NAME[fb.mode] : settings.model} thread`
+        ? `Continue in ${movedTo}`
         : "Ask for follow-up changes";
   const [text, setText] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
@@ -72,7 +79,9 @@ export function Composer() {
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
 
-  const canSend = ready && !sending && !running && text.trim().length > 0;
+  // While a turn runs, a message can still move the conversation: the turn stops first.
+  const canSend = ready && !sending && (!running || handoff) && text.trim().length > 0;
+  const stopButton = running && !(handoff && text.trim());
   // Claude Code and Codex in the background can't ask the page for approval: "Ask every time"
   // runs them like Auto (server/fallback/backend.ts). Say so before sending, without blocking.
   const noAsk =
@@ -187,7 +196,7 @@ export function Composer() {
               )}
             </label>
             <div className="spacer" />
-            {running ? (
+            {stopButton ? (
               <button
                 className="send-btn stop"
                 title="Interrupt"
@@ -198,7 +207,7 @@ export function Composer() {
             ) : (
               <button
                 className="send-btn"
-                title="Send (Enter)"
+                title={running ? `Stop, then continue in ${movedTo} (Enter)` : "Send (Enter)"}
                 disabled={!canSend}
                 onClick={submit}
               >

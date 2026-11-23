@@ -13,6 +13,10 @@
 // the router's pass-through answers. Reasoning effort: the levels each CLI offers (Claude Code's
 // --help, Codex's catalog per model), --effort / -c model_reasoning_effort on the command line
 // (new and resumed runs), none for a turn without one (Default) or with an unknown one.
+// A conversation moved here (shared/thread-links.ts): the hand-over brief in turn/start's
+// additionalContext reaches the CLI before the message and nowhere else (not the items, not the
+// thread file), is left out once the CLI has a session, and a turn that only carries on shows no
+// user message; the UI server's link store keeps a conversation's sessions across a restart.
 
 import {
   appendFileSync,
@@ -27,6 +31,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { FallbackBackend } from "../server/fallback/backend.ts";
+import { ThreadLinkStore } from "../server/links.ts";
+import { parseSegments } from "../shared/thread-links.ts";
 import { checkClaude, checkCodex, checkThroughProvenance } from "../server/fallback/health.ts";
 import {
   checkCodexRoute,
@@ -454,6 +460,104 @@ check(
   "an effort no CLI knows: none sent (Codex's own default)",
 );
 await backendArchive(ask.thread.id);
+
+log("a conversation moved here: the hand-over brief");
+const BRIEF = "[Hand-over: HANDOVER-XYZZY the goal was to split the parser.]";
+const handover = { provenance_handover: { value: BRIEF, kind: "application" } };
+const ho = (
+  await c.call("thread/start", { model: "claude:", cwd: work, sandbox: "workspace-write" })
+).result as { thread: { id: string } };
+await c.call("turn/start", {
+  threadId: ho.thread.id,
+  input: text("Now the lexer"),
+  additionalContext: handover,
+});
+turn = await c.turnDone(ho.thread.id);
+r = runs().at(-1)!;
+check(
+  r.stdin === `${BRIEF}\n\nNow the lexer` && !r.argv.includes("--resume"),
+  "the CLI gets the brief, then the message, on stdin, in a new session",
+);
+const firstItem = turn.items[0] as { type: string; content?: { text: string }[] };
+check(
+  firstItem.type === "userMessage" &&
+    firstItem.content?.length === 1 &&
+    firstItem.content[0].text === "Now the lexer",
+  "the turn's user message is exactly what was typed",
+);
+const hoFile = () => readFileSync(path.join(dataDir, "threads", `${ho.thread.id}.json`), "utf8");
+check(!hoFile().includes("XYZZY"), "the brief is nowhere in the thread file");
+check(!JSON.stringify(c.notes).includes("XYZZY"), "nor in anything sent to the page");
+await c.call("turn/start", {
+  threadId: ho.thread.id,
+  input: text("And then?"),
+  additionalContext: handover,
+});
+turn = await c.turnDone(ho.thread.id);
+r = runs().at(-1)!;
+check(
+  r.stdin === "And then?" && r.argv.includes("--resume"),
+  "once the CLI has its session, a brief sent again is left out",
+);
+const co = (
+  await c.call("thread/start", { model: "codex:", cwd: work, sandbox: "workspace-write" })
+).result as { thread: { id: string } };
+await c.call("turn/start", {
+  threadId: co.thread.id,
+  input: [],
+  additionalContext: {
+    provenance_handover: { value: `${BRIEF}\n\nCarry on.`, kind: "application" },
+  },
+});
+turn = await c.turnDone(co.thread.id);
+r = runs().at(-1)!;
+check(
+  r.cli === "codex" && r.stdin === `${BRIEF}\n\nCarry on.`,
+  "carrying on without a message: the CLI gets the brief and the instruction",
+);
+check(
+  turn.status === "completed" && !turn.items.some((i) => i.type === "userMessage"),
+  "and the turn shows no user message",
+);
+const coFile = readFileSync(path.join(dataDir, "threads", `${co.thread.id}.json`), "utf8");
+check(
+  !coFile.includes("XYZZY") && JSON.parse(coFile).thread.preview === "",
+  "the thread file has no brief, and no preview made of it",
+);
+const nothing = await c.call("turn/start", { threadId: co.thread.id, input: [] });
+check(
+  /Nothing to send/.test(nothing.error?.message ?? ""),
+  "no message and no brief: nothing to send",
+);
+await backendArchive(ho.thread.id);
+await backendArchive(co.thread.id);
+
+log("the conversation's link store");
+const linksFile = path.join(scratch, "links", "thread-links.json");
+const store = new ThreadLinkStore(linksFile);
+const segs = parseSegments([
+  { backend: "main", threadId: "thr-1", model: "solstice", at: 1 },
+  { backend: "fallback", threadId: "fb-2", model: "claude:", at: 2 },
+]);
+check(segs?.length === 2, "two sessions make a conversation's link");
+check(
+  parseSegments([{ backend: "main", threadId: "thr-1" }]) === null &&
+    parseSegments([
+      { backend: "main", threadId: "a" },
+      { backend: "elsewhere", threadId: "b" },
+    ]) === null,
+  "one session, or an unknown backend: not a link",
+);
+store.set("thr-1", segs);
+check(
+  new ThreadLinkStore(linksFile).all()["thr-1"]?.[1].threadId === "fb-2",
+  "kept across a restart (a new store reads the file)",
+);
+store.set("thr-1", null);
+check(
+  Object.keys(new ThreadLinkStore(linksFile).all()).length === 0,
+  "and forgotten when archived",
+);
 
 log("interrupt, failure, missing CLI");
 process.env.FAKE_SLOW = "1";

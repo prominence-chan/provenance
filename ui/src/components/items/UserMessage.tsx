@@ -18,59 +18,59 @@ export function UserMessage({ item }: { item: UserItem }) {
         <span className="meta">sent by Provenance</span>
       </div>
     );
+  // Such a thread's first message: a quiet line says where it came from, the brief never shows.
+  const carried =
+    first?.type === "text" && !splitAssistBrief(first.text) ? splitBrief(first.text) : null;
+  if (carried && !carried.rest && item.content.length === 1)
+    return <p className="carry-line">This was continued from another conversation</p>;
   return (
-    <div className="user-message">
-      <div className="user-bubble">
-        {item.content.map((c, i) => {
-          switch (c.type) {
-            case "text": {
-              // The token pool's setup assistant starts with its brief: folded.
-              const a = splitAssistBrief(c.text);
-              if (a)
+    <>
+      {carried && <p className="carry-line">This was continued from another conversation</p>}
+      <div className="user-message">
+        <div className="user-bubble">
+          {item.content.map((c, i) => {
+            switch (c.type) {
+              case "text": {
+                // The token pool's setup assistant starts with its brief: folded.
+                const a = splitAssistBrief(c.text);
+                if (a)
+                  return (
+                    <span key={i}>
+                      <details className="user-brief">
+                        <summary>Setup brief for the assistant</summary>
+                        {a.brief}
+                      </details>
+                      {a.rest}
+                    </span>
+                  );
+                // A thread carried over from another one, before conversations stayed one thread:
+                // it starts with a brief of the other. Only what the person wrote shows.
+                const b = splitBrief(c.text);
+                return <span key={i}>{b ? b.rest : c.text}</span>;
+              }
+              case "localImage":
                 return (
-                  <span key={i}>
-                    <details className="user-brief">
-                      <summary>Setup brief for the assistant</summary>
-                      {a.brief}
-                    </details>
-                    {a.rest}
+                  <span key={i} className="chip">
+                    image: {c.path}
                   </span>
                 );
-              // A thread carried over from another one starts with a brief of it: folded.
-              const b = splitBrief(c.text);
-              if (!b) return <span key={i}>{c.text}</span>;
-              return (
-                <span key={i}>
-                  <details className="user-brief">
-                    <summary>Brief of the earlier thread</summary>
-                    {b.brief}
-                  </details>
-                  {b.rest}
-                </span>
-              );
+              case "mention":
+              case "skill":
+                return (
+                  <span key={i} className="chip">
+                    @{c.name}
+                  </span>
+                );
+              default:
+                return (
+                  <span key={i} className="chip">
+                    {c.type}
+                  </span>
+                );
             }
-            case "localImage":
-              return (
-                <span key={i} className="chip">
-                  image: {c.path}
-                </span>
-              );
-            case "mention":
-            case "skill":
-              return (
-                <span key={i} className="chip">
-                  @{c.name}
-                </span>
-              );
-            default:
-              return (
-                <span key={i} className="chip">
-                  {c.type}
-                </span>
-              );
-          }
-        })}
+          })}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

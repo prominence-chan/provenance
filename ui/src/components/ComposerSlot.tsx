@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   DEFAULT_ORCHESTRATOR,
-  ORCHESTRATOR_ID_PREFIX,
   ORCHESTRATORS,
   type FallbackEffort,
   type Orchestrator,
@@ -9,7 +8,8 @@ import {
 import { EFFORT_LABEL, effortsFor, chosenEffort } from "../fallback/effort";
 import { fallbackOf } from "../fallback/model";
 import { threadOrchestrator } from "../orchestrator/thread";
-import { backendOf, updateSettings } from "../store/actions";
+import { updateSettings } from "../store/actions";
+import { tierSegmentOf } from "../store/segments";
 import { useAppState } from "../store/store";
 import { IconCheck, IconChevronDown } from "./icons";
 
@@ -78,13 +78,15 @@ function EffortPicker() {
 
 function OrchestratorPicker() {
   const chosen = useAppState((s) => s.settings.orchestrator);
-  const selected = useAppState((s) => s.selectedThreadId);
-  const thread = useAppState((s) => (s.selectedThreadId ? s.views[s.selectedThreadId]?.thread : null));
-  // An open tier thread keeps the orchestrator it was started with: shown, not changed here.
-  const own =
-    selected && (backendOf(selected) === "main" || selected.startsWith(ORCHESTRATOR_ID_PREFIX))
-      ? threadOrchestrator(selected, thread)
-      : null;
+  const thread = useAppState((s) =>
+    s.selectedThreadId ? s.views[s.selectedThreadId]?.thread : null,
+  );
+  // An open conversation keeps the tier harness it ran on (the one it goes back to from a
+  // fallback, store/segments.ts): shown, not changed here.
+  const tierThread = useAppState((s) =>
+    s.selectedThreadId ? (tierSegmentOf(s, s.selectedThreadId)?.threadId ?? null) : null,
+  );
+  const own = tierThread ? threadOrchestrator(tierThread, thread) : null;
   const value = own ?? chosen ?? DEFAULT_ORCHESTRATOR;
   const o = ORCHESTRATORS.find((x) => x.id === value) ?? ORCHESTRATORS[0];
   const options: SlotOption[] = ORCHESTRATORS.map((x, i) => ({

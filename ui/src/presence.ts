@@ -7,6 +7,7 @@ import { appShell, type PresenceReport } from "./app-shell";
 import { fallbackOf } from "./fallback/model";
 import { threadOrchestrator } from "./orchestrator/thread";
 import { isThreadActive, type AppState, type ThreadView } from "./store/state";
+import { servingThreadId } from "./store/segments";
 import { useAppState } from "./store/store";
 import { tierOf } from "./theme/tiers";
 
@@ -26,7 +27,11 @@ function presenceKey(s: AppState): string {
     : s.selectedThreadId;
   const report: PresenceReport = {
     kind: tier ?? fallbackOf(model) ?? null,
-    orchestrator: tier ? (threadId ? threadOrchestrator(threadId) : s.settings.orchestrator) : null,
+    orchestrator: tier
+      ? threadId
+        ? threadOrchestrator(servingThreadId(s, threadId))
+        : s.settings.orchestrator
+      : null,
     working,
     since: turn?.startedAt ? turn.startedAt * 1000 : null,
   };

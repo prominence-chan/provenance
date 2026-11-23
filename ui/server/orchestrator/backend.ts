@@ -23,6 +23,12 @@
 // summary and the request it has not finished. A turn that ends early (no model after the
 // retries, a guard, an interrupt) leaves them as they stand, so "continue" picks the work up.
 //
+// A conversation moved here from another backend (shared/thread-links.ts) starts with a hand-over
+// brief in its first turn/start's `additionalContext` ({key: {value, kind}}, app-server's field).
+// It seeds the context the thread carries, within that context's own bound: Hyperexperimental's
+// summary, Experimental's goal (the notes' first request). It never becomes an item: the turn's
+// user message is what the person typed, and a turn with no message of its own shows none.
+//
 // A plain model call that the router can't serve is retried inside the turn (Run.model): the
 // waits are Caps.retryDelaysMs, a status line in the thread says so, and turn/interrupt ends the
 // wait at once. Guards and timeouts read the monotonic clock (clock.ts).
@@ -44,13 +50,16 @@ import {
   isOrchestrator,
   type Orchestrator,
 } from "../../shared/orchestrator-api.ts";
-import { agentMessage, userMessage, type Item } from "../fallback/items.ts";
+import { agentMessage, contextText, userMessage, type Item } from "../fallback/items.ts";
 import type { AppServer } from "./appserver.ts";
 import { mono } from "./clock.ts";
 import { runExperimental } from "./experimental.ts";
 import { runHyper } from "./hyper.ts";
 import { clipMiddle, emptyNotes, notesText, type Notes } from "./notes.ts";
-import { PROMPT_BUDGET, type Prompt } from "./prompts.ts";
+import { PROMPT_BUDGET, SUMMARY_LIMIT, type Prompt } from "./prompts.ts";
+
+/** How much of a hand-over brief Experimental keeps as its goal (its notes stay bounded). */
+const HANDOVER_GOAL_CHARS = 1500;
 import {
   CALL_TIMEOUT_MS,
   RouterError,
@@ -474,8 +483,15 @@ export class OrchestratorBackend {
   private startTurn(p: Json): unknown {
     const t = this.get(p.threadId);
     if (this.running.has(t.thread.id)) throw new Error("A turn is already running in this thread");
-    const text = inputText(p.input);
-    if (!text.trim()) throw new Error("Nothing to send");
+    const typed = inputText(p.input);
+    const context = t.turns.length ? "" : contextText(p.additionalContext);
+    if (!typed.trim() && !context.trim()) throw new Error("Nothing to send");
+    if (context) {
+      if (t.orchestrator === "hyperexperimental") t.summary = clipMiddle(context, SUMMARY_LIMIT);
+      else t.notes.requests = [clipMiddle(context, HANDOVER_GOAL_CHARS)];
+    }
+    // A turn that only carries on asks the orchestrator to go on.
+    const text = typed.trim() ? typed : "continue";
     if (typeof p.model === "string" && p.model) {
       if (p.model.includes(":")) throw new Error("This thread runs on the tiers");
       t.model = p.model;
@@ -501,7 +517,7 @@ export class OrchestratorBackend {
       durationMs: null,
     };
     t.turns.push(turn);
-    if (!t.thread.preview) t.thread.preview = text.slice(0, 400);
+    if (!t.thread.preview && typed.trim()) t.thread.preview = typed.slice(0, 400);
     t.thread.updatedAt = now;
     const run = new Run(this, t, turn, text);
     this.running.set(t.thread.id, run);
@@ -513,11 +529,11 @@ export class OrchestratorBackend {
       status: { type: "active", activeFlags: [] },
     });
     this.broadcast("turn/started", { threadId, turn: { ...turn, items: [] } });
-    const user = userMessage(`${turn.id}-user`, text);
-    run.complete(user, true);
+    const user = typed.trim() ? userMessage(`${turn.id}-user`, typed) : null;
+    if (user) run.complete(user, true);
     // Answer turn/start first, then run.
     setImmediate(() => void this.runTurn(t, run));
-    return { turn: { ...turn, items: [user] } };
+    return { turn: { ...turn, items: user ? [user] : [] } };
   }
 
   private async runTurn(t: ThreadRecord, run: Run): Promise<void> {

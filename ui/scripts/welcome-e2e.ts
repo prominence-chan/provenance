@@ -12,9 +12,10 @@
 // Claude Code thread (streamed items, a resumed second turn; "Ask every time" warns that it runs
 // without asking and runs it like Auto); opening a tier thread points the
 // picker back at its tier; a thread that has outgrown the free models shows the suggestion
-// (router flags + repeated commands + compactions), a calm one doesn't; "Continue in Codex"
-// carries a brief over to Codex through Provenance (its app-server pointed at the router's
-// pass-through, the turn's saved history in the footer); dismissing it sticks. Then a Mac with
+// (router flags + repeated commands + compactions), a calm one doesn't; dismissing it sticks;
+// "Continue in Codex" moves the conversation to Codex through Provenance in the same thread (its
+// app-server pointed at the router's pass-through, started with a brief it never shows, carrying
+// on without a message; the turn's saved history in the footer). Then a Mac with
 // neither CLI: "Not installed" with how to get each, and the picker's muted rows. Then when the
 // welcome opens by itself: sites signed in but no fallback -> it opens, reading as partly set up,
 // and "Finish setting up" leads to what is left until nothing is; everything set up -> it doesn't.
@@ -74,6 +75,8 @@ const runs = () =>
           method?: string;
           effort?: string | null;
           hasEffort?: boolean;
+          developerInstructions?: string | null;
+          additionalContext?: Record<string, { value: string }> | null;
         },
     );
 const nodeDir = path.dirname(process.execPath);
@@ -472,6 +475,18 @@ try {
   check((await page.locator(".strain-note").count()) === 0, "a calm thread shows nothing");
   await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
   await page.waitForSelector(".strain-note");
+  // Dismissing it sticks (checked first: once the conversation is on Codex there is no note).
+  await page.locator(".strain-note").getByRole("button", { name: "Dismiss" }).click();
+  check((await page.locator(".strain-note").count()) === 0, "dismissed");
+  await page.reload();
+  await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
+  await page.waitForSelector('.agent-message:has-text("Looking at the tokenizer again.")');
+  await page.waitForTimeout(800);
+  check((await page.locator(".strain-note").count()) === 0, "and stays dismissed for that thread");
+  await page.evaluate(() => localStorage.removeItem("provenance-ui.strain-dismissed"));
+  await page.reload();
+  await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
+  await page.waitForSelector(".strain-note");
   await fetch(`${mock.url}/mock/usage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -503,13 +518,27 @@ try {
     (await page.locator(".composer-note").count()) === 0,
     "through Provenance asks for approval itself: no note there",
   );
+  const pvStart = runs()
+    .filter(
+      (x) =>
+        x.cli === "provenance" &&
+        x.method === "thread/start" &&
+        x.argv.join(" ").includes('model_provider="openai"'),
+    )
+    .at(-1)!;
   check(
-    /^\[Continued from the Provenance thread "Refactor the parser/.test(pv.text ?? ""),
-    "with a brief of the old thread first",
+    /^\[Hand-over: [^\n]*"Refactor the parser into modules"/.test(
+      pvStart.developerInstructions ?? "",
+    ) && (pvStart.developerInstructions ?? "").includes("Looking at the tokenizer again."),
+    "its session starts with a brief of the conversation, as its instructions",
+  );
+  check(
+    pv.text === "" && /carry on/i.test(pv.additionalContext?.provenance_handover?.value ?? ""),
+    "and the turn carries on without a message of the person's",
   );
   check(
     /Codex\s*· Default/.test(await page.locator(".tier-picker-btn").innerText()),
-    "the picker follows the new thread",
+    "the picker follows the conversation",
   );
   check(pv.hasEffort === false, "Codex at Default effort: turn/start carries no effort");
   await page.click(".composer .slot-btn");
@@ -537,10 +566,17 @@ try {
       (await page.locator('.turn[data-fallback="codex"]').count()) > 0,
     "Codex through Provenance carries Codex's colour on the button, the composer and the turn",
   );
-  await page.waitForSelector(
-    '.thread-title:has-text("Refactor the parser into modules (continued)")',
+  const titles = await page.locator(".thread-title").allInnerTexts();
+  check(
+    titles.filter((t) => /Refactor the parser/.test(t)).length === 1 &&
+      !titles.some((t) => /continued/i.test(t)),
+    "still one conversation in the sidebar, under its own title",
   );
-  check(true, "the new thread is named after the one it continues");
+  check(
+    (await page.locator(".carry-line").allInnerTexts()).join("|") ===
+      "Continued in Codex from the conversation above",
+    "a faint line marks where it moved to Codex",
+  );
   await shot(page, "continued-in-codex");
   await page.reload();
   await page.waitForSelector(".composer .slot-effort .slot-btn");
@@ -548,15 +584,9 @@ try {
     (await page.locator(".composer .slot-btn").innerText()).trim() === "Max",
     "after a reload Codex's effort is still Max",
   );
-  await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
-  await page.waitForSelector(".strain-note");
-  await page.locator(".strain-note").getByRole("button", { name: "Dismiss" }).click();
-  check((await page.locator(".strain-note").count()) === 0, "dismissed");
-  await page.reload();
-  await page.locator(".thread-title", { hasText: /^Refactor the parser into modules$/ }).click();
-  await page.waitForSelector('.agent-message:has-text("Looking at the tokenizer again.")');
-  await page.waitForTimeout(800);
-  check((await page.locator(".strain-note").count()) === 0, "and stays dismissed for that thread");
+  // A tier thread opened points the picker back at its tier, for what follows.
+  await page.locator(".thread-title", { hasText: /^Add a README section$/ }).click();
+  await page.waitForSelector('.agent-message:has-text("Added it.")');
 
   // ---- 4b. the orchestrator, for new threads on a tier --------------------------------
   log("orchestrator");
