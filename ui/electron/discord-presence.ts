@@ -29,7 +29,7 @@ export const PRESENCE = {
    * Information -> Application ID). Empty: presence stays off. settings.json `discordClientId`
    * overrides it.
    */
-  clientId: "",
+  clientId: "1574288835871772732",
   /** The state line, under the tier. */
   credit: "by SkyeNXT · coming soon",
   /** Hover text of the app icon. */
@@ -43,8 +43,7 @@ export const PRESENCE = {
    * no art assets need uploading (ui/design/presence/ in the public repo). Set it to "" to use
    * art assets uploaded to the application under the same keys instead.
    */
-  imageBase:
-    "https://raw.githubusercontent.com/prominence-chan/provenance/provenance/ui/design/presence",
+  imageBase: "", // the seven images are uploaded to the application as art assets under their keys
 };
 
 /** Tier / fallback -> its name on the first line, its image key and the image's hover text. */

@@ -190,10 +190,10 @@ await step("activity: the literal lines, images, hover texts and button", () => 
     details: "Working · Solstice",
     state: "by SkyeNXT · coming soon",
     assets: {
-      large_image: `${PRESENCE.imageBase}/provenance.png`,
+      large_image: img("provenance"),
       large_text: "Provenance · made by Yufan at SkyeNXT",
       large_url: "https://github.com/prominence-chan/provenance",
-      small_image: `${PRESENCE.imageBase}/tier-solstice.png`,
+      small_image: img("tier-solstice"),
       small_text: "Solstice tier · frontier",
     },
     instance: false,
@@ -520,7 +520,7 @@ await step("an older client refusing large_url gets the activity without it", as
     const a2 = (fake.sets[1].data.args as { activity: { assets: Record<string, unknown> } })
       .activity;
     assert.equal(a2.assets.large_url, undefined);
-    assert.equal(a2.assets.large_image, `${PRESENCE.imageBase}/provenance.png`);
+    assert.equal(a2.assets.large_image, img("provenance"));
     await sleep(400);
     assert.equal(fake.sets.length, 2, "no loop");
     await p.shutdown();
@@ -678,3 +678,8 @@ if (process.env.PAGE === "0" || !existsSync(path.join(root, "dist/index.html")))
 rmSync(scratch, { recursive: true, force: true });
 console.log(failures ? `\n${failures} check(s) failed` : "\nall presence checks passed");
 process.exit(failures ? 1 : 0);
+
+/** An image as the app sends it: an uploaded asset key, or a URL when PRESENCE.imageBase is set. */
+function img(key: string): string {
+  return PRESENCE.imageBase ? `${PRESENCE.imageBase}/${key}.png` : key;
+}
