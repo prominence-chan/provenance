@@ -1393,8 +1393,10 @@ button.turn-models-list:hover .turn-models-more {
 .btn-small:active {
   transform: scale(0.97);
 }
+/* A gradient under a transparent border: drawn from the border box (border-box), or it is
+   sized to the padding box and repeats under the border, a sliver of its far end round the rim. */
 .btn-primary {
-  background: var(--accent-grad);
+  background: var(--accent-grad) border-box;
   color: var(--accent-fg);
   border-color: transparent;
   font-weight: 600;
@@ -2104,6 +2106,11 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   place-items: center;
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
+  /* The inherited 1.55 line box (16px) is taller than the 14px inside the ring, and an
+     overflowing grid item is not centred: the digit hung 1.3px low. A line box of one cap
+     height centres the digit's ink, like the check beside it. */
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
   border: 1px solid var(--border-strong);
 }
 .setup-rail li.done {
@@ -2122,7 +2129,7 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   font-weight: 500;
 }
 .setup-rail li.current .setup-rail-num {
-  background: var(--accent-grad);
+  background: var(--accent-grad) border-box; /* see .btn-primary */
   color: var(--accent-fg);
   border-color: transparent;
   font-weight: 600;
@@ -2447,7 +2454,7 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
     background var(--dur-fast) var(--ease);
 }
 .switch:checked {
-  background: var(--accent-grad);
+  background: var(--accent-grad) border-box; /* see .btn-primary */
   border-color: transparent;
 }
 .switch:checked::after {

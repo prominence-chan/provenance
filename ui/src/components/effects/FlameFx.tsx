@@ -44,11 +44,19 @@
 //             phosphor; on switch one bright refresh climbs high and fades; while active the
 //             sweeps come faster and short runs of data slide along the lines
 // Both are discrete where the tiers are organic: they read as a screen, not a fire.
+//
+// Days of uptime: the shader only ever sees small time values. Each layer's clocks count from
+// its own epoch, and every RENEW_AFTER seconds a calm layer hands over to a copy of itself
+// whose clocks start again, cross-fading over RENEW_FADE (same seed, same flare state, so only
+// the drifting noise differs). The write head's position is sent modulo its cell count, the
+// flare time is capped where every flare term is long gone, and the noise hash is exact for any
+// input (glsl.ts). Without that, float precision ran out after hours: the flames went blocky.
 import { useEffect, useRef } from "react";
 import { useTheme } from "../../theme/theme";
 import type { FallbackCli } from "../../../shared/fallback-api";
 import type { TierId } from "../../theme/tiers";
-import { useReducedMotion, type FxState } from "./useFx";
+import { GLSL_HASH } from "./glsl";
+import { devUptime, useReducedMotion, type FxState } from "./useFx";
 
 export function FlameFx({ fx }: { fx: FxState }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -140,9 +148,9 @@ const FX_FS = `#version 300 es
 precision highp float;
 in vec2 vPos;
 out vec4 outColor;
-uniform float uTime;    // per-layer phase: runs slow when idle, faster when active
-uniform float uClock;   // wall clock, s
-uniform float uFT;      // flare time, s (scaled per flare); < 0 during nova's charge
+uniform float uTime;    // per-layer phase since its epoch: runs slow when idle, faster when active
+uniform float uClock;   // wall clock since the layer's epoch, s
+uniform float uFT;      // flare time, s (scaled per flare); < 0 during nova's charge; capped
 uniform float uFl;      // flare envelope 0..1
 uniform float uPre;     // nova charge 0..1
 uniform float uAct;     // active 0..1 (eased)
@@ -153,17 +161,13 @@ uniform float uAlphaK, uGain, uHaze, uRadius, uTopY;
 uniform vec2 uRes;
 uniform int uMode;      // 0 = composer band, 1 = header filament, 2 = nova eruption
 uniform int uTier;      // 0 spark, 1 ember, 2 solstice, 3 nova, 4 claude, 5 codex
-uniform float uPhase;   // claude: cells the write head has stepped; codex: refresh sweeps run
+uniform float uPhase;   // claude: the write head's cell (mod N); codex: refresh sweeps run (mod 64)
 uniform vec4 uRect;     // composer x, y, w, h (CSS px)
 uniform vec4 uBand;     // the quad being drawn, x0 y0 x1 y1: everything fades out before it
 uniform vec3 uC0, uC1, uC2, uC3, uOff1, uOff2, uDusk;
 uniform vec4 uSparks[8]; // spark: x, y, brightness, size
 
-float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
+${GLSL_HASH}
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
@@ -827,7 +831,19 @@ interface Layer {
   nextSpawn: number;
   /** claude: cells stepped by the write head; codex: refresh sweeps (fract = how far up). */
   phase: number;
+  /** time and clock() when this layer's epoch began (the shader gets both relative to it) */
+  epoch: number;
+  clockAt: number;
+  /** Handing over to a renewed copy of itself: fading out over RENEW_FADE, still live. */
+  retiring: boolean;
 }
+
+/** Seconds of wall clock after which a calm layer is renewed (see the header). */
+const RENEW_AFTER = 600;
+/** Seconds the renewal cross-fades over. */
+const RENEW_FADE = 4;
+/** Flare time sent to the shader is capped here: every flare term is 0 long before. */
+const FT_CAP = 1000;
 
 const MAX_PARTICLES = 420;
 /** Seconds after nova's eruption that the remnant nebula lasts. */
@@ -949,7 +965,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
   // ---- state ----
-  const start = performance.now();
+  const start = performance.now() - devUptime * 1000;
   // Dev-only slow motion for looking at a flare frame by frame (?fxspeed=0.1, see useFx.ts).
   const speed = import.meta.env.DEV
     ? Number(new URLSearchParams(location.search).get("fxspeed")) || 1
@@ -1270,7 +1286,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   const stepLayer = (l: Layer, dt: number, now: number, r: Rect) => {
     stepFlare(l, now);
     // Critically damped spring towards the target: eases in and out, never snaps.
-    const target = !l.fading && active ? 1 : 0;
+    const target = (!l.fading || l.retiring) && active ? 1 : 0;
     const om = target > l.act ? 2.6 : 1.6;
     l.actV += (om * om * (target - l.act) - 2 * om * l.actV) * dt;
     l.act = clamp(l.act + l.actV * dt, 0, 1);
@@ -1283,8 +1299,23 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     // every ~6.5 s at rest, every ~2 s while active (each sweep takes 40% of that).
     if (l.tier === "claude") l.phase += dt * (1.2 + 7.8 * l.act);
     if (l.tier === "codex") l.phase += dt / (6.5 - 4.4 * l.act);
-    if (l.fading) l.fade = Math.max(0, l.fade - dt / 0.6);
+    if (l.fading) l.fade = Math.max(0, l.fade - dt / (l.retiring ? RENEW_FADE : 0.6));
+    else if (l.fade < 1) l.fade = Math.min(1, l.fade + dt / RENEW_FADE); // a renewal coming in
     if (l.fading) return;
+    if (
+      now - l.clockAt > RENEW_AFTER &&
+      l.fade >= 1 &&
+      l.fl < 0.002 &&
+      l.pre < 0.002 &&
+      l.ft > 30
+    ) {
+      // Hand over to a copy whose clocks start again; it fades in from the next frame.
+      layers.push({ ...l, epoch: l.time, clockAt: now, fade: 0 });
+      if (import.meta.env.DEV) console.debug("[fx] renewed", l.tier, now.toFixed(1));
+      l.fading = true;
+      l.retiring = true;
+      return;
+    }
 
     if (l.tier === "nova" && !l.blasted && l.ft >= 0 && l.ft < 1) {
       l.blasted = true;
@@ -1417,8 +1448,9 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   const drawLayer = (l: Layer, now: number, r: Rect) => {
     const c = (k: number) => color(l.id, k);
-    gl.uniform1f(fu.uTime, l.time);
-    gl.uniform1f(fu.uFT, l.ft);
+    gl.uniform1f(fu.uTime, l.time - l.epoch);
+    gl.uniform1f(fu.uClock, now - l.clockAt);
+    gl.uniform1f(fu.uFT, Math.min(l.ft, FT_CAP));
     gl.uniform1f(fu.uFl, l.fl);
     gl.uniform1f(fu.uPre, l.pre);
     gl.uniform1f(fu.uAct, l.act);
@@ -1426,7 +1458,14 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.uniform1f(fu.uBreath, breathOf(l, now));
     gl.uniform1f(fu.uSeed, l.seed);
     gl.uniform1i(fu.uTier, STYLE_INDEX[l.tier]);
-    gl.uniform1f(fu.uPhase, l.phase);
+    // Only the head's cell mod N matters (N as the shader works it out); the sweeps' fract.
+    const cells = Math.max(12, Math.floor(perimLength(r) / 9 + 0.5));
+    gl.uniform1f(
+      fu.uPhase,
+      l.phase -
+        Math.floor(l.phase / (l.tier === "claude" ? cells : 64)) *
+          (l.tier === "claude" ? cells : 64),
+    );
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
     gl.uniform3fv(fu.uC2, c(2));
@@ -1497,8 +1536,8 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.clear(gl.COLOR_BUFFER_BIT);
     const r = composerRect();
     if (!r) return;
-    for (const l of layers) stepLayer(l, dt, now, r);
-    layers = layers.filter((l) => l.fade > 0);
+    for (const l of [...layers]) stepLayer(l, dt, now, r);
+    layers = layers.filter((l) => !l.fading || l.fade > 0); // a renewal comes in from 0
     setHeat(layers.find((l) => l.tier === "nova" && !l.fading)?.pre ?? 0);
     stepParticles(dt, now, r);
 
@@ -1506,7 +1545,6 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.bindVertexArray(quadVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
     gl.uniform2f(fu.uRes, w, h);
-    gl.uniform1f(fu.uClock, now);
     gl.uniform1f(fu.uAlphaK, alphaK);
     gl.uniform1f(fu.uGain, gain);
     gl.uniform1f(fu.uHaze, alphaK < 1 ? 1 : 0);
@@ -1732,6 +1770,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       const cur = layers.find((l) => !l.fading);
       if (cur?.id !== id) {
         if (cur) cur.fading = true;
+        for (const l of layers) l.retiring = false; // a renewal in progress: away quickly too
         if (id) {
           const l: Layer = {
             id,
@@ -1743,15 +1782,23 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             ts: 1,
             act: 0,
             actV: 0,
-            time: Math.random() * 50,
+            time: Math.random() * 50 + devUptime * 0.3,
             fl: 0,
             pre: 0,
             ft: 99,
             blasted: false,
             trickle: 0,
             nextSpawn: 1,
-            phase: Math.random() * 40,
+            phase: Math.random() * 40 + devUptime * (id === "codex" ? 1 / 6.5 : 1.2),
+            epoch: 0,
+            clockAt: 0,
+            retiring: false,
           };
+          // Its epoch starts now. Dev ?fxuptime: the counters are as after that long, and the
+          // epoch as the last renewal would have left it.
+          const since = devUptime % RENEW_AFTER;
+          l.epoch = l.time - since * 0.3;
+          l.clockAt = clock() - since;
           layers.push(l);
           flare(l);
         }
