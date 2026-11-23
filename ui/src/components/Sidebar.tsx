@@ -9,6 +9,7 @@ import { baseName, relativeTime, shortPath } from "./format";
 import {
   IconArchive,
   IconChevron,
+  IconClock,
   IconCompose,
   IconFolder,
   IconMoon,
@@ -16,12 +17,15 @@ import {
   IconSearch,
   IconSidebar,
   IconSun,
+  IconTrash,
 } from "./icons";
 import { SolarMark } from "./SolarMark";
 import { openSetup } from "../setup/open";
 import { IconAccounts } from "../setup/SetupDialog";
 
 const GROUPS_KEY = "provenance-ui.collapsed-projects";
+const ORDER_KEY = "provenance-ui.folder-order";
+const MOST_RECENT_KEY = "provenance-ui.most-recent";
 
 function loadCollapsed(): Set<string> {
   try {
@@ -31,7 +35,39 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-/** Threads grouped by working directory (like Codex's projects), most recent project first. */
+function loadMostRecent(): boolean {
+  try {
+    return JSON.parse(localStorage.getItem(MOST_RECENT_KEY) ?? "false");
+  } catch {
+    return false;
+  }
+}
+
+function saveMostRecent(v: boolean): void {
+  try {
+    localStorage.setItem(MOST_RECENT_KEY, JSON.stringify(v));
+  } catch {
+    // ignore
+  }
+}
+
+function loadOrder(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveOrder(order: string[]): void {
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(order));
+  } catch {
+    // ignore
+  }
+}
+
+/** Threads grouped by working directory (like Codex's projects). */
 function groupByProject(threads: Thread[]): { cwd: string; threads: Thread[] }[] {
   const groups = new Map<string, Thread[]>();
   for (const t of threads) {
@@ -42,6 +78,31 @@ function groupByProject(threads: Thread[]): { cwd: string; threads: Thread[] }[]
   return [...groups].map(([cwd, threads]) => ({ cwd, threads }));
 }
 
+/** Apply a saved folder order to the grouped list. */
+function applyOrder(
+  groups: { cwd: string; threads: Thread[] }[],
+  order: string[],
+): { cwd: string; threads: Thread[] }[] {
+  if (!order.length) return groups;
+  const byCwd = new Map(groups.map((g) => [g.cwd, g]));
+  const ordered: { cwd: string; threads: Thread[] }[] = [];
+  for (const cwd of order) {
+    const g = byCwd.get(cwd);
+    if (g) {
+      ordered.push(g);
+      byCwd.delete(cwd);
+    }
+  }
+  // append any new folders not in saved order
+  for (const g of byCwd.values()) ordered.push(g);
+  return ordered;
+}
+
+/** Threads sorted globally by most recently updated, regardless of project. */
+function sortByMostRecent(threads: Thread[]): Thread[] {
+  return [...threads].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+}
+
 export function Sidebar() {
   const threads = useAppState((s) => s.threads);
   const selected = useAppState((s) => s.selectedThreadId);
@@ -49,16 +110,30 @@ export function Sidebar() {
   const { narrow, visible } = useSidebar();
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState(loadCollapsed);
+  const [mostRecent, setMostRecent] = useState(loadMostRecent);
+  const [folderOrder, setFolderOrder] = useState(loadOrder);
+  const [dragging, setDragging] = useState<string | null>(null);
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = q
-      ? threads.filter(
+    if (mostRecent) {
+      let list = sortByMostRecent(threads);
+      if (q) {
+        list = list.filter(
           (t) => threadTitle(t).toLowerCase().includes(q) || t.cwd.toLowerCase().includes(q),
-        )
-      : threads;
-    return groupByProject(list);
-  }, [threads, query]);
+        );
+      }
+      return { kind: "flat" as const, threads: list };
+    }
+    let list = threads;
+    if (q) {
+      list = list.filter(
+        (t) => threadTitle(t).toLowerCase().includes(q) || t.cwd.toLowerCase().includes(q),
+      );
+    }
+    const grouped = applyOrder(groupByProject(list), folderOrder);
+    return { kind: "grouped" as const, groups: grouped };
+  }, [threads, query, mostRecent, folderOrder]);
 
   const toggleGroup = (cwd: string) => {
     setCollapsed((prev) => {
@@ -72,6 +147,61 @@ export function Sidebar() {
       }
       return next;
     });
+  };
+
+  const toggleMostRecent = () => {
+    setMostRecent((prev) => {
+      const next = !prev;
+      saveMostRecent(next);
+      return next;
+    });
+  };
+
+  const handleDeleteFolder = async (cwd: string) => {
+    const toArchive = threads.filter((t) => t.cwd === cwd);
+    if (!toArchive.length) return;
+    const ok = window.confirm(
+      `Delete folder "${baseName(cwd) || cwd}" and archive all ${toArchive.length} thread(s) inside?`,
+    );
+    if (!ok) return;
+    for (const t of toArchive) {
+      await archiveThread(t.id);
+    }
+    await refreshThreads();
+  };
+
+  const handleDragStart = (cwd: string) => (e: React.DragEvent) => {
+    setDragging(cwd);
+    try {
+      e.dataTransfer.setData("text/plain", cwd);
+      e.dataTransfer.effectAllowed = "move";
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    try {
+      e.dataTransfer.dropEffect = "move";
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDrop = (targetCwd: string) => async (e: React.DragEvent) => {
+    e.preventDefault();
+    const src = dragging || e.dataTransfer.getData("text/plain");
+    setDragging(null);
+    if (!src || src === targetCwd) return;
+    // reorder
+    const current = groups.kind === "grouped" ? groups.groups.map((g) => g.cwd) : [];
+    const next = current.filter((c) => c !== src);
+    const idx = next.indexOf(targetCwd);
+    if (idx < 0) next.push(src);
+    else next.splice(idx, 0, src);
+    setFolderOrder(next);
+    saveOrder(next);
   };
 
   return (
@@ -115,21 +245,47 @@ export function Sidebar() {
         </div>
         <div className="sidebar-section">
           <span>Threads</span>
-          <button
-            className="icon-btn"
-            title="Refresh"
-            aria-label="Refresh threads"
-            onClick={() => void refreshThreads()}
-            disabled={loading}
-          >
-            <IconRefresh size={12} />
-          </button>
+          <div style={{ display: "flex", gap: "2px" }}>
+            <button
+              className="icon-btn"
+              title="Refresh"
+              aria-label="Refresh threads"
+              onClick={() => void refreshThreads()}
+              disabled={loading}
+            >
+              <IconRefresh size={12} />
+            </button>
+            <button
+              className={`icon-btn most-recent-toggle ${mostRecent ? "active" : ""}`}
+              title={mostRecent ? "Sort by project" : "Sort by most recent"}
+              aria-label={mostRecent ? "Sort by project" : "Sort by most recent"}
+              onClick={toggleMostRecent}
+            >
+              <IconClock size={12} />
+            </button>
+          </div>
         </div>
         <nav className="thread-list">
-          {groups.map((g) => {
+          {groups.kind === "flat" && groups.threads.map((t) => (
+            <ThreadRow
+              key={t.id}
+              thread={t}
+              selected={t.id === selected}
+              query={query.trim()}
+            />
+          ))}
+          {groups.kind === "grouped" && groups.groups.map((g) => {
             const open = !collapsed.has(g.cwd) || !!query.trim();
             return (
-              <div key={g.cwd} className="project">
+              <div
+                key={g.cwd}
+                className="project"
+                draggable
+                onDragStart={handleDragStart(g.cwd)}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop(g.cwd)}
+                style={dragging === g.cwd ? { opacity: 0.5 } : undefined}
+              >
                 <button
                   className="project-head"
                   title={shortPath(g.cwd)}
@@ -142,6 +298,17 @@ export function Sidebar() {
                   </span>
                   <span className="project-name">{baseName(g.cwd) || g.cwd}</span>
                   {!open && <span className="project-count">{g.threads.length}</span>}
+                  <button
+                    className="icon-btn project-delete"
+                    title="Delete folder"
+                    aria-label="Delete folder"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDeleteFolder(g.cwd);
+                    }}
+                  >
+                    <IconTrash size={11} />
+                  </button>
                 </button>
                 {open &&
                   g.threads.map((t) => (
@@ -155,7 +322,8 @@ export function Sidebar() {
               </div>
             );
           })}
-          {!groups.length && (
+          {((groups.kind === "flat" && !groups.threads.length) ||
+            (groups.kind === "grouped" && !groups.groups.length)) && (
             <div className="thread-empty">
               {loading ? "Loading…" : query ? "No matches" : "No threads yet"}
             </div>
