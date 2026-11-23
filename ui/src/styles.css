@@ -649,6 +649,19 @@ select {
   margin-bottom: -18px;
   pointer-events: none;
 }
+/* Without WebGL2: the mark, or the remnant's for nova, cross-faded in place. */
+.hero-sun-static {
+  position: relative;
+}
+.hero-sun-static > span {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.6s var(--ease-out);
+}
+.hero-sun-static > span[data-on] {
+  opacity: 1;
+}
 @media (max-height: 560px) {
   .hero-sun {
     display: none;
