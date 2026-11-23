@@ -28,6 +28,7 @@ import type {
   Thread,
 } from "../protocol";
 import { RpcClient } from "../rpc/client";
+import { isAssistView } from "../setup/assist-text";
 import { splitModel } from "../theme/tiers";
 import { applyNotification, turnFromProtocol, upsertThreadInList } from "./reducer";
 import {
@@ -467,14 +468,43 @@ export async function archiveThread(threadId: string): Promise<void> {
 
 // ---- turns -----------------------------------------------------------------
 
+/** What a send can pin instead of the composer's settings (the token pool's setup assistant). */
+export interface SendOptions {
+  /** Send to this thread (null: start a new one), whatever is selected. */
+  threadId?: string | null;
+  model?: string;
+  approvalPolicy?: Settings["approvalPolicy"];
+  sandbox?: SandboxMode;
+  /** A new thread's name. */
+  name?: string;
+}
+
+/** The setup assistant's thread: read only, in its own scratch folder, on its own fallback. */
+const ASSIST_PRESET = { approvalPolicy: "on-request", sandbox: "read-only" } as const;
+
 /**
  * Send a message: starts a new thread first when on the "new thread" screen. When the picker
  * points at another backend than the open thread's (a tier thread, Claude Code picked), the
- * message starts a new thread there instead, with a brief of this one first.
+ * message starts a new thread there instead, with a brief of this one first. The token pool's
+ * setup assistant's thread always stays where it is, read only, in its scratch folder.
  */
-export async function sendMessage(text: string, cwdInput?: string): Promise<void> {
-  const { settings } = getState();
-  let threadId = getState().selectedThreadId;
+export async function sendMessage(
+  text: string,
+  cwdInput?: string,
+  opts: SendOptions = {},
+): Promise<void> {
+  let settings: Settings = {
+    ...getState().settings,
+    ...(opts.model ? { model: opts.model } : {}),
+    ...(opts.approvalPolicy ? { approvalPolicy: opts.approvalPolicy } : {}),
+    ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
+  };
+  let threadId = opts.threadId !== undefined ? opts.threadId : getState().selectedThreadId;
+  const pinned = threadId ? getState().views[threadId] : undefined;
+  if (pinned && isAssistView(pinned)) {
+    settings = { ...settings, ...ASSIST_PRESET, model: pinned.model ?? settings.model };
+    cwdInput = pinned.cwd ?? cwdInput;
+  }
   const target = targetBackend(settings.model, threadId);
   let prompt = text;
   let carriedFrom: string | null = null;
@@ -498,7 +528,8 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
     if (!threadId) {
       threadId = await startThread(target, settings, cwd);
       // A carried-over thread is named after the one it continues, not after its brief.
-      if (carriedFrom) void nameThread(threadId, `${carriedFrom.slice(0, 80)} (continued)`);
+      if (opts.name) void nameThread(threadId, opts.name);
+      else if (carriedFrom) void nameThread(threadId, `${carriedFrom.slice(0, 80)} (continued)`);
     }
     const res = await client.request("turn/start", {
       threadId,
@@ -531,6 +562,16 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
   } finally {
     setState((s) => ({ ...s, sending: false }));
   }
+}
+
+/**
+ * Start the token pool's setup assistant: a new thread on a fallback (`model`), read only, in an
+ * empty scratch folder of the app's, whose first message is the brief (setup/assist-text.ts).
+ */
+export async function startAssistThread(model: string, cwd: string, brief: string, name: string) {
+  updateSettings({ model }); // the picker shows what the thread runs on, as opening it would
+  setState((s) => ({ ...s, selectedThreadId: null }));
+  await sendMessage(brief, cwd, { threadId: null, model, ...ASSIST_PRESET, name });
 }
 
 async function nameThread(threadId: string, name: string): Promise<void> {
@@ -723,7 +764,10 @@ export function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export async function projectMove(params: { projectId: string; beforeProjectId?: string }): Promise<void> {
+export async function projectMove(params: {
+  projectId: string;
+  beforeProjectId?: string;
+}): Promise<void> {
   setState((s) => ({ ...s, threadsLoading: true }));
   try {
     await rpc.request("project/move", params);

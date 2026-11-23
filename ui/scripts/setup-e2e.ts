@@ -335,7 +335,9 @@ try {
     ),
     "an anonymous provider says so",
   );
-  await google.getByRole("button", { name: "Add key" }).click();
+  // The router's instructions open the next provider to set up by itself (Google, here).
+  if ((await google.getAttribute("data-open")) === null)
+    await google.getByRole("button", { name: "Add key" }).click();
   await google.locator('input[type="password"]').fill("AIza-test-key");
   await shot(page, "keys-form");
   await google.getByRole("button", { name: "Save" }).click();

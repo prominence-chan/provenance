@@ -4,7 +4,9 @@
 import { useState } from "react";
 import { TierGlyph } from "../components/TierBadge";
 import { tierOf } from "../theme/tiers";
+import { PaidPlanConfirm } from "./PaidPlan";
 import { browserStageText } from "./parts";
+import { KeepSignedInOffer } from "./SavedSignIn";
 import { SetupArt, type ArtKind } from "./SetupArt";
 import {
   accountName,
@@ -22,6 +24,7 @@ export function SignInStep({
   login,
   browser,
   busy,
+  switching,
   onCancel,
   onRetry,
   onBack,
@@ -31,6 +34,8 @@ export function SignInStep({
   login: Login | null;
   browser: BrowserStatus;
   busy: string | null;
+  /** Putting another account in this slot (away from a paid plan): sign out there first. */
+  switching?: boolean;
   onCancel: () => void;
   onRetry: () => void;
   onBack: () => void;
@@ -87,7 +92,12 @@ export function SignInStep({
     );
   } else {
     title = `Sign in to ${provider.name} in the new window`;
-    text = (
+    text = switching ? (
+      <>
+        A browser window opened beside Provenance on {host}. Sign out of the account that's there,
+        then sign in with the other one; it closes by itself when you're done.
+      </>
+    ) : (
       <>
         A browser window opened beside Provenance on {host}. Sign in there as usual; it closes by
         itself when you're done.
@@ -142,14 +152,38 @@ export function ReadyStep({
   account,
   onDone,
   onAnother,
+  onDifferent,
+  onReload,
 }: {
   provider: WebProvider;
   account: string;
   onDone: () => void;
   onAnother: () => void;
+  /** Sign in to this slot again with another account (a paid plan's way out). */
+  onDifferent: () => void;
+  onReload: () => void;
 }) {
   const models = provider.models.filter((m) => modelOn(m, account));
-  const email = provider.accounts.find((a) => a.id === account)?.email;
+  const acc = provider.accounts.find((a) => a.id === account);
+  const email = acc?.email;
+  // A paid plan: connected, but not used until the person chooses (setup/PaidPlan.tsx).
+  if (acc?.needs_confirmation)
+    return (
+      <div className="setup-step setup-center" data-login="signed_in" data-paid-plan>
+        <SetupArt kind="ready" host={siteHost(provider.url)} />
+        <PaidPlanConfirm
+          provider={provider}
+          account={acc}
+          centered
+          onDifferent={onDifferent}
+          onConfirmed={onReload}
+        />
+        <p className="meta setup-which">
+          {email ? `${email} · ` : ""}
+          {provider.name} · {accountName(account)}
+        </p>
+      </div>
+    );
   return (
     <div className="setup-step setup-center" data-login="signed_in">
       <SetupArt kind="ready" host={siteHost(provider.url)} />
@@ -175,6 +209,7 @@ export function ReadyStep({
           ))}
         </ul>
       )}
+      {acc && <KeepSignedInOffer provider={provider} account={acc} onChanged={onReload} />}
       <div className="setup-actions">
         <button className="btn-primary setup-cta" onClick={onDone} autoFocus>
           Done

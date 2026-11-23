@@ -7,7 +7,9 @@ import { TierGlyph } from "../components/TierBadge";
 import { tierOf } from "../theme/tiers";
 import {
   checkedText,
+  inUse,
   loginActive,
+  planText,
   type BrowserStatus,
   type WebAccount,
   type WebModel,
@@ -16,8 +18,9 @@ import {
 
 /** A site's state in one status line: off, signing in, ready on N accounts, blocked, not signed in. */
 export function SiteStatus({ provider }: { provider: WebProvider }) {
-  const ok = provider.accounts.filter((a) => a.signed_in === true && !a.blocked);
-  const blocked = provider.accounts.filter((a) => a.signed_in === true && a.blocked);
+  const ok = provider.accounts.filter((a) => inUse(a) && !a.blocked);
+  const blocked = provider.accounts.filter((a) => inUse(a) && a.blocked);
+  const unconfirmed = provider.accounts.some((a) => a.signed_in === true && !inUse(a));
   let cls = "dot-off";
   let text = "Not signed in";
   if (provider.accounts.some((a) => loginActive(a.login.state))) {
@@ -31,6 +34,9 @@ export function SiteStatus({ provider }: { provider: WebProvider }) {
   } else if (blocked.length) {
     cls = "dot-warn";
     text = "Paused";
+  } else if (unconfirmed) {
+    cls = "dot-warn";
+    text = "Needs your OK";
   }
   return <Status cls={cls} text={text} />;
 }
@@ -51,6 +57,9 @@ export function AccountStatus({ account: a }: { account: WebAccount }) {
   if (loginActive(a.login.state)) {
     cls = "dot-busy";
     text = "Signing in…";
+  } else if (a.signed_in === true && a.needs_confirmation) {
+    cls = "dot-warn";
+    text = "Connected, not in use";
   } else if (a.signed_in === true && a.blocked) {
     cls = "dot-warn";
     text = a.reason ?? "Paused for now";
@@ -61,7 +70,7 @@ export function AccountStatus({ account: a }: { account: WebAccount }) {
     cls = "dot-err";
     text = "Signed out";
   } else text = "Not signed in yet";
-  const showUsage = a.signed_in === true && a.daily_cap > 0;
+  const showUsage = inUse(a) && a.daily_cap > 0;
   return (
     <span className="setup-account-status">
       <Status cls={cls} text={text} />
@@ -79,6 +88,17 @@ export function AccountStatus({ account: a }: { account: WebAccount }) {
           {a.today} of {a.daily_cap}&nbsp;today
         </span>
       )}
+    </span>
+  );
+}
+
+/** The account's plan on its site, small beside its name ("Free", "Plus"); nothing when unknown. */
+export function PlanLabel({ account: a }: { account: WebAccount }) {
+  const t = a.signed_in === true ? planText(a) : null;
+  if (!t) return null;
+  return (
+    <span className="setup-plan" data-plan={a.plan}>
+      {t}
     </span>
   );
 }

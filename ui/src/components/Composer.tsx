@@ -3,6 +3,8 @@ import { appShell } from "../app-shell";
 import type { SandboxMode } from "../protocol";
 import { backendOfModel, MODE_NAME } from "../fallback/model";
 import { parseFallbackModel } from "../../shared/fallback-api";
+import { findKey, isAssistView } from "../setup/assist-text";
+import { KeyIntercept, usePoolData } from "../setup/PoolAssist";
 import { backendOf, interrupt, sendMessage, updateSettings } from "../store/actions";
 import type { Settings } from "../store/state";
 import { useAppState } from "../store/store";
@@ -27,16 +29,28 @@ export function Composer() {
         ? s.backendReady.fallback
         : true,
   );
+  // The token pool's setup assistant: its thread stays where it is, read only, and a key typed
+  // or pasted here is caught before it is sent (setup/PoolAssist.tsx).
+  const assist = useAppState((s) =>
+    s.selectedThreadId ? isAssistView(s.views[s.selectedThreadId]) : false,
+  );
   // The open thread runs elsewhere than the picker says: sending starts a new thread there.
-  const handoff = !!selected && backendOf(selected) !== target;
+  const handoff = !!selected && !assist && backendOf(selected) !== target;
   const fb = parseFallbackModel(settings.model);
   const placeholder = !selected
     ? "Ask Provenance anything"
-    : handoff
-      ? `Continue in a new ${fb ? MODE_NAME[fb.mode] : settings.model} thread`
-      : "Ask for follow-up changes";
+    : assist
+      ? "Answer the assistant, or tell it to stop"
+      : handoff
+        ? `Continue in a new ${fb ? MODE_NAME[fb.mode] : settings.model} thread`
+        : "Ask for follow-up changes";
   const [text, setText] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
+  const [caught, setCaught] = useState<{ text: string; key: string; guess: string | null } | null>(
+    null,
+  );
+  const pool = usePoolData(assist);
+  useEffect(() => setCaught(null), [selected]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fx = useFx();
 
@@ -71,6 +85,14 @@ export function Composer() {
   const submit = () => {
     if (!canSend) return;
     const msg = text.trim();
+    if (assist && selected) {
+      const k = findKey(msg, pool?.help?.providers ?? []);
+      if (k) {
+        setText("");
+        setCaught({ text: msg, key: k.key, guess: k.provider });
+        return;
+      }
+    }
     setText("");
     if (!selected) updateSettings({ cwd: cwdDraft });
     void sendMessage(msg, cwdDraft);
@@ -100,6 +122,20 @@ export function Composer() {
         data-streaming={fx.streaming ? "" : undefined}
       >
         <div className="composer">
+          {caught && selected && (
+            <KeyIntercept
+              threadId={selected}
+              text={caught.text}
+              keyText={caught.key}
+              guess={caught.guess}
+              onEdit={() => {
+                setText(caught.text);
+                setCaught(null);
+                ref.current?.focus();
+              }}
+              onDone={() => setCaught(null)}
+            />
+          )}
           <textarea
             ref={ref}
             rows={1}
@@ -111,7 +147,14 @@ export function Composer() {
           <div className="composer-bar">
             <TierPicker />
             <ComposerSlot />
-            <PermissionsPicker settings={settings} />
+            {assist ? (
+              <span className="assist-perms" title="The setup assistant runs read only">
+                <IconShield size={12} />
+                Read only
+              </span>
+            ) : (
+              <PermissionsPicker settings={settings} />
+            )}
             <label className="cwd-input" title={`Working directory: ${cwdDraft}`}>
               {appShell ? (
                 <button
@@ -131,6 +174,7 @@ export function Composer() {
               )}
               <input
                 value={cwdDraft}
+                readOnly={assist}
                 onChange={(e) => setCwdDraft(e.target.value)}
                 spellCheck={false}
                 placeholder="working directory"

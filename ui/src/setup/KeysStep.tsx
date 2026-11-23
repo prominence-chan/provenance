@@ -1,10 +1,15 @@
 // The token pool's API keys (Models & accounts → Token pool): which providers have a key, and
-// a field to add one. Keys go to the router (PUT /pool/keys/{provider}), which keeps them in
+// for each, how to get one (the router's /pool/help: steps, its keys page, what to watch out
+// for) beside the field to add it; and a way to have Claude Code or Codex walk you through it
+// (PoolAssist.tsx). Keys go to the router (PUT /pool/keys/{provider}), which keeps them in
 // its own home, readable by this user only; they never come back to the page.
 
 import { useState } from "react";
+import type { KeyOutcome } from "./assist-text";
+import { FreeBadge, KeyForm, KeyGuide } from "./KeyGuide";
 import { Status } from "./parts";
-import { clearPoolKeys, setPoolKeys, type PoolProvider } from "./web";
+import { AssistNote, GeminiKeyPrompt } from "./PoolAssist";
+import type { PoolHelp, PoolHelpData, PoolProvider, WebAccounts } from "./web";
 
 /** What a person knows these providers as (the router knows them by catalog id). */
 const NAMES: Record<string, string> = {
@@ -23,14 +28,67 @@ const NAMES: Record<string, string> = {
   inception: "Inception",
 };
 
+/** "Groq" for "Groq (GroqCloud)": the name in a sentence or on a button. */
+export const shortName = (name: string): string => name.replace(/\s*\([^)]*\)$/, "") || name;
+
 export const providerName = (id: string): string =>
   NAMES[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 
-export function KeysStep({ pool, onChanged }: { pool: PoolProvider[]; onChanged: () => void }) {
-  const [editing, setEditing] = useState<string | null>(null);
-  // Providers that work first, then the ones a key would add; each group in catalog order.
-  const sorted = [...pool].sort((a, b) => Number(b.usable) - Number(a.usable));
+export function KeysStep({
+  pool,
+  help,
+  accounts,
+  focus,
+  onChanged,
+  onFallbacks,
+}: {
+  pool: PoolProvider[];
+  /** How to get each key, in the order to do them; null from a router without /pool/help. */
+  help: PoolHelpData | null;
+  /** The web accounts (a signed-in Gemini account points at Google's free key). */
+  accounts: WebAccounts | null;
+  /** Open this provider first (the Gemini prompt in the welcome). */
+  focus?: string | null;
+  onChanged: () => void;
+  /** The assistant needs a fallback first: go to the Fallbacks page. */
+  onFallbacks: () => void;
+}) {
+  // With the router's help: its recommended order, then any provider it doesn't explain, then
+  // the ones not worth setting up for free (folded, with why). Without it: providers that work
+  // first, then the ones a key would add; each group in catalog order.
+  const list = help?.providers ?? [];
+  const order = list.map((h) => h.id);
+  const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
+  const sorted = help
+    ? [...pool].sort((a, b) => rank(a.id) - rank(b.id))
+    : [...pool].sort((a, b) => Number(b.usable) - Number(a.usable));
+  const notWorth = sorted.filter((p) => helpOf(help, p.id)?.recommended === false);
+  const main = sorted.filter((p) => !notWorth.includes(p));
+  // One provider open at a time: at first the next one to set up, in the recommended order.
+  const [editing, setEditing] = useState<string | null>(() =>
+    focus && pool.some((p) => p.id === focus)
+      ? focus
+      : help
+        ? (main.find((p) => !p.usable && p.vars.length && helpOf(help, p.id))?.id ?? null)
+        : null,
+  );
+  const [showNotWorth, setShowNotWorth] = useState(
+    () => !!editing && notWorth.some((p) => p.id === editing),
+  );
   const working = pool.filter((p) => p.usable).length;
+  const row = (p: PoolProvider) => (
+    <KeyRow
+      key={p.id}
+      p={p}
+      help={helpOf(help, p.id)}
+      open={editing === p.id}
+      onOpen={() => setEditing(editing === p.id ? null : p.id)}
+      onDone={(o) => {
+        if (o === "removed" || o.kind === "working") setEditing(null);
+        onChanged();
+      }}
+    />
+  );
   return (
     <div className="setup-step">
       <div className="setup-site-head">
@@ -45,41 +103,73 @@ export function KeysStep({ pool, onChanged }: { pool: PoolProvider[]; onChanged:
         Free API tiers, pooled by tier. Each provider needs a free key from its own site; the router
         keeps it on this Mac, readable by you only.
       </p>
-      <ul className="setup-accounts setup-keys">
-        {sorted.map((p) => (
-          <KeyRow
-            key={p.id}
-            p={p}
-            open={editing === p.id}
-            onOpen={() => setEditing(editing === p.id ? null : p.id)}
-            onDone={() => {
-              setEditing(null);
-              onChanged();
-            }}
-          />
-        ))}
-      </ul>
+      <GeminiKeyPrompt
+        accounts={accounts}
+        pool={pool}
+        help={help}
+        onGet={() => {
+          setEditing("google");
+          requestAnimationFrame(() =>
+            document
+              .querySelector('.setup-keys li[data-pool="google"]')
+              ?.scrollIntoView({ block: "start", behavior: "smooth" }),
+          );
+        }}
+      />
+      {help && <AssistNote help={help} pool={pool} onFallbacks={onFallbacks} />}
+      <ul className="setup-accounts setup-keys">{main.map(row)}</ul>
+      {notWorth.length > 0 && (
+        <>
+          <button
+            className="setup-add key-notworth-toggle"
+            aria-expanded={showNotWorth}
+            onClick={() => setShowNotWorth((v) => !v)}
+          >
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              aria-hidden
+              style={{ transform: showNotWorth ? "rotate(90deg)" : undefined }}
+            >
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+            Not worth setting up for free ({notWorth.length})
+          </button>
+          {showNotWorth && (
+            <ul className="setup-accounts setup-keys key-notworth">{notWorth.map(row)}</ul>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
+const helpOf = (help: PoolHelpData | null, id: string): PoolHelp | undefined =>
+  help?.providers.find((h) => h.id === id);
+
 function KeyRow({
   p,
+  help,
   open,
   onOpen,
   onDone,
 }: {
   p: PoolProvider;
+  help: PoolHelp | undefined;
   open: boolean;
   onOpen: () => void;
-  onDone: () => void;
+  onDone: (o: KeyOutcome | "removed") => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
   const fromApp = p.vars.some((v) => v.from === "app");
   const fromEnv = p.vars.some((v) => v.from === "env");
   const missing = p.vars.filter((v) => !v.set);
+  const fullName = help?.name ?? providerName(p.id);
+  const name = shortName(fullName);
   let cls = "dot-off";
   let text = "Needs a key";
   if (p.usable && p.anonymous && !p.vars.some((v) => v.set)) {
@@ -93,95 +183,39 @@ function KeyRow({
     text = `Needs ${missing.map((v) => v.name).join(", ")}`;
   }
 
-  const save = async () => {
-    const vals = Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
-    if (!Object.keys(vals).length) return setErr("Paste the key first.");
-    setBusy(true);
-    setErr(null);
-    const r = await setPoolKeys(p.id, vals);
-    setBusy(false);
-    if (!r.ok) return setErr(r.detail);
-    setValues({});
-    onDone();
-  };
-  const remove = async () => {
-    setBusy(true);
-    setErr(null);
-    const r = await clearPoolKeys(p.id);
-    setBusy(false);
-    if (!r.ok) return setErr(r.detail);
-    onDone();
-  };
-
   return (
-    <li data-pool={p.id}>
+    <li data-pool={p.id} data-open={open || undefined}>
       <div className="setup-account">
         <div className="setup-account-text">
-          <span className="setup-account-name">{providerName(p.id)}</span>
+          <span className="setup-account-name">
+            {fullName}
+            <FreeBadge help={help} />
+          </span>
           <span className="setup-account-status">
             <Status cls={cls} text={text} />
-            <span className="meta">
-              {p.models} model{p.models === 1 ? "" : "s"}
-              {p.tiers.length ? ` · ${p.tiers.join(", ")}` : ""}
+            <span className="meta key-row-meta">
+              {help?.recommended === false && help.why_not
+                ? help.why_not
+                : !p.usable && help?.time_minutes
+                  ? `about ${help.time_minutes}\u00a0min`
+                  : `${p.models} model${p.models === 1 ? "" : "s"}${p.tiers.length ? ` · ${p.tiers.join(", ")}` : ""}`}
             </span>
           </span>
         </div>
         {p.vars.length > 0 && (
           <span className="setup-account-actions">
             <button className="btn" onClick={onOpen} aria-expanded={open}>
-              {open ? "Cancel" : p.vars.some((v) => v.set) ? "Change" : "Add key"}
+              {open ? (help ? "Hide" : "Cancel") : p.vars.some((v) => v.set) ? "Change" : "Add key"}
             </button>
           </span>
         )}
       </div>
-      {open && (
-        <form
-          className="setup-key-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void save();
-          }}
-        >
-          {p.vars.map((v, i) => (
-            <label key={v.name} className="setup-key-field">
-              <span className="meta">
-                {v.name}
-                {v.set ? ` · set${v.from === "env" ? " by the router's setup" : ""}` : ""}
-              </span>
-              <input
-                className="setup-input"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                autoFocus={i === 0}
-                placeholder={v.set ? "Paste a new value to replace it" : "Paste it here"}
-                value={values[v.name] ?? ""}
-                onChange={(e) => setValues({ ...values, [v.name]: e.target.value })}
-              />
-            </label>
-          ))}
-          <span className="setup-key-actions">
-            {fromApp && (
-              <button
-                type="button"
-                className="btn btn-danger"
-                disabled={busy}
-                onClick={() => void remove()}
-              >
-                Remove key
-              </button>
-            )}
-            <button type="submit" className="btn-primary" disabled={busy}>
-              {busy ? "Saving…" : "Save"}
-            </button>
-          </span>
-        </form>
-      )}
-      {err && (
-        <p className="setup-row-msg" role="alert">
-          {err}
-        </p>
-      )}
+      {open &&
+        (help ? (
+          <KeyGuide pool={p} help={help} name={name} onDone={onDone} />
+        ) : (
+          <KeyForm pool={p} name={name} autoFocus onDone={onDone} />
+        ))}
     </li>
   );
 }

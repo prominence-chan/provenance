@@ -7,6 +7,9 @@
 //   - GET /api/usage   -> which models served a turn (provenance-core /v1/pcore/usage), and what
 //                        fitting its history took (its "context" flags)
 //   - GET /api/fallbacks -> Claude Code / Codex health and models (fallback/health.ts; ?refresh=1)
+//   - POST /api/scratch?purpose=pool-setup -> an empty folder of the app's own
+//                        (<data>/scratch/Token pool setup, emptied each time): the working folder
+//                        of a thread that needs no project (the token pool's setup assistant)
 //   - /api/web/*, /api/pool/* -> provenance-core's setup API (accounts, sign-in window, browser,
 //                        per-site settings, API keys); the routes are shared/router-api.ts's table
 //   - WS  /rpc         -> JSON-RPC relay to `provenance app-server` (see bridge.ts)
@@ -23,7 +26,7 @@
 // Used by server/main.ts (the `npm run dev` / `npm start` CLI) and by the desktop
 // app (electron/main.ts), which runs it inside Electron's own Node.
 
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import http from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -43,6 +46,9 @@ import { getFallbacks, type FallbackEnv } from "./fallback/health.ts";
 import { AppServerProcess } from "./orchestrator/appserver.ts";
 import { capsFromEnv, OrchestratorBackend } from "./orchestrator/backend.ts";
 import { makeCallModel } from "./orchestrator/router.ts";
+
+/** POST /api/scratch?purpose=…: the app's own empty working folders, by purpose. */
+const SCRATCH: Record<string, string> = { "pool-setup": "Token pool setup" };
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
 const FALLBACK_TIERS = ["nova", "solstice", "ember", "spark"];
@@ -330,6 +336,29 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         router: { ...info, mode: extra?.mode, message: info.up ? undefined : extra?.message },
       };
       sendJson(res, body);
+      return true;
+    }
+    if (url.pathname === "/api/scratch") {
+      // A thread's working folder that is no project: new and empty each time, so an assistant
+      // running in it finds nothing (no keys, no .env) to read.
+      if (req.method !== "POST" || !req.headers.origin || !sameOrigin(req)) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ detail: "Forbidden" }));
+        return true;
+      }
+      for await (const _ of req) void _; // the body says nothing we need
+      // One folder per purpose, emptied for each new thread: the sidebar groups these threads
+      // under one readable name instead of a new random folder each time.
+      const name = SCRATCH[url.searchParams.get("purpose") ?? ""];
+      if (!name) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ detail: "Unknown purpose" }));
+        return true;
+      }
+      const dir = path.join(dataDir, "scratch", name);
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+      sendJson(res, { path: realpathSync(dir) });
       return true;
     }
     if (url.pathname === "/api/fallbacks") {

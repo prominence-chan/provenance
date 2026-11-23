@@ -39,6 +39,38 @@ export interface WireAccount {
   /** Its background browser window is open. */
   window_open?: boolean;
   login: { state: LoginState; reason: string | null };
+  /** The site's plan for this account (ChatGPT: free or a paid one); absent from older routers. */
+  plan?: AccountPlan;
+  /** The plan's own name, e.g. "plus", "pro" (null when free or unknown). */
+  plan_label?: string | null;
+  /** The router won't use the account until the person confirms this (POST …/confirm). */
+  needs_confirmation?: "paid_plan" | null;
+  /** Saved sign-in and automatic re-sign-in (…/autologin); absent from older routers. */
+  autologin?: WireAutologin;
+}
+
+export type AccountPlan = "free" | "paid" | "unknown";
+
+export type AutologinResult = "ok" | "wrong_password" | "needs_person" | "error";
+
+export interface WireAutologin {
+  /** This site can be signed back in with a username and password. */
+  supported: boolean;
+  /** Why not, in words to show (e.g. a Google account), when unsupported. */
+  reason: string | null;
+  enabled: boolean;
+  /** A sign-in is saved (the password is in the keychain; it never comes back). */
+  saved: boolean;
+  username: string | null;
+  attempts_today: number;
+  last_try: { at: number; result: AutologinResult; detail: string | null } | null;
+}
+
+/** PUT /web/accounts/{provider}/{account}/autologin. Write-only: never answered with the password. */
+export interface AutologinPut {
+  agree: true;
+  username: string;
+  password: string;
 }
 
 export interface WireWebModel {
@@ -159,6 +191,75 @@ export interface KeysPut {
   values: Record<string, string>;
 }
 
+// ---- GET /pool/help: how to get each provider's key, in the order to do them -------------
+// provenance-core's pool_help.yaml, as JSON (docs/pool-keys.md there is the same data as text).
+
+export interface WirePoolHelpField {
+  /** The variable it fills, as /pool/keys names it (e.g. CLOUDFLARE_ACCOUNT_ID). */
+  var: string;
+  label: string;
+  /** Where to find it, one line (may use **bold** and `code`). */
+  where: string;
+  format?: string;
+}
+
+/** anonymous: no key at all; free: a standing free allowance; trial: one-time credit; none. */
+export type FreeTier = "anonymous" | "free" | "trial" | "none";
+
+/** seen: the docs name the controls; docs-only: the page's labels couldn't be read; uncertain. */
+export type HelpConfidence = "seen" | "docs-only" | "uncertain";
+
+export interface WirePoolHelpProvider {
+  /** The /pool/keys provider id. */
+  id: string;
+  name: string;
+  free_tier?: FreeTier;
+  confidence?: HelpConfidence | string;
+  /** false: not worth setting up for the free pool (shown last, with `why_not`). Default true. */
+  recommended?: boolean;
+  why_not?: string | null;
+  what_you_get: string;
+  /** One sentence (older drafts: a list). */
+  needs: string | string[];
+  time_minutes: number;
+  signup_url: string;
+  keys_url: string;
+  /** The variable the key goes into (PUT /pool/keys/{id} {values: {<key_var>: key}}); null: none. */
+  key_var?: string | null;
+  /** Numbered steps with the site's own control names (may use **bold** and `code`). */
+  steps: string[];
+  /** What a key looks like, e.g. "Starts with `gsk_`." */
+  key_format: string;
+  /** A regular expression a key matches, for a soft check (never blocks saving). */
+  key_pattern?: string | null;
+  extra_fields?: WirePoolHelpField[];
+  gotchas: string[];
+  terms_note?: string | null;
+  checked?: string;
+  sources?: string[];
+  /**
+   * Web accounts whose signed-in browser profile can open this provider's key page already signed
+   * in (Google AI Studio with a Gemini account): POST /web/open {provider, account, url}.
+   */
+  open_with?: { provider: string; account: string }[];
+}
+
+export interface WirePoolHelp {
+  checked?: string;
+  /** Rules for an assistant walking someone through these (the app's setup assistant gets them). */
+  assistant_notes?: string[];
+  providers: WirePoolHelpProvider[];
+}
+
+// ---- POST/GET /web/open: a provider's key page in a signed-in web account's window ---------
+
+/** POST /web/open. `url` must be that provider entry's keys_url or signup_url. */
+export interface WebOpenPost {
+  provider: string;
+  account: string;
+  url: string;
+}
+
 // ---- GET /health -------------------------------------------------------------------------
 
 export interface WireHealth {
@@ -208,13 +309,21 @@ export const ROUTER_ROUTES: ProxyRoute[] = [
   { method: "GET", path: /^\/web\/accounts$/ },
   { method: "POST", path: /^\/web\/accounts$/ },
   { method: "DELETE", path: new RegExp(`^/web/accounts/${ID}$`) },
+  { method: "PUT", path: new RegExp(`^/web/accounts/${ID}/${ID}/autologin$`) },
+  { method: "PATCH", path: new RegExp(`^/web/accounts/${ID}/${ID}/autologin$`) },
+  { method: "DELETE", path: new RegExp(`^/web/accounts/${ID}/${ID}/autologin$`) },
+  { method: "POST", path: new RegExp(`^/web/accounts/${ID}/${ID}/autologin/try$`) },
+  { method: "POST", path: new RegExp(`^/web/accounts/${ID}/${ID}/confirm$`) },
   { method: "PATCH", path: new RegExp(`^/web/providers/${ID}$`) },
   { method: "GET", path: /^\/web\/login$/ },
   { method: "POST", path: /^\/web\/login$/ },
   { method: "POST", path: /^\/web\/login\/cancel$/ },
   { method: "POST", path: /^\/web\/login\/show$/ },
   { method: "POST", path: /^\/web\/browser\/prepare$/ },
+  { method: "GET", path: /^\/web\/open$/ },
+  { method: "POST", path: /^\/web\/open$/ },
   { method: "GET", path: /^\/pool\/keys$/ },
+  { method: "GET", path: /^\/pool\/help$/ },
   { method: "PUT", path: new RegExp(`^/pool/keys/${ID}$`) },
   { method: "DELETE", path: new RegExp(`^/pool/keys/${ID}$`) },
 ];

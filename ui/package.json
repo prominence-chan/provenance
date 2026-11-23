@@ -16,6 +16,7 @@
     "smoke": "node scripts/smoke.ts",
     "e2e": "node scripts/e2e.ts",
     "e2e:setup": "node scripts/setup-e2e.ts",
+    "e2e:accounts": "node scripts/accounts-e2e.ts",
     "e2e:router": "node scripts/router-e2e.ts",
     "check:fallback": "node scripts/fallback-check.ts",
     "check:orchestrator": "node scripts/orchestrator-check.ts",

@@ -19,6 +19,14 @@
 //   POST /mock/usage    {"turn", "context": {"trimmed": 2}}  what /v1/pcore/usage says of a turn
 //                       ({"pruned": {before, after}} alone: what it says of every turn's pruning)
 //   GET  /mock/state    the whole state, for assertions
+//   GET  /mock/requests every /web/* and /pool/* request as it arrived {method, url, body}, for
+//                       checking where a password or key went (POST /mock/requests clears it)
+//   POST /mock/older    {"older": true}  a router from before saved sign-ins, plans and /pool/help:
+//                       those fields are left out and their routes 404 (the rest works);
+//                       {"older": false, "noWebOpen": true}: everything but POST/GET /web/open
+//   POST /mock/plan     {"provider", "account", "plan", "plan_label"?, "needs_confirmation"?}
+//   POST /mock/autologin {"result": "ok" | "wrong_password" | "needs_person" | "error", "detail"?}
+//                       what the next try (POST …/autologin/try) comes to
 //
 // The router API it mirrors (provenance-core's server.py; shapes in shared/router-api.ts):
 //   GET  /web/accounts, POST /web/accounts {account}, DELETE /web/accounts/{id}
@@ -28,7 +36,11 @@
 //   POST /web/login/cancel {provider, account} -> {state:"idle"}
 //   POST /web/login/show {provider, account}   -> {state, shown}
 //   POST /web/browser/prepare
-//   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}
+//   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}, GET /pool/help
+//   PUT/PATCH/DELETE /web/accounts/{provider}/{account}/autologin, POST …/autologin/try
+//   POST /web/accounts/{provider}/{account}/confirm {confirm: "paid_plan"}
+//   POST /web/open {provider, account, url}, GET /web/open: a key page in a signed-in account's
+//                       window (closed by POST /web/login/cancel for that account)
 //   GET  /health, /v1/models, /v1/sources, /v1/pcore/usage
 //   GET  /codex-sub/open/_health  the Codex pass-through is there (this mock has no token: key "open")
 // Everything a real router has that matters to the screen; what a real one does beyond it
@@ -36,11 +48,14 @@
 
 import http from "node:http";
 import type {
+  AccountPlan,
+  AutologinResult,
   LoginState,
   WindowBounds,
   WireAccount,
   WireBrowser,
   WireHealth,
+  WirePoolHelpProvider,
   WirePoolProvider,
   WireProvider,
   WireSource,
@@ -74,11 +89,25 @@ interface Settings {
 /** The token pool's providers: one with a key from the router's setup, one anonymous, one without. */
 const POOL: Omit<WirePoolProvider, "usable">[] = [
   {
+    id: "groq",
+    anonymous: false,
+    vars: [{ name: "GROQ_API_KEY", set: false, from: null }],
+    models: 5,
+    tiers: ["solstice", "spark"],
+  },
+  {
     id: "google",
     anonymous: false,
     vars: [{ name: "GEMINI_API_KEY", set: false, from: null }],
     models: 7,
     tiers: ["solstice", "ember"],
+  },
+  {
+    id: "mistral",
+    anonymous: false,
+    vars: [{ name: "MISTRAL_API_KEY", set: false, from: null }],
+    models: 2,
+    tiers: ["solstice"],
   },
   { id: "kilo", anonymous: true, vars: [], models: 10, tiers: ["solstice", "ember", "spark"] },
   {
@@ -92,6 +121,151 @@ const POOL: Omit<WirePoolProvider, "usable">[] = [
     tiers: ["solstice", "ember"],
   },
 ];
+
+/**
+ * GET /pool/help, shaped like provenance-core's pool_help.yaml (the router's `main`), with entries
+ * cut down from it. Google AI Studio opens in Gemini's signed-in window (Account B in "signed").
+ */
+const HELP: WirePoolHelpProvider[] = [
+  {
+    id: "kilo",
+    name: "Kilo AI Gateway",
+    free_tier: "anonymous",
+    confidence: "seen",
+    what_you_get:
+      "The gateway's free models with no account and no key: 200 requests per hour per IP address.",
+    needs: "Nothing. No account, no key.",
+    time_minutes: 0,
+    signup_url: "https://app.kilo.ai",
+    keys_url: "https://app.kilo.ai",
+    key_var: null,
+    steps: ["Nothing to do. The pool calls Kilo's free models without a key."],
+    key_format: "Not needed.",
+    gotchas: [
+      "Other free models may be routed to providers that log prompts and outputs and use them to improve their services.",
+    ],
+    checked: "2026-11-23",
+  },
+  {
+    id: "google",
+    name: "Google Gemini API (Google AI Studio)",
+    free_tier: "free",
+    confidence: "seen",
+    what_you_get:
+      "The Gemini Flash and Flash-Lite models and Gemma, free of charge on the free tier.",
+    needs: "A Google account, age 18 or over, a supported country. No card.",
+    time_minutes: 3,
+    signup_url: "https://aistudio.google.com",
+    keys_url: "https://aistudio.google.com/api-keys",
+    key_var: "GEMINI_API_KEY",
+    steps: [
+      "Open https://aistudio.google.com/api-keys and sign in with your Google account.",
+      "Accept the Terms of Service when asked.",
+      "If no key is listed, click **Create API key**.",
+      "Copy the key from the **API Keys** page and paste it into the app.",
+    ],
+    key_format: "Not documented; expect one long string with no spaces.",
+    gotchas: [
+      'Free-tier prompts and answers are used by Google: "Google uses the content you submit to the Services and any generated responses to provide, improve, and develop Google products", and "human reviewers may read, annotate, and process your API input and output".',
+      "Limits are per project, not per key, so a second key in the same project adds nothing.",
+    ],
+    terms_note: "Google's terms require age 18+.",
+    checked: "2026-11-23",
+    open_with: [{ provider: "gemini-web", account: "b" }],
+  },
+  {
+    id: "groq",
+    name: "Groq (GroqCloud)",
+    free_tier: "free",
+    confidence: "docs-only",
+    what_you_get:
+      "openai/gpt-oss-120b and qwen/qwen3.8-27b on the Free plan: 1,000 requests/day each.",
+    needs: "A Groq account. No card for the Free plan.",
+    time_minutes: 3,
+    signup_url: "https://console.groq.com/home",
+    keys_url: "https://console.groq.com/keys",
+    key_var: "GROQ_API_KEY",
+    steps: [
+      "Open https://console.groq.com/keys and sign up or log in.",
+      "On the **API Keys** page click **Create API Key**.",
+      "Give the key a name such as `provenance` and confirm.",
+      "Copy the key when it is shown and paste it into the app.",
+    ],
+    key_format: "Starts with `gsk_`.",
+    key_pattern: "^gsk_\\S+$",
+    gotchas: [
+      "Groq says it does not retain inference data by default and may not use inputs or outputs for training unless you allow it.",
+    ],
+    checked: "2026-11-23",
+  },
+  {
+    id: "cloudflare",
+    name: "Cloudflare Workers AI",
+    free_tier: "free",
+    confidence: "seen",
+    what_you_get: "10,000 Neurons a day of open models on Cloudflare's network.",
+    needs: "A Cloudflare account. No card.",
+    time_minutes: 5,
+    signup_url: "https://dash.cloudflare.com/sign-up",
+    keys_url: "https://dash.cloudflare.com/profile/api-tokens",
+    key_var: "CLOUDFLARE_API_TOKEN",
+    steps: [
+      "Open the API tokens page and sign in.",
+      "Click **Create Token**, then **Use template** next to **Workers AI**.",
+      "Click **Continue to summary**, then **Create Token**, and copy it.",
+    ],
+    key_format: "40 letters, digits, - and _.",
+    key_pattern: "^[A-Za-z0-9_-]{40}$",
+    extra_fields: [
+      {
+        var: "CLOUDFLARE_ACCOUNT_ID",
+        label: "Account ID",
+        where: "On the Workers AI page under **Use REST API** > **Get Account ID**.",
+      },
+    ],
+    gotchas: ["The token needs the Workers AI template, not a global API key."],
+    checked: "2026-11-23",
+  },
+  {
+    id: "mistral",
+    name: "Mistral AI",
+    free_tier: "none",
+    recommended: false,
+    why_not: "No free API tier.",
+    confidence: "seen",
+    what_you_get: "Mistral's models, paid per token.",
+    needs: "A Mistral account and a payment method.",
+    time_minutes: 5,
+    signup_url: "https://console.mistral.ai",
+    keys_url: "https://console.mistral.ai/api-keys",
+    key_var: "MISTRAL_API_KEY",
+    steps: ["Open the API keys page and click **Create new key**."],
+    key_format: "32 letters and digits.",
+    gotchas: [],
+    checked: "2026-11-23",
+  },
+];
+
+const ASSISTANT_NOTES = [
+  "Walk the person through one provider at a time, in this order; skip any whose `needs` they cannot meet.",
+  "The person does every click themselves. Never create an account, sign in, accept terms or request a key for them.",
+];
+
+/** Sites whose accounts can be signed back in with a saved password, and why the others can't. */
+const AUTOLOGIN: Record<string, string | null> = {
+  "chatgpt-web": null,
+  "qwen-web": null,
+  "gemini-web":
+    "Google accounts can't be signed back in by Provenance: Google asks for more than a password.",
+};
+
+interface Autologin {
+  enabled: boolean;
+  saved: boolean;
+  username: string | null;
+  attempts_today: number;
+  last_try: { at: number; result: AutologinResult; detail: string | null } | null;
+}
 
 const PROVIDERS: Provider[] = [
   {
@@ -179,6 +353,24 @@ interface State {
   down: boolean;
   /** An older router without the /web API (every /web route 404s). */
   legacy: boolean;
+  /** A router from before saved sign-ins, plans and /pool/help. */
+  older: boolean;
+  /** provider id -> account id -> its plan */
+  plans: Record<
+    string,
+    Record<
+      string,
+      { plan: AccountPlan; plan_label: string | null; needs_confirmation: "paid_plan" | null }
+    >
+  >;
+  /** provider id -> account id -> saved sign-in (the password itself is never kept here) */
+  autologin: Record<string, Record<string, Autologin>>;
+  /** What the next POST …/autologin/try comes to. */
+  nextTry: { result: AutologinResult; detail: string | null };
+  /** A key page open in a signed-in web account's window (POST /web/open). */
+  webOpen: { provider: string; account: string; url: string } | null;
+  /** A router with /pool/help but without /web/open. */
+  noWebOpen: boolean;
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -220,6 +412,12 @@ function scenario(name: string): State {
     lastBounds: null,
     down: false,
     legacy: false,
+    older: false,
+    plans: {},
+    autologin: {},
+    nextTry: { result: "ok", detail: null },
+    webOpen: null,
+    noWebOpen: false,
   };
   for (const p of PROVIDERS) {
     st.accounts[p.id] = { main: blank(p.cap) };
@@ -236,6 +434,10 @@ function scenario(name: string): State {
       email: "ada@example.com",
       today: 38,
     });
+    st.plans["chatgpt-web"] = {
+      main: { plan: "free", plan_label: null, needs_confirmation: null },
+      b: { plan: "paid", plan_label: "plus", needs_confirmation: null },
+    };
     Object.assign(st.accounts["chatgpt-web"].b, {
       signed_in: true,
       checked_at: t - 5400,
@@ -332,6 +534,31 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
   return true;
 }
 
+function autologinBody(provider: string, account: string) {
+  const reason = AUTOLOGIN[provider];
+  const al = state.autologin[provider]?.[account];
+  return {
+    supported: reason === null,
+    reason: reason ?? null,
+    enabled: al?.enabled ?? false,
+    saved: al?.saved ?? false,
+    username: al?.username ?? null,
+    attempts_today: al?.attempts_today ?? 0,
+    last_try: al?.last_try ?? null,
+  };
+}
+
+function newer(provider: string, account: string) {
+  if (state.older) return {};
+  const plan = state.plans[provider]?.[account];
+  return {
+    plan: plan?.plan ?? ("unknown" as const),
+    plan_label: plan?.plan_label ?? null,
+    needs_confirmation: plan?.needs_confirmation ?? null,
+    autologin: autologinBody(provider, account),
+  };
+}
+
 function providerBody(p: Provider): WireProvider {
   const set = state.settings[p.id];
   return {
@@ -350,6 +577,7 @@ function providerBody(p: Provider): WireProvider {
         ...a,
         daily_cap: set.daily_cap,
         signing_in: ["preparing", "open", "verifying"].includes(a.login.state),
+        ...newer(p.id, id),
       };
     }),
   };
@@ -444,9 +672,21 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+const raws = new WeakMap<http.IncomingMessage, string>();
+async function rawBody(req: http.IncomingMessage): Promise<string> {
+  const had = raws.get(req);
+  if (had !== undefined) return had;
   let raw = "";
   for await (const chunk of req) raw += chunk;
+  raws.set(req, raw);
+  return raw;
+}
+
+/** Every /web/* and /pool/* request as it arrived (GET /mock/requests). */
+let requests: { method: string; url: string; body: string }[] = [];
+
+async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await rawBody(req);
   try {
     const v = JSON.parse(raw || "{}");
     return v && typeof v === "object" ? v : {};
@@ -484,6 +724,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (p === "/mock/finish") {
       const { provider, account } = target(body);
       const ok = finish(provider, account, body.ok !== false, body.reason as string | undefined);
+      if (ok && typeof body.plan === "string")
+        (state.plans[provider] ??= {})[account] = {
+          plan: body.plan as AccountPlan,
+          plan_label: (body.plan_label as string) ?? null,
+          needs_confirmation:
+            body.plan === "paid" && provider === "chatgpt-web" ? "paid_plan" : null,
+        };
       return send(res, ok ? 200 : 409, { ok });
     }
     if (p === "/mock/usage") {
@@ -493,6 +740,31 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       return send(res, 200, { ok: true });
     }
     if (p === "/mock/state") return send(res, 200, state);
+    if (p === "/mock/requests") {
+      if (m === "POST") requests = [];
+      return send(res, 200, requests);
+    }
+    if (p === "/mock/older") {
+      state.older = body.older !== false;
+      state.noWebOpen = body.noWebOpen === true;
+      return send(res, 200, { older: state.older, noWebOpen: state.noWebOpen });
+    }
+    if (p === "/mock/plan") {
+      const { provider, account } = target(body);
+      (state.plans[provider] ??= {})[account] = {
+        plan: (body.plan as AccountPlan) ?? "unknown",
+        plan_label: (body.plan_label as string) ?? null,
+        needs_confirmation: body.needs_confirmation === "paid_plan" ? "paid_plan" : null,
+      };
+      return send(res, 200, { ok: true });
+    }
+    if (p === "/mock/autologin") {
+      state.nextTry = {
+        result: (body.result as AutologinResult) ?? "ok",
+        detail: (body.detail as string) ?? null,
+      };
+      return send(res, 200, { ok: true });
+    }
     return send(res, 404, { detail: "Not Found" });
   }
 
@@ -501,8 +773,78 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return;
   }
 
+  if (p.startsWith("/web/") || p.startsWith("/pool/"))
+    requests.push({ method: m, url: req.url ?? p, body: m === "GET" ? "" : await rawBody(req) });
   if (state.legacy && (p.startsWith("/web/") || p.startsWith("/pool/") || p === "/health"))
     return send(res, 404, { detail: "Not Found" });
+  const acct = /^\/web\/accounts\/([^/]+)\/([^/]+)\/(autologin|autologin\/try|confirm)$/.exec(p);
+  if (acct || (p === "/pool/help" && m === "GET")) {
+    if (state.older) return send(res, 404, { detail: "Not Found" });
+    if (!acct)
+      return send(res, 200, {
+        checked: "2026-11-23",
+        assistant_notes: ASSISTANT_NOTES,
+        providers: HELP,
+      });
+    const [provider, account, what] = [
+      decodeURIComponent(acct[1]),
+      decodeURIComponent(acct[2]),
+      acct[3],
+    ];
+    const a = state.accounts[provider]?.[account];
+    if (!a) return send(res, 404, { detail: "No such site or account." });
+    if (what === "confirm" && m === "POST") {
+      const body = await readJson(req);
+      if (body.confirm !== "paid_plan") return send(res, 409, { detail: "Nothing to confirm." });
+      const plan = state.plans[provider]?.[account];
+      if (plan) plan.needs_confirmation = null;
+      return send(res, 200, { ...a, id: account, ...newer(provider, account) });
+    }
+    if (AUTOLOGIN[provider] !== null)
+      return send(res, 409, { detail: AUTOLOGIN[provider] ?? "Not supported here." });
+    const al = ((state.autologin[provider] ??= {})[account] ??= {
+      enabled: false,
+      saved: false,
+      username: null,
+      attempts_today: 0,
+      last_try: null,
+    });
+    if (what === "autologin" && m === "PUT") {
+      const body = await readJson(req);
+      if (body.agree !== true)
+        return send(res, 409, { detail: "Saving a sign-in needs the person's agreement." });
+      const username = typeof body.username === "string" ? body.username.trim() : "";
+      if (!username || typeof body.password !== "string" || !body.password)
+        return send(res, 409, { detail: "Both the username and the password are needed." });
+      // The real router puts the password in the keychain; the mock keeps nothing of it.
+      Object.assign(al, { saved: true, enabled: true, username, last_try: null });
+      return send(res, 200, autologinBody(provider, account));
+    }
+    if (what === "autologin" && m === "PATCH") {
+      const body = await readJson(req);
+      if (typeof body.enabled !== "boolean")
+        return send(res, 409, { detail: "enabled is true or false." });
+      if (!al.saved) return send(res, 409, { detail: "No sign-in is saved for this account." });
+      al.enabled = body.enabled;
+      if (al.enabled && al.last_try?.result === "wrong_password") al.last_try = null;
+      return send(res, 200, autologinBody(provider, account));
+    }
+    if (what === "autologin" && m === "DELETE") {
+      delete state.autologin[provider][account];
+      return send(res, 200, autologinBody(provider, account));
+    }
+    if (what === "autologin/try" && m === "POST") {
+      await readJson(req);
+      if (!al.saved || !al.enabled)
+        return send(res, 409, { detail: "Saved sign-in is off for this account." });
+      al.attempts_today++;
+      al.last_try = { at: now(), ...state.nextTry };
+      if (state.nextTry.result === "wrong_password") al.enabled = false;
+      if (state.nextTry.result === "ok") Object.assign(a, { signed_in: true, checked_at: now() });
+      return send(res, 200, autologinBody(provider, account));
+    }
+    return send(res, 404, { detail: "Not Found" });
+  }
   if (p === "/health" && m === "GET") return send(res, 200, healthBody());
   if (p === "/v1/models" && m === "GET") {
     return send(res, 200, {
@@ -600,6 +942,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           return send(res, 409, { detail: `${pp.id} does not use ${k}.` });
         if (typeof v !== "string" || !v.trim())
           return send(res, 409, { detail: `${k} must be one line of text.` });
+        if (v.includes("REVOKED"))
+          return send(res, 409, { detail: `${pp.id} refused this key: it has been revoked.` });
         state.keys[k] = true;
       }
     }
@@ -647,9 +991,36 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     return send(res, 200, { state: a.login.state });
   }
+  if (p === "/web/open") {
+    if (state.older || state.noWebOpen) return send(res, 404, { detail: "Not Found" });
+    if (m === "GET")
+      return send(
+        res,
+        200,
+        state.webOpen ? { state: "open", ...state.webOpen } : { state: "idle" },
+      );
+    if (m === "POST") {
+      const body = await readJson(req);
+      const { provider, account, a } = target(body);
+      const url = String(body.url ?? "");
+      if (!a || a.signed_in !== true)
+        return send(res, 409, { detail: "That account isn't signed in." });
+      const ok = HELP.some(
+        (h) =>
+          (h.keys_url === url || h.signup_url === url) &&
+          h.open_with?.some((o) => o.provider === provider && o.account === account),
+      );
+      if (!ok)
+        return send(res, 409, { detail: "That page can't be opened in this account's window." });
+      state.webOpen = { provider, account, url };
+      return send(res, 200, { state: "open", ...state.webOpen });
+    }
+  }
   if (p === "/web/login/cancel" && m === "POST") {
-    const { a } = target(await readJson(req));
+    const { provider, account, a } = target(await readJson(req));
     if (!a) return send(res, 404, { detail: "No such site or account." });
+    if (state.webOpen?.provider === provider && state.webOpen.account === account)
+      state.webOpen = null;
     a.login = { state: "idle", reason: null };
     return send(res, 200, { state: "idle" });
   }

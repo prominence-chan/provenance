@@ -20,6 +20,7 @@ import {
   cancelLogin,
   getAccounts,
   getLogin,
+  getPoolHelp,
   getPoolKeys,
   loginActive,
   nextAccountId,
@@ -27,6 +28,7 @@ import {
   removeAccount,
   startLogin,
   type Login,
+  type PoolHelpData,
   type PoolProvider,
   type Unavailable,
   type WebAccounts,
@@ -37,7 +39,7 @@ export { IconAccounts } from "./parts"; // the sidebar foot imports it from here
 type View =
   | { step: "sites" }
   | { step: "site"; provider: string }
-  | { step: "signin"; provider: string; account: string }
+  | { step: "signin"; provider: string; account: string; switching?: boolean }
   | { step: "ready"; provider: string; account: string }
   | { step: "keys" }
   | { step: "fallbacks" };
@@ -55,6 +57,7 @@ export function SetupDialog() {
   const ref = useRef<HTMLDialogElement>(null);
   const [data, setData] = useState<WebAccounts | null>(null);
   const [pool, setPool] = useState<PoolProvider[] | null>(null);
+  const [help, setHelp] = useState<PoolHelpData | null>(null);
   const [unavailable, setUnavailable] = useState<Unavailable | null>(null);
   const [view, setView] = useState<View>({ step: "sites" });
   const [login, setLogin] = useState<Login | null>(null);
@@ -72,8 +75,9 @@ export function SetupDialog() {
     return r;
   }, []);
   const reloadPool = useCallback(async () => {
-    const r = await getPoolKeys();
+    const [r, h] = await Promise.all([getPoolKeys(), getPoolHelp()]);
     setPool(r.ok ? r.value : null); // an older router can't set keys from the app: no pool row
+    setHelp(h); // an older router has no instructions: the keys page is as it was
     if (r.ok) void refreshSources(); // a key changes what the tier picker offers
   }, []);
 
@@ -131,9 +135,13 @@ export function SetupDialog() {
       const s = r.value.state;
       if (loginActive(s)) seenActive.current = true;
       if (s === "signed_in") {
+        // The accounts first, so Ready opens on what the router now knows of the account (a
+        // paid plan asks before it is used) instead of changing under the person.
+        stop = true;
+        window.clearInterval(t);
         setLogin(r.value);
+        await reload();
         setView({ step: "ready", provider, account });
-        void reload();
         void refreshSources(); // the tier picker lists the site's models now
         return;
       }
@@ -146,8 +154,8 @@ export function SetupDialog() {
       }
       if (s !== "idle") setLogin(r.value);
     };
-    void tick();
     const t = window.setInterval(() => void tick(), 1000);
+    void tick();
     return () => {
       stop = true;
       window.clearInterval(t);
@@ -159,7 +167,7 @@ export function SetupDialog() {
       ? null
       : (data?.providers.find((p) => p.id === view.provider) ?? null);
 
-  const signIn = async (p: string, a: string) => {
+  const signIn = async (p: string, a: string, switching = false) => {
     setBusy(`signin:${a}`);
     setRowMsg(null);
     setClosedNote(null);
@@ -172,7 +180,7 @@ export function SetupDialog() {
     }
     seenActive.current = loginActive(r.value.state);
     setLogin(r.value);
-    setView({ step: "signin", provider: p, account: a });
+    setView({ step: "signin", provider: p, account: a, switching });
   };
 
   const cancel = async (p: string, a: string, to: View) => {
@@ -260,7 +268,14 @@ export function SetupDialog() {
     );
   } else if (view.step === "keys") {
     body = pool ? (
-      <KeysStep pool={pool} onChanged={() => void reloadPool()} />
+      <KeysStep
+        pool={pool}
+        help={help}
+        accounts={data}
+        focus={startView === "keys" ? startProvider : null}
+        onChanged={() => void reloadPool()}
+        onFallbacks={() => setView({ step: "fallbacks" })}
+      />
     ) : (
       <div className="setup-loading" aria-busy="true" aria-label="Loading" />
     );
@@ -284,7 +299,8 @@ export function SetupDialog() {
         busy={busy}
         rowMsg={rowMsg}
         note={closedNote}
-        onSignIn={(a) => void signIn(provider.id, a)}
+        onSignIn={(a, switching) => void signIn(provider.id, a, switching)}
+        onReload={() => void reload().then(() => void refreshSources())}
         onAdd={async () => {
           const id = nextAccountId(provider.accounts.map((a) => a.id));
           setBusy("add");
@@ -316,10 +332,11 @@ export function SetupDialog() {
         login={login}
         browser={data.browser}
         busy={busy}
+        switching={view.switching}
         onCancel={() =>
           void cancel(provider.id, view.account, { step: "site", provider: provider.id })
         }
-        onRetry={() => void signIn(provider.id, view.account)}
+        onRetry={() => void signIn(provider.id, view.account, view.switching)}
         onBack={back}
       />
     );
@@ -330,6 +347,8 @@ export function SetupDialog() {
         account={view.account}
         onDone={close}
         onAnother={() => setView({ step: "sites" })}
+        onDifferent={() => void signIn(provider.id, view.account, true)}
+        onReload={() => void reload().then(() => void refreshSources())}
       />
     );
   }
