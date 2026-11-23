@@ -1,6 +1,7 @@
 // Shape of the whole UI state. Protocol objects (Thread, ThreadItem, ...) are
 // stored as-is from app-server; the "View" types only add what the UI needs on top.
 
+import { DEFAULT_ORCHESTRATOR, type Orchestrator } from "../../shared/orchestrator-api";
 import type { FallbacksInfo } from "../../shared/fallback-api";
 import type { SourceNeeds, WireSource } from "../../shared/router-api";
 import type { BackendId } from "../fallback/model";
@@ -105,6 +106,8 @@ export interface Settings {
   approvalPolicy: Extract<AskForApproval, string>;
   sandbox: SandboxMode;
   fallbacks: FallbackPrefs;
+  /** Who drives new tier threads (shared/orchestrator-api.ts). */
+  orchestrator: Orchestrator;
 }
 
 export interface Notice {
@@ -170,6 +173,7 @@ export function initialState(): AppState {
       cwd: "",
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
+      orchestrator: DEFAULT_ORCHESTRATOR,
       ...loadSettings(),
       fallbacks: { claude: false, codex: "off", ...loadSettings().fallbacks },
     },
@@ -179,7 +183,7 @@ export function initialState(): AppState {
     usage: {},
     fallbackInfo: null,
     threadBackend: {},
-    backendReady: { main: false, codex: false, fallback: false },
+    backendReady: { main: false, codex: false, fallback: false, orchestrator: false },
   };
 }
 

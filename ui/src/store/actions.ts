@@ -1,10 +1,11 @@
 // Side-effecting actions: everything that talks to app-server lives here.
 // Components call these; they never touch the RpcClient directly.
 //
-// Three backends speak the same protocol (fallback/model.ts): the main app-server on the tiers
+// Four backends speak the same protocol (fallback/model.ts): the main app-server on the tiers
 // (/rpc), a second one for "Codex through Provenance" (/rpc/codex, connected once that mode is
-// on or was used), and the Claude Code / Codex CLI threads (/rpc/fallback). Threads from all
-// three share one list and one store; each request goes to the thread's own backend.
+// on or was used), the Claude Code / Codex CLI threads (/rpc/fallback), and the tier threads an
+// experimental orchestrator drives (/rpc/orchestrator). Threads from all of them share one list
+// and one store; each request goes to the thread's own backend.
 
 import type { FallbacksInfo } from "../../shared/fallback-api";
 import { threadBrief } from "../fallback/brief";
@@ -48,9 +49,20 @@ const readyGeneration: Record<BackendId, number | null> = {
   main: null,
   codex: null,
   fallback: null,
+  orchestrator: null,
 };
-const everReady: Record<BackendId, boolean> = { main: false, codex: false, fallback: false };
-const readyWaiters: Record<BackendId, (() => void)[]> = { main: [], codex: [], fallback: [] };
+const everReady: Record<BackendId, boolean> = {
+  main: false,
+  codex: false,
+  fallback: false,
+  orchestrator: false,
+};
+const readyWaiters: Record<BackendId, (() => void)[]> = {
+  main: [],
+  codex: [],
+  fallback: [],
+  orchestrator: [],
+};
 
 /** A server request (approval) as kept in the store: which backend asked. */
 type TaggedRequest = ServerRequest & { _backend?: BackendId };
@@ -129,6 +141,7 @@ const clients: Record<BackendId, RpcClient> = {
   main: rpc,
   codex: makeClient("codex"),
   fallback: makeClient("fallback"),
+  orchestrator: makeClient("orchestrator"),
 };
 const connected = new Set<BackendId>();
 
@@ -171,6 +184,19 @@ export function backendOf(threadId: string): BackendId {
 
 const clientFor = (threadId: string) => clients[backendOf(threadId)];
 
+/**
+ * Where a message on `model` goes. A tier thread stays with the orchestrator it was started with
+ * (the stock harness on "main", or the orchestrator backend); a new tier thread follows the
+ * composer's orchestrator choice.
+ */
+function targetBackend(model: string, threadId: string | null): BackendId {
+  const b = backendOfModel(model);
+  if (b !== "main") return b;
+  const cur = threadId ? backendOf(threadId) : null;
+  if (cur === "main" || cur === "orchestrator") return cur;
+  return getState().settings.orchestrator === "provenance" ? "main" : "orchestrator";
+}
+
 /** Called on first connect and whenever a backend restarts. */
 async function onReady(id: BackendId, reconnected: boolean): Promise<void> {
   await clients[id].request("initialize", {
@@ -204,6 +230,7 @@ export async function boot(): Promise<void> {
   });
   connect("main");
   connect("fallback");
+  connect("orchestrator");
   if (getState().settings.fallbacks.codex === "provenance" || codexUsed()) connect("codex");
   void refreshSources(); // once, so a pinned source shows its label; the picker refreshes it
   void refreshFallbacks();
@@ -405,7 +432,7 @@ export async function openThread(threadId: string, opts: { force?: boolean } = {
     // A thread stays on what it runs on: opening one that lives elsewhere (Claude Code, Codex)
     // points the picker at its model, so the next message continues it there.
     const cur = getState().settings.model;
-    if (model && getState().selectedThreadId === threadId && backendOfModel(cur) !== backend)
+    if (model && getState().selectedThreadId === threadId && targetBackend(cur, threadId) !== backend)
       updateSettings({ model });
   } catch (e) {
     setState((s) => {
@@ -443,7 +470,7 @@ export async function archiveThread(threadId: string): Promise<void> {
 export async function sendMessage(text: string, cwdInput?: string): Promise<void> {
   const { settings } = getState();
   let threadId = getState().selectedThreadId;
-  const target = backendOfModel(settings.model);
+  const target = targetBackend(settings.model, threadId);
   let prompt = text;
   let carriedFrom: string | null = null;
   if (threadId && backendOf(threadId) !== target) {
@@ -522,6 +549,8 @@ async function startThread(target: BackendId, settings: Settings, cwd: string): 
     cwd: cwd || null,
     approvalPolicy: settings.approvalPolicy,
     sandbox: settings.sandbox,
+    // The orchestrator backend keeps this for the thread's life (server/orchestrator/backend.ts).
+    ...(target === "orchestrator" ? { config: { orchestrator: settings.orchestrator } } : {}),
   });
   const threadId = started.thread.id;
   if (target === "codex") {
@@ -581,7 +610,9 @@ const usageInFlight = new Set<string>();
  */
 export async function loadTurnUsage(threadId: string, turn: TurnView, retry = true): Promise<void> {
   // The router knows the tiers' turns and Codex-through-Provenance ones (its pass-through), not the CLIs'.
-  if (usageInFlight.has(turn.id) || backendOf(threadId) === "fallback") return;
+  const where = backendOf(threadId);
+  // (nor an orchestrator's: its calls aren't made under the visible thread's id)
+  if (usageInFlight.has(turn.id) || where === "fallback" || where === "orchestrator") return;
 
   usageInFlight.add(turn.id);
   const q = new URLSearchParams({ key: threadId, turn: turn.id });
