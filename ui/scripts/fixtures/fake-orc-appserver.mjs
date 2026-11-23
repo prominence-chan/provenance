@@ -9,10 +9,14 @@
 //   BLOCKME    reports STATUS: BLOCKED          SLOWTASK   runs until interrupted
 //   ASKME      asks approval for its command    NOCAP      the turn fails: no model available
 //   LOOPCALLS  keeps making "model requests"    IDLETASK   says nothing until interrupted
+//   FLAKY      the turn fails (no model) while the number in $FAKE_ORC_LOG.flaky is above 0
+//              (each failure takes one off)     QUIETTASK  silent for 1.3 s, then finishes
+//   MAKES <name>  also writes that file in the folder
 //   (anything else: a command, an edit, STATUS: DONE)
+// command/exec honours `env` (laid over this process's environment), like the real one.
 // Appends what it was asked to $FAKE_ORC_LOG as JSON lines.
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 
@@ -120,6 +124,23 @@ async function workerTurn(threadId, turnId, brief) {
     });
     return finish("failed", "no model in spark (or below) could serve this: [pool: 429]");
   }
+  if (/FLAKY/.test(task)) {
+    const file = `${process.env.FAKE_ORC_LOG}.flaky`;
+    const left = existsSync(file) ? Number(readFileSync(file, "utf8")) || 0 : 0;
+    if (left > 0) {
+      writeFileSync(file, String(left - 1));
+      const message = /STREAM/.test(task)
+        ? "stream disconnected before completion: error sending request"
+        : "no model in spark (or below) could serve this: [pool: 429]";
+      note("error", { threadId, turnId, willRetry: false, error: { message } });
+      return finish("failed", message);
+    }
+  }
+  if (/QUIETTASK/.test(task)) {
+    await sleep(1300); // a slow model, not a silent one
+    say(`RESULT: finished "${task}"\nSTATUS: DONE`);
+    return finish("completed");
+  }
   if (/IDLETASK/.test(task)) {
     while (!th.interrupted) await sleep(20); // the model never answers
     return finish("interrupted");
@@ -177,6 +198,8 @@ async function workerTurn(threadId, turnId, brief) {
   };
   item("item/started", { ...file, status: "inProgress" });
   item("item/completed", file);
+  const makes = /MAKES ([\w.-]+)/.exec(task)?.[1];
+  if (makes) writeFileSync(`${th.cwd}/${makes}`, "[]\n");
   usage(threadId, turnId, 7500 + brief.length / 4);
   if (th.interrupted) return finish("interrupted");
   if (/BLOCKME/.test(task))
@@ -197,13 +220,16 @@ function exec(id, p) {
       cwd: p.cwd,
       sandboxPolicy: p.sandboxPolicy,
       timeoutMs: p.timeoutMs,
+      env: p.env ? { PATH: p.env.PATH ?? null, TERM: p.env.TERM ?? null } : null,
     },
   });
   const type = p.sandboxPolicy?.type;
   const script = p.command.join(" ");
   const writes =
     script.includes("base64 --decode") ||
-    (p.command[1] === "-lc" && /(^|\s)(touch|rm|mkdir)\s|>/.test(p.command[2] ?? ""));
+    (p.command.length === 3 &&
+      !p.command[2].includes("__ORC_ENV_BEGIN__") &&
+      /(^|\s)(touch|rm|mkdir)\s|>/.test(p.command[2] ?? ""));
   if (type === "readOnly" && writes)
     return send({
       id,
@@ -212,6 +238,7 @@ function exec(id, p) {
   const child = spawn(p.command[0], p.command.slice(1), {
     cwd: p.cwd,
     stdio: ["ignore", "pipe", "pipe"],
+    env: p.env ? { ...process.env, ...p.env } : process.env,
   });
   if (p.processId) procs.set(p.processId, child);
   let stdout = "";
@@ -255,7 +282,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       th.turnId = turnId;
       th.interrupted = false;
       const brief = p.input?.[0]?.text ?? "";
-      log({ turnStart: { threadId: p.threadId, brief } });
+      log({
+        turnStart: {
+          threadId: p.threadId,
+          brief,
+          approvalPolicy: p.approvalPolicy,
+          sandboxPolicy: p.sandboxPolicy,
+        },
+      });
       send({ id: m.id, result: { turn: { id: turnId, items: [], status: "inProgress" } } });
       return void workerTurn(p.threadId, turnId, brief);
     }

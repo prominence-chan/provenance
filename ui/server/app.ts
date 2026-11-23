@@ -41,7 +41,7 @@ import { codexHomeEnv, prepareCodexHome } from "./fallback/codex-home.ts";
 import { codexPvArgs, maskCodexSubKey } from "./fallback/codex-route.ts";
 import { getFallbacks, type FallbackEnv } from "./fallback/health.ts";
 import { AppServerProcess } from "./orchestrator/appserver.ts";
-import { OrchestratorBackend } from "./orchestrator/backend.ts";
+import { capsFromEnv, OrchestratorBackend } from "./orchestrator/backend.ts";
 import { makeCallModel } from "./orchestrator/router.ts";
 
 /** Used when tierlm is unreachable. Keep in sync with tierlm's tier names. */
@@ -184,6 +184,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         },
       })),
     callModel: makeCallModel(conn),
+    caps: capsFromEnv(process.env),
   });
 
   async function fetchTiers(): Promise<{ tiers: string[]; source: string }> {

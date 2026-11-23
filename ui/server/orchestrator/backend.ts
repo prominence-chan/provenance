@@ -19,7 +19,13 @@
 //
 // Threads are JSON files in <dir>/threads, written when a turn starts, after each task / step and
 // when it ends. Ids start with ORCHESTRATOR_ID_PREFIX. Besides its turns a thread stores the only
-// context it carries: Experimental's notes, Hyperexperimental's summary.
+// context it carries: Experimental's notes (with the tasks still to do), Hyperexperimental's
+// summary and the request it has not finished. A turn that ends early (no model after the
+// retries, a guard, an interrupt) leaves them as they stand, so "continue" picks the work up.
+//
+// A plain model call that the router can't serve is retried inside the turn (Run.model): the
+// waits are Caps.retryDelaysMs, a status line in the thread says so, and turn/interrupt ends the
+// wait at once. Guards and timeouts read the monotonic clock (clock.ts).
 
 import { randomUUID } from "node:crypto";
 import {
@@ -40,11 +46,18 @@ import {
 } from "../../shared/orchestrator-api.ts";
 import { agentMessage, userMessage, type Item } from "../fallback/items.ts";
 import type { AppServer } from "./appserver.ts";
+import { mono } from "./clock.ts";
 import { runExperimental } from "./experimental.ts";
 import { runHyper } from "./hyper.ts";
 import { clipMiddle, emptyNotes, notesText, type Notes } from "./notes.ts";
 import { PROMPT_BUDGET, type Prompt } from "./prompts.ts";
-import { RouterError, routerProblem, type CallModel } from "./router.ts";
+import {
+  CALL_TIMEOUT_MS,
+  RouterError,
+  retryReason,
+  routerProblem,
+  type CallModel,
+} from "./router.ts";
 
 type Json = Record<string, unknown>;
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
@@ -61,13 +74,30 @@ export interface Caps {
   steps: number;
   /** Every model call of the turn: plain calls plus the workers' own requests. */
   modelCalls: number;
-  /** One worker's turn. */
+  /** Experimental: one worker's own budget of model requests (then it is stopped, and the planner revises). */
+  workerCalls: number;
+  /** Experimental: one worker's own budget of time (the same). */
   workerMs: number;
   /** A worker with nothing running and no word from the model for this long is stopped. */
   workerIdleMs: number;
   /** One RUN action. */
   commandMs: number;
+  /**
+   * The waits before each retry of a model call the router couldn't serve (429, 5xx, no answer,
+   * a timeout, an empty reply), and of a worker whose own request failed for good. When they are
+   * used up the turn ends with the plain message. [] means no retries.
+   */
+  retryDelaysMs: number[];
 }
+
+/** 5 s, 20 s, 60 s, 120 s: four retries, about three and a half minutes of patience per call. */
+export const RETRY_DELAYS_MS = [5_000, 20_000, 60_000, 120_000];
+/**
+ * A worker's own budget. In the benchmark's transcripts a worker that finished its task used 2
+ * to 15 requests and under 3 minutes; the one that circled used 70 requests and 20 minutes.
+ */
+export const WORKER_CALLS = 24;
+export const WORKER_MINUTES = 10;
 
 export const DEFAULT_CAPS: Caps = {
   tasks: 10,
@@ -75,10 +105,36 @@ export const DEFAULT_CAPS: Caps = {
   replans: 3,
   steps: 14,
   modelCalls: 80,
-  workerMs: 20 * 60_000,
+  workerCalls: WORKER_CALLS,
+  workerMs: WORKER_MINUTES * 60_000,
   workerIdleMs: 5 * 60_000,
   commandMs: 120_000,
+  retryDelaysMs: RETRY_DELAYS_MS,
 };
+
+/**
+ * Caps set from the environment (the app passes its own): PROVENANCE_ORC_RETRY_S="5,20,60,120"
+ * (seconds before each retry; "0" or "off" for none), PROVENANCE_ORC_WORKER_CALLS,
+ * PROVENANCE_ORC_WORKER_MINUTES. Anything unreadable is ignored.
+ */
+export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
+  const out: Partial<Caps> = {};
+  const retry = env.PROVENANCE_ORC_RETRY_S?.trim();
+  if (retry) {
+    if (/^(0|off|none)$/i.test(retry)) out.retryDelaysMs = [];
+    else {
+      const secs = retry.split(/[\s,]+/).map(Number);
+      if (secs.length <= 12 && secs.every((n) => Number.isFinite(n) && n >= 0 && n <= 3600))
+        out.retryDelaysMs = secs.map((n) => Math.round(n * 1000));
+    }
+  }
+  const calls = Number(env.PROVENANCE_ORC_WORKER_CALLS);
+  if (Number.isInteger(calls) && calls >= 2 && calls <= 500) out.workerCalls = calls;
+  const minutes = Number(env.PROVENANCE_ORC_WORKER_MINUTES);
+  if (Number.isFinite(minutes) && minutes >= 0.5 && minutes <= 240)
+    out.workerMs = Math.round(minutes * 60_000);
+  return out;
+}
 
 export type Role = "planner" | "revise" | "final" | "think" | "translate" | "summarize";
 
@@ -87,6 +143,8 @@ export interface Stats {
   orchestrator: Orchestrator;
   /** Plain calls + worker requests. */
   modelCalls: number;
+  /** Times a model call (or a worker whose request failed) was tried again after a wait. */
+  retries: number;
   roles: Partial<Record<Role, { calls: number; maxPromptChars: number }>>;
   workers: number;
   workerCalls: number;
@@ -162,6 +220,8 @@ export interface ThreadRecord {
   notes: Notes;
   /** Hyperexperimental: the summary. */
   summary: string;
+  /** Hyperexperimental: the request a turn ended without finishing ("continue" takes it up). */
+  openGoal?: string | null;
   archived?: boolean;
 }
 
@@ -463,7 +523,7 @@ export class OrchestratorBackend {
   private async runTurn(t: ThreadRecord, run: Run): Promise<void> {
     const threadId = t.thread.id;
     const turn = run.turn;
-    const t0 = Date.now();
+    const t0 = mono.now();
     let failure: string | null = null;
     try {
       if (t.orchestrator === "experimental") await runExperimental(run);
@@ -475,8 +535,13 @@ export class OrchestratorBackend {
         run.stats.stopped = e.message;
         const standing = t.orchestrator === "experimental" ? notesText(t.notes) : t.summary;
         run.say(`${e.message}${standing ? `\n\nWhere things stand:\n\n${standing}` : ""}`);
-      } else if (e instanceof StopTurn) failure = e.message;
-      else {
+      } else if (e instanceof StopTurn) {
+        failure = e.message;
+        // What was done stays in the notes / summary: the next message can take it up.
+        const kept = t.orchestrator === "experimental" ? t.notes.done.length > 0 : !!t.summary;
+        if (e.kind === "router" && kept)
+          failure += ' What was done so far is kept: send "continue" to go on from there.';
+      } else {
         failure = `The orchestrator hit an error: ${errText(e)}`;
         this.log(`turn failed in ${threadId}:`, e);
       }
@@ -491,7 +556,7 @@ export class OrchestratorBackend {
       this.broadcast("item/completed", { threadId, turnId: turn.id, item });
     }
     turn.completedAt = Math.floor(Date.now() / 1000);
-    turn.durationMs = Date.now() - t0;
+    turn.durationMs = Math.round(mono.now() - t0);
     turn.status = run.interrupted ? "interrupted" : failure ? "failed" : "completed";
     turn.error =
       failure && !run.interrupted
@@ -613,6 +678,7 @@ export class Run {
     this.stats = {
       orchestrator: thread.orchestrator,
       modelCalls: 0,
+      retries: 0,
       roles: {},
       workers: 0,
       workerCalls: 0,
@@ -660,8 +726,24 @@ export class Run {
   }
 
   save(): void {
-    this.savedAt = Date.now();
+    this.savedAt = mono.now();
     this.backend.save(this.thread);
+  }
+
+  /** Wait, or throw Interrupted the moment the turn is interrupted. */
+  sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (this.interrupted || this.ac.signal.aborted) return reject(new Interrupted());
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new Interrupted());
+      };
+      const timer = setTimeout(() => {
+        this.ac.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      this.ac.signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   // ---- items -----------------------------------------------------------------------
@@ -692,12 +774,19 @@ export class Run {
       item,
     });
     // Keep the file close to what is on screen (a crash mid-task then loses a second, not the task).
-    if (Date.now() - this.savedAt > 1000) this.save();
+    if (mono.now() - this.savedAt > 1000) this.save();
   }
 
   /** A finished assistant message in the visible thread. */
   say(text: string): void {
     this.complete(agentMessage(this.nextId("msg"), text, true), true);
+  }
+
+  /** A status line: one message, rewritten in place under the same id (`done` ends it). */
+  status(id: string, text: string, done: boolean): void {
+    const item = agentMessage(id, text, done);
+    if (done) this.complete(item);
+    else this.start(item);
   }
 
   outputDelta(itemId: string, delta: string): void {
@@ -737,16 +826,26 @@ export class Run {
 
   /**
    * One plain model call in a new chat: instructions + one user message, nothing else. The
-   * prompt is held to PROMPT_BUDGET (an over-long input loses its middle). A router that can't
-   * serve (503, 429, a refused token) ends the turn with its message; another failure is tried
-   * once more.
+   * prompt is held to PROMPT_BUDGET (an over-long input loses its middle).
+   *
+   * A call the router can't serve now (429, 5xx, no answer, a timeout, a failed stream, an empty
+   * reply) is tried again after each of caps.retryDelaysMs, with a status line in the thread;
+   * interrupt ends the wait at once. Only when the waits are used up, or the failure is one that
+   * waiting can't cure (a refused token), does the turn end with the plain message. The call
+   * counts once against the turn's model calls however often it is tried.
    */
   async model(role: Role, prompt: Prompt, maxOutputTokens?: number): Promise<string> {
     const room = Math.max(1000, PROMPT_BUDGET - prompt.instructions.length);
     const input = prompt.input.length > room ? clipMiddle(prompt.input, room) : prompt.input;
-    for (let attempt = 0; ; attempt++) {
+    this.check();
+    this.spend();
+    const wait = new ModelWait(this);
+    // Calls that hang until their own timeout must not stretch the patience to an hour: no new
+    // try once the waits plus one call's timeout have passed.
+    const t0 = mono.now();
+    const patience = this.caps.retryDelaysMs.reduce((a, b) => a + b, 0) + CALL_TIMEOUT_MS;
+    for (;;) {
       this.check();
-      this.spend();
       try {
         const reply = await this.backend.callModel({
           model: this.thread.model,
@@ -755,6 +854,7 @@ export class Run {
           signal: this.ac.signal,
           maxOutputTokens,
         });
+        wait.end(true);
         const promptChars = prompt.instructions.length + input.length;
         const r = (this.stats.roles[role] ??= { calls: 0, maxPromptChars: 0 });
         r.calls++;
@@ -773,9 +873,12 @@ export class Run {
       } catch (e) {
         if (this.interrupted || this.ac.signal.aborted) throw new Interrupted();
         if (e instanceof StopTurn) throw e;
-        const status = e instanceof RouterError ? e.status : -1;
-        const final = [503, 429, 401, 403].includes(status) || attempt >= 1;
-        if (!final) continue;
+        const retryable = e instanceof RouterError ? e.retryable : true;
+        if (retryable && wait.left > 0 && mono.now() - t0 < patience) {
+          await wait.pause(retryReason(e));
+          continue;
+        }
+        wait.end(false);
         throw new StopTurn(
           "router",
           e instanceof RouterError
@@ -804,6 +907,69 @@ export class Run {
   }
 }
 
+/**
+ * The waits of one thing that needs a model and can't get one (a plain call, a worker): the
+ * schedule is caps.retryDelaysMs, and the thread shows one status line for it, rewritten at each
+ * retry ("Waiting for a free model… retry 2 in 20 s") and closed when the wait is over.
+ */
+export class ModelWait {
+  private run: Run;
+  private id: string | null = null;
+  private t0 = 0;
+  /** Retries made so far. */
+  retries = 0;
+
+  constructor(run: Run) {
+    this.run = run;
+  }
+
+  /** Retries still allowed. */
+  get left(): number {
+    return this.run.caps.retryDelaysMs.length - this.retries;
+  }
+
+  /** Show the status line and wait out the next delay. Throws Interrupted on interrupt. */
+  async pause(why: string): Promise<void> {
+    const ms = this.run.caps.retryDelaysMs[this.retries] ?? 0;
+    this.retries++;
+    this.run.stats.retries++;
+    if (!this.id) {
+      this.id = this.run.nextId("wait");
+      this.t0 = mono.now();
+    }
+    this.run.status(
+      this.id,
+      `Waiting for a free model… retry ${this.retries} in ${seconds(ms)} (${why}).`,
+      false,
+    );
+    try {
+      await this.run.sleep(ms);
+    } catch (e) {
+      this.run.status(this.id, `Stopped while waiting for a free model (${why}).`, true);
+      throw e;
+    }
+  }
+
+  /** Close the status line (a no-op when nothing was waited for). */
+  end(ok: boolean): void {
+    if (!this.id) return;
+    const n = `${this.retries} ${this.retries === 1 ? "retry" : "retries"}`;
+    const took = seconds(mono.now() - this.t0);
+    this.run.status(
+      this.id,
+      ok ? `Waited ${took} for a free model (${n}).` : `No model became free in ${took} (${n}).`,
+      true,
+    );
+    this.id = null;
+    this.retries = 0;
+  }
+}
+
+function seconds(ms: number): string {
+  const s = ms / 1000;
+  return s >= 10 || Number.isInteger(s) ? `${Math.round(s)} s` : `${s.toFixed(1)} s`;
+}
+
 // ---- helpers ---------------------------------------------------------------------------
 
 export function sandboxMode(v: unknown): SandboxMode | null {
@@ -828,6 +994,24 @@ export function sandboxPolicyFor(mode: SandboxMode, cwd: string): Json {
     return {
       type: "workspaceWrite",
       writableRoots: [cwd],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+  return { type: "readOnly", networkAccess: false };
+}
+
+/**
+ * The preset's sandbox as the page sends it with turn/start for a normal thread
+ * (src/store/actions.ts sandboxPolicyFor): the thread's own folder is always writable under
+ * workspace write, so no root is named. Worker threads are sent the same.
+ */
+export function pageSandboxPolicy(mode: SandboxMode): Json {
+  if (mode === "danger-full-access") return { type: "dangerFullAccess" };
+  if (mode === "workspace-write")
+    return {
+      type: "workspaceWrite",
+      writableRoots: [],
       networkAccess: false,
       excludeTmpdirEnvVar: false,
       excludeSlashTmp: false,

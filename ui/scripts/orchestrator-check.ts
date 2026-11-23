@@ -12,6 +12,13 @@
 // job over three steps (write, run, replace), each call a single-message request, the summary
 // bound, the sandbox policy each action is run with, the loop guards, interrupt, "Ask every
 // time", read only, a router error; threads read back by a new backend, a turn cut off by a crash.
+// And what the benchmark asked for: a model call that fails is retried with a wait and a status
+// line (then succeeds; or gives up, keeps the notes / summary, and "continue" resumes); an empty
+// reply sent as response.failed is retried; interrupt during a wait; a worker whose model request
+// failed is run again; file bodies lifted from the think text and written verbatim; a WRITE with
+// no content refused and fed back; a plan that only looks gets a producing task, and a missing
+// deliverable is said; a worker out of budget is stopped and the plan revised; a planner that
+// declines is asked again; guards that ignore a wall clock jumping a day; the PATH a RUN sees.
 
 import {
   existsSync,
@@ -21,15 +28,36 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { AppServerProcess } from "../server/orchestrator/appserver.ts";
-import { OrchestratorBackend, type TraceEvent } from "../server/orchestrator/backend.ts";
-import { changedSince, snapshot, unwrap } from "../server/orchestrator/experimental.ts";
-import { lineDiff, mustAsk, replaceIn } from "../server/orchestrator/hyper.ts";
+import {
+  capsFromEnv,
+  DEFAULT_CAPS,
+  OrchestratorBackend,
+  RETRY_DELAYS_MS,
+  WORKER_CALLS,
+  WORKER_MINUTES,
+  type TraceEvent,
+} from "../server/orchestrator/backend.ts";
+import {
+  changedSince,
+  deliverablesIn,
+  snapshot,
+  unwrap,
+} from "../server/orchestrator/experimental.ts";
+import {
+  captureScript,
+  lineDiff,
+  mustAsk,
+  parseCapturedEnv,
+  replaceIn,
+  userShell,
+} from "../server/orchestrator/hyper.ts";
 import {
   addCommand,
   addDone,
@@ -42,13 +70,25 @@ import {
   reportSections,
 } from "../server/orchestrator/notes.ts";
 import {
+  isContinue,
+  liftFiles,
+  looksLikeRefusal,
   parseActions,
   parsePlan,
   parseReport,
   parseThought,
+  planProduces,
 } from "../server/orchestrator/parse.ts";
-import { BRIEF_BUDGET, PROMPT_BUDGET, SUMMARY_LIMIT } from "../server/orchestrator/prompts.ts";
-import { makeCallModel } from "../server/orchestrator/router.ts";
+import {
+  BRIEF_BUDGET,
+  plannerPrompt,
+  PROMPT_BUDGET,
+  SUMMARY_LIMIT,
+  thinkPrompt,
+  translatePrompt,
+  WORKER_BASE,
+} from "../server/orchestrator/prompts.ts";
+import { makeCallModel, RouterError } from "../server/orchestrator/router.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const log = (...a: unknown[]) => console.log("[orchestrator-check]", ...a);
@@ -183,8 +223,12 @@ That's all!`);
   check(none.none && !none.actions.length, "NONE");
   const bad = parseActions("WRITE: a.txt\nRUN: echo hi");
   check(
-    bad.actions.length === 1 && bad.actions[0].kind === "run" && bad.problems.length === 1,
-    "a WRITE with no content is reported, the rest still runs",
+    bad.actions.length === 1 &&
+      bad.actions[0].kind === "run" &&
+      bad.rejected.length === 1 &&
+      bad.rejected[0].at === 0 &&
+      /WRITE: a\.txt was not done: no content came with it/.test(bad.rejected[0].text),
+    "a WRITE with no content is refused, and says where in the step it stood",
   );
   const many = parseActions(Array.from({ length: 12 }, (_, i) => `RUN: echo ${i}`).join("\n"), 6);
   check(
@@ -198,6 +242,237 @@ That's all!`);
   check(
     si?.kind === "search" && si.pattern === "import os in sys" && si.path === "src/app",
     'SEARCH splits on the last " IN "',
+  );
+}
+
+log("file bodies: lifted from the think text, never copied");
+{
+  const thinkText = [
+    "Create the script and a data file, then run it.",
+    "",
+    "```file:lifted.py",
+    "import os",
+    "# RUN: rm -rf /   (a comment that looks like an action)",
+    'print("lifted", "$HOME `date` <<<")',
+    "```",
+    "",
+    "```bash",
+    "cat > here.txt <<'EOF'",
+    "line one $NOT_EXPANDED",
+    "WRITE: not-an-action.txt",
+    "EOF",
+    "python3 lifted.py",
+    "```",
+  ].join("\n");
+  const l = liftFiles(thinkText);
+  check(
+    l.files.length === 2 &&
+      l.files[0].path === "lifted.py" &&
+      l.files[0].content ===
+        'import os\n# RUN: rm -rf /   (a comment that looks like an action)\nprint("lifted", "$HOME `date` <<<")' &&
+      l.files[1].path === "here.txt" &&
+      l.files[1].content === "line one $NOT_EXPANDED\nWRITE: not-an-action.txt",
+    "a ```file:<path> block and a complete cat > heredoc are lifted, byte for byte",
+  );
+  check(
+    !l.plan.includes("import os") &&
+      !l.plan.includes("NOT_EXPANDED") &&
+      l.plan.includes(
+        '[file block: lifted.py (3 lines) is held by the executor; for it output only "WRITE: lifted.py", with no content]',
+      ) &&
+      l.plan.includes("[file block: here.txt (2 lines)") &&
+      l.plan.includes("python3 lifted.py"),
+    "the plan the translator sees has a marker for each, and the commands",
+  );
+  const viaWrite = parseActions(
+    "WRITE: lifted.py\nRUN: cat > here.txt\nRUN: python3 lifted.py",
+    8,
+    l.files,
+  );
+  check(
+    viaWrite.actions.map((a) => a.kind).join() === "write,write,run" &&
+      viaWrite.actions[0].kind === "write" &&
+      viaWrite.actions[0].content === l.files[0].content &&
+      viaWrite.actions[1].kind === "write" &&
+      viaWrite.actions[1].path === "here.txt" &&
+      !viaWrite.rejected.length,
+    "a bare WRITE: <path> gets the lifted body; a bare cat > <path> becomes that write",
+  );
+  const copied = parseActions(
+    "WRITE: ./lifted.py\n<<<\nimport os  # the translator's lossy copy\n>>>",
+    8,
+    l.files,
+  );
+  check(
+    copied.actions.some(
+      (a) => a.kind === "write" && a.path === "lifted.py" && a.content === l.files[0].content,
+    ) && !copied.actions.some((a) => a.kind === "write" && a.content.includes("lossy")),
+    "what the think step wrote wins over what the translator copied",
+  );
+  const forgot = parseActions("RUN: python3 lifted.py", 8, l.files);
+  check(
+    forgot.actions.map((a) => a.kind).join() === "write,write,run",
+    "a lifted file no action mentions is written first",
+  );
+  const abs = parseActions("WRITE: recover.py,", 8, [{ path: "/w/app/recover.py", content: "x" }]);
+  check(
+    abs.actions.length === 1 &&
+      abs.actions[0].kind === "write" &&
+      abs.actions[0].path === "/w/app/recover.py",
+    'a relative name with a stray comma ("WRITE: recover.py,") finds the block given by its full path',
+  );
+  // the three shapes the benchmark run lost a file on
+  const lost1 = parseActions("RUN: cat > /w/app/recover.py");
+  const lost2 = parseActions("WRITE: recover.py,\nRUN: python3 recover.py");
+  const lost3 = parseActions("RUN: cat > recover.py <<'PY'\nRUN: python3 recover.py");
+  check(
+    !lost1.actions.length &&
+      lost1.rejected.length === 1 &&
+      /no heredoc body/.test(lost1.rejected[0].text) &&
+      /```file:\/w\/app\/recover\.py/.test(lost1.rejected[0].text) &&
+      !lost1.none,
+    "cat > file with no heredoc is refused before it can run, and says how to give the file",
+  );
+  check(
+    lost2.rejected.length === 1 && lost2.rejected[0].at === 0 && lost2.actions.length === 1,
+    "WRITE with no body is refused; the action after it is kept apart (it won't run)",
+  );
+  check(
+    lost3.rejected.length === 1 && lost3.actions.length === 1 && lost3.actions[0].kind === "run",
+    "a heredoc opened with nothing under it is refused",
+  );
+  const emptyBody = parseActions("WRITE: a.txt\n<<<\n>>>\nREPLACE: b.txt\n<<<\n===\nnew\n>>>");
+  check(
+    emptyBody.rejected.length === 1 &&
+      /its content was empty/.test(emptyBody.rejected[0].text) &&
+      emptyBody.problems.length === 1 &&
+      !emptyBody.actions.length,
+    "a WRITE with an empty body and a REPLACE with no old text never become actions",
+  );
+  const here = parseActions("RUN: python3 - <<'PY'\nimport sys\nprint(1)\nPY\nRUN: echo done");
+  check(
+    here.actions.length === 2 &&
+      here.actions[0].kind === "run" &&
+      here.actions[0].command === "python3 - <<'PY'\nimport sys\nprint(1)\nPY" &&
+      !here.rejected.length,
+    "a RUN whose heredoc body follows on the next lines keeps it",
+  );
+  const cut = liftFiles("```file:half.py\nprint(1)\nprint(");
+  check(
+    !cut.files.length && cut.plan.includes("print("),
+    "a file block that is never closed is not lifted (half a file is not written)",
+  );
+  const label = liftFiles(
+    "1. Create the script `fix_wal.py` with this exact content:\n\n```python\nprint(1)\n```\n2. Run the script `fix_wal.py` to see the content:\n```bash\npython3 fix_wal.py\n```",
+  );
+  check(
+    label.files.length === 1 &&
+      label.files[0].path === "fix_wal.py" &&
+      label.files[0].content === "print(1)" &&
+      label.plan.includes("python3 fix_wal.py"),
+    'a fence under "Create `x` with this exact content:" is that file; a shell fence under a line naming a file is not',
+  );
+  const expanding = liftFiles("cat > a.sh <<EOF\necho $HOME\nEOF");
+  check(
+    !expanding.files.length,
+    "a heredoc the shell would expand ($ under an unquoted delimiter) is left to the shell",
+  );
+  const twoFiles = [
+    { path: "a/x.py", content: "1" },
+    { path: "b/x.py", content: "2" },
+  ];
+  check(
+    parseActions("WRITE: x.py", 8, twoFiles).rejected.length === 1 &&
+      parseActions("WRITE: b/x.py", 8, twoFiles).actions.some(
+        (a) => a.kind === "write" && a.content === "2",
+      ),
+    "a name that could mean two lifted files is not guessed at",
+  );
+}
+
+log("plans: refusals, continue, a plan that only looks");
+{
+  check(
+    looksLikeRefusal("I'm sorry, but I can't run commands on your computer.") &&
+      looksLikeRefusal("As an AI language model I don’t have access to your files.") &&
+      looksLikeRefusal("I cannot execute these; you'll need to run these yourself.") &&
+      !looksLikeRefusal("TASK 1: Run the tests\nDONE WHEN: they pass") &&
+      !looksLikeRefusal("The tests already pass; nothing to change."),
+    "a reply that declines to plan is recognised; a plan or an answer is not",
+  );
+  check(
+    [
+      "continue",
+      "Continue.",
+      "go on",
+      "ok, keep going",
+      "please continue",
+      "try again",
+      "resume from there",
+    ].every(isContinue) &&
+      !isContinue("continue by adding a README and a license file to the project") &&
+      !isContinue("add tests"),
+    '"continue" and its kin are a request to resume; a new request is not',
+  );
+  const looking = parsePlan(
+    "TASK 1: Inspect the folder with ls\nDONE WHEN: listed\nTASK 2: Dump the first bytes of main.db\nDONE WHEN: dumped",
+  ).tasks;
+  check(
+    !planProduces(looking, "Fix the WAL file and create recovered.json", ["recovered.json"]) &&
+      !planProduces(looking, "Repair the database", []) &&
+      planProduces(looking, "What is in this folder?", []) &&
+      planProduces([...looking, { title: "Write recovered.json from the rows", done: "" }], "x", [
+        "recovered.json",
+      ]) &&
+      planProduces([{ title: "Fix the import in app.py", done: "" }], "Fix the bug", []),
+    "a plan of looking only fails for a request that asks for something; a question may be all looking",
+  );
+  check(
+    plannerPrompt("x", "y", "", true).instructions.length < 3000 &&
+      thinkPrompt({ goal: "", folder: "", summary: "", results: "", step: 1, stepsLeft: 1 })
+        .instructions.length < 3000 &&
+      translatePrompt("", "", "").instructions.length < 3000 &&
+      WORKER_BASE.length < 3000,
+    "every role's instructions stay under the 3,000 characters the router's web path allows",
+  );
+  check(
+    /copy the file and work on the copy/.test(WORKER_BASE) && /read-only/.test(WORKER_BASE),
+    "a worker is told to copy input files before tools that may change them, and to prefer read-only modes",
+  );
+}
+
+log("router errors: which are worth waiting for; caps");
+{
+  const r = (status: number, m = "x") => new RouterError(status, m);
+  check(
+    [0, 429, 500, 502, 503, 504].every((c) => r(c).retryable) &&
+      [400, 401, 403, 404].every((c) => !r(c).retryable),
+    "429, 5xx and no answer are retried; a refused token or a bad request is not",
+  );
+  check(
+    r(502, "empty reply from kilo/x").empty && !r(502, "upstream reset").empty,
+    "an empty reply is told apart",
+  );
+  check(
+    RETRY_DELAYS_MS.join() === "5000,20000,60000,120000" &&
+      DEFAULT_CAPS.retryDelaysMs === RETRY_DELAYS_MS &&
+      DEFAULT_CAPS.workerCalls === WORKER_CALLS &&
+      DEFAULT_CAPS.workerMs === WORKER_MINUTES * 60_000 &&
+      DEFAULT_CAPS.workerCalls < DEFAULT_CAPS.modelCalls,
+    `defaults: waits of 5, 20, 60, 120 s; a worker gets ${WORKER_CALLS} requests and ${WORKER_MINUTES} minutes of its own`,
+  );
+  const c = capsFromEnv({
+    PROVENANCE_ORC_RETRY_S: "1, 2.5",
+    PROVENANCE_ORC_WORKER_CALLS: "9",
+    PROVENANCE_ORC_WORKER_MINUTES: "3",
+  });
+  check(
+    c.retryDelaysMs?.join() === "1000,2500" &&
+      c.workerCalls === 9 &&
+      c.workerMs === 180_000 &&
+      capsFromEnv({ PROVENANCE_ORC_RETRY_S: "off" }).retryDelaysMs?.length === 0 &&
+      Object.keys(capsFromEnv({ PROVENANCE_ORC_RETRY_S: "soon" })).length === 0,
+    "the waits and the worker budget can be set from the environment; nonsense is ignored",
   );
 }
 
@@ -307,7 +582,33 @@ const ROLES: [string, string][] = [
   ["Turn the PLAN into actions", "translate"],
   ["You keep the running summary", "summarize"],
 ];
-function answer(role: string, whole: string): string | number {
+/** Failures the stand-in router serves before it answers: by role and a word in the prompt. */
+type Fault = {
+  role: string;
+  match: RegExp;
+  /** An HTTP status, a stream that ends in response.failed ("empty reply"), or a blank reply. */
+  kind: number | "failed-empty" | "blank";
+  times: number;
+};
+const faults: Fault[] = [];
+const LIFT_THINK = [
+  "Create the script and a data file, then run it.",
+  "",
+  "```file:lifted.py",
+  "import os",
+  "# RUN: rm -rf /   (a comment that looks like an action)",
+  'print("lifted", "$HOME `date` <<<")',
+  "```",
+  "",
+  "```bash",
+  "cat > here.txt <<'EOF'",
+  "line one $NOT_EXPANDED",
+  "WRITE: not-an-action.txt",
+  "EOF",
+  "python3 lifted.py",
+  "```",
+].join("\n");
+function answer(role: string, whole: string, instructions = ""): string | number {
   const step = Number(/This is step (\d+)/.exec(whole)?.[1] ?? 0);
   // The planner and think are scripted by the request alone (the notes repeat older requests).
   const input =
@@ -318,6 +619,17 @@ function answer(role: string, whole: string): string | number {
     case "planner":
       if (/r503/.test(input)) return 503;
       if (/hello/.test(input)) return "ANSWER: Hi! Nothing to do in the folder.";
+      if (/declinetwice/.test(input)) return "I cannot access your files or run anything here.";
+      if (/decline/.test(input))
+        return instructions.includes("Your last reply said")
+          ? "TASK 1: Follow up on it\nDONE WHEN: done"
+          : "I'm sorry, but I can't run commands on your computer. You could run these yourself:\n\nls -la";
+      if (/inspectonly/.test(input))
+        return "TASK 1: Inspect the files with ls and dump the header of main.db\nDONE WHEN: listed";
+      if (/flaky/.test(input))
+        return "TASK 1: Set up\nDONE WHEN: ok\nTASK 2: FLAKY thing\nDONE WHEN: ok\nTASK 3: Wrap up\nDONE WHEN: ok";
+      if (/budget/.test(input)) return "TASK 1: LOOPCALLS circle";
+      if (/quiet/.test(input)) return "TASK 1: QUIETTASK think slowly";
       if (/multi/.test(input))
         return "Here's the plan:\n\n**Task 1:** Create `mathx.py` with add and mul\n- Done when: the file imports cleanly\n2) Write test_mathx.py covering both functions (done when: tests exist)\n### Step 3 - Run the tests\nAcceptance: pytest passes";
       if (/blocked/.test(input))
@@ -337,6 +649,7 @@ function answer(role: string, whole: string): string | number {
       return "TASK 1: Follow up on it\nDONE WHEN: done";
     case "revise":
       if (/BLOCKME forever/.test(input)) return "TASK 1: BLOCKME forever\nDONE WHEN: never";
+      if (/REQUEST:\ncalls/.test(input)) return "TASK 1: LOOPCALLS more";
       return "1. Do the thing another way\n   Done when: it works\n2. Use the thing";
     case "final":
       return "All done: the tasks finished.";
@@ -348,6 +661,21 @@ function answer(role: string, whole: string): string | number {
           return "Now replace the return line in mathx.py so it carries a comment, then search for def add and list the folder.";
         return "It printed 5.\n\nFINISHED: Created mathx.py with add(); running it printed 5.";
       }
+      if (/retryok/.test(input)) return "FINISHED: Got through.";
+      if (/retryfail/.test(input))
+        return /SUMMARY v/.test(whole) ? "FINISHED: Resumed fine." : "Run echo one.";
+      if (/emptyreply/.test(input)) return "FINISHED: After an empty reply.";
+      if (/liftjob/.test(input)) return step === 1 ? LIFT_THINK : "FINISHED: Lifted.";
+      if (/nobody/.test(input))
+        return step === 1
+          ? "Write big.py with the parser in it."
+          : step === 2
+            ? "I think we should consider things carefully."
+            : step === 3
+              ? "Here it is.\n\n```file:big.py\nprint('big')\n```\nThen run it with python3."
+              : "FINISHED: big.py written and run.";
+      if (/pathcheck/.test(input))
+        return step === 1 ? "Run echo PATHIS $PATH" : "FINISHED: Path seen.";
       if (/again/.test(input)) return "Run echo same once more.";
       if (/steps/.test(input)) return `Run echo step ${step}.`;
       if (/nothing/.test(input)) return "I think we should consider things carefully.";
@@ -360,6 +688,12 @@ function answer(role: string, whole: string): string | number {
       return "FINISHED: Nothing to do.";
     case "translate":
       if (/h503/.test(input)) return 503;
+      if (/echo one/.test(input)) return "RUN: echo one";
+      if (/file block: lifted\.py/.test(input))
+        return "WRITE: lifted.py\nRUN: cat > here.txt\nRUN: python3 lifted.py";
+      if (/big\.py with the parser/.test(input)) return "WRITE: big.py\nRUN: python3 big.py";
+      if (/file block: big\.py/.test(input)) return "WRITE: big.py\nRUN: python3 big.py";
+      if (/PATHIS/.test(input)) return "RUN: echo PATHIS $PATH";
       if (/create mathx\.py/.test(input))
         return 'Sure, here are the actions:\n\n1. **WRITE:** `mathx.py`\n```python\ndef add(a, b):\n    return a + b\n```\n2. RUN: `python3 -c "import mathx; print(mathx.add(2, 3))"`\n3. read: mathx.py lines 1-2';
       if (/replace the return line/.test(input))
@@ -392,7 +726,26 @@ const router = http.createServer((req, res) => {
       body,
     });
     if (/hangcall/.test(input)) return; // never answers: only an interrupt ends this call
-    const out = answer(role, input);
+    const fault = faults.find((f) => f.times > 0 && f.role === role && f.match.test(input));
+    if (fault) fault.times--;
+    if (fault?.kind === "failed-empty" || fault?.kind === "blank") {
+      res.writeHead(200, { "content-type": "text/event-stream", "x-pcore-model": "fake/empty" });
+      res.write(`event: x\ndata: ${JSON.stringify({ type: "response.created" })}\n\n`);
+      res.write(
+        `event: x\ndata: ${JSON.stringify(
+          fault.kind === "blank"
+            ? { type: "response.completed", response: { output: [] } }
+            : {
+                type: "response.failed",
+                response: {
+                  error: { code: "empty_reply", message: "empty reply from fake/empty" },
+                },
+              },
+        )}\n\n`,
+      );
+      return void res.end();
+    }
+    const out = fault ? (fault.kind as number) : answer(role, input, instructions);
     if (typeof out === "number") {
       res.writeHead(out, { "content-type": "application/json" });
       return void res.end(
@@ -431,11 +784,17 @@ writeFileSync(fakeLog, "");
 process.env.FAKE_ORC_LOG = fakeLog;
 type LogLine = {
   threadStart?: Record<string, unknown>;
-  turnStart?: { threadId: string; brief: string };
+  turnStart?: {
+    threadId: string;
+    brief: string;
+    approvalPolicy?: unknown;
+    sandboxPolicy?: { type: string; writableRoots?: string[]; networkAccess?: boolean };
+  };
   exec?: {
     command: string[];
     cwd: string;
     sandboxPolicy: { type: string; writableRoots?: string[] };
+    env: { PATH: string | null; TERM: string | null } | null;
   };
   interrupt?: string;
   terminate?: string;
@@ -448,10 +807,15 @@ const fake = () =>
     .filter(Boolean)
     .map((l) => JSON.parse(l) as LogLine);
 const traces: TraceEvent[] = [];
+// The shells the stand-in app-server starts read this folder's .zshrc, not the user's: it puts a
+// marker folder at the front of PATH, the way pyenv or nvm do from ~/.zshrc.
+const zdot = path.join(scratch, "zdot");
+mkdirSync(zdot);
+writeFileSync(path.join(zdot, ".zshrc"), 'export PATH="/orc-marker-bin:$PATH"\necho rc noise\n');
 const appServer = new AppServerProcess({
   bin: path.join(here, "fixtures/fake-orc-appserver.mjs"),
   runDir: path.join(dataDir, "run"),
-  env: () => ({}),
+  env: () => ({ ZDOTDIR: zdot }),
   log: () => {},
 });
 const CAPS = {
@@ -460,9 +824,11 @@ const CAPS = {
   replans: 3,
   steps: 4,
   modelCalls: 30,
+  workerCalls: 12,
   workerMs: 20_000,
   workerIdleMs: 1500,
   commandMs: 10_000,
+  retryDelaysMs: [30, 60, 90],
 };
 const makeBackend = () =>
   new OrchestratorBackend({
@@ -492,10 +858,12 @@ type TurnItem = {
 type Turn = {
   id: string;
   status: string;
+  durationMs?: number;
   items: TurnItem[];
   error: { message: string } | null;
   orchestration?: {
     modelCalls: number;
+    retries: number;
     workers: number;
     workerCalls: number;
     steps: number;
@@ -530,11 +898,11 @@ const until = async <T>(
   f: () => T | undefined | false | null,
   ms = 20_000,
 ): Promise<T> => {
-  const t0 = Date.now();
+  const t0 = performance.now(); // (one check below moves the wall clock)
   for (;;) {
     const v = f();
     if (v) return v;
-    if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
+    if (performance.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 25));
   }
 };
@@ -570,6 +938,7 @@ const stored = (id: string) =>
   JSON.parse(readFileSync(path.join(dataDir, "threads", `${id}.json`), "utf8")) as {
     notes: ReturnType<typeof emptyNotes>;
     summary: string;
+    openGoal?: string | null;
     orchestrator: string;
     turns: Turn[];
   };
@@ -671,10 +1040,29 @@ check(
   /LATER TASKS[^\n]*Run the tests/.test(briefs[1]) && !/LATER TASKS/.test(briefs[2]),
   "a brief names the later tasks as not its own",
 );
+check(
+  briefs.every((b) => !b.includes("STILL TO DO")) &&
+    briefs.every((b) => /copy it and work on the copy/.test(b) && /read-only modes/.test(b)),
+  "a brief carries the copy-before-you-open rule, and not the planner's to-do list",
+);
+const turnStarts = lines.filter((l) => l.turnStart).map((l) => l.turnStart!);
+check(
+  turnStarts.every(
+    (t) =>
+      t.approvalPolicy === "on-request" &&
+      t.sandboxPolicy?.type === "workspaceWrite" &&
+      t.sandboxPolicy.writableRoots?.length === 0 &&
+      t.sandboxPolicy.networkAccess === false,
+  ),
+  "a worker's turn/start carries the preset the way the page sends it for a normal thread",
+);
 let rec = stored(ex.id);
 check(
-  rec.orchestrator === "experimental" && rec.notes.done.length === 3 && rec.notes.files.length >= 1,
-  "the thread file keeps the orchestrator and the notes",
+  rec.orchestrator === "experimental" &&
+    rec.notes.done.length === 3 &&
+    rec.notes.files.length >= 1 &&
+    rec.notes.pending.length === 0,
+  "the thread file keeps the orchestrator and the notes; nothing is left to do",
 );
 check(notesText(rec.notes).length <= NOTES_LIMIT, "notes under the bound");
 {
@@ -842,8 +1230,8 @@ check(
   "model calls per turn: a worker that keeps calling is stopped",
 );
 check(
-  fake().filter((l) => l.interrupt).length === before + 1 && turn.orchestration?.modelCalls === 30,
-  "the worker was interrupted at the limit",
+  fake().filter((l) => l.interrupt).length === before + 3 && turn.orchestration?.modelCalls === 30,
+  "the worker was interrupted at the limit (after two were stopped at their own budget)",
 );
 
 const idleT = await start("experimental");
@@ -960,10 +1348,22 @@ check(
     ),
   `a 503 ends the turn with a plain message (${turn.error?.message.slice(0, 60)}…)`,
 );
-check(seen.length === 1, "and is not retried");
+check(
+  seen.length === 4 && turn.orchestration?.retries === 3 && turn.orchestration.modelCalls === 1,
+  "after the three waits of this check's schedule (four tries, counted as one call)",
+);
+check(
+  turn.items.filter((i) => i.type === "agentMessage").length === 1 &&
+    /^No model became free in .* \(3 retries\)\.$/.test(last(turn)),
+  `the waiting shows as one status line, closed when it gave up (${last(turn)})`,
+);
 check(
   notes.some((n) => n.method === "error" && n.params?.threadId === r5.id),
   "an error notification goes out",
+);
+check(
+  stored(r5.id).notes.requests[0] === "r503 please",
+  "the request is in the notes although nothing could plan it (a later continue has a goal)",
 );
 const nc = await start("experimental");
 await say(nc.id, "nocap now");
@@ -1082,13 +1482,54 @@ check(
 );
 lines = fake();
 const execs = lines.filter((l) => l.exec).map((l) => l.exec!);
+const isCapture = (e: (typeof execs)[number]) => (e.command[2] ?? "").includes("__ORC_ENV_BEGIN__");
+const isRun = (e: (typeof execs)[number]) => e.command.length === 3 && !isCapture(e);
 check(!lines.some((l) => l.threadStart), "no worker thread: actions run through command/exec");
+const zsh = /\/zsh$/.test(userShell());
+if (zsh) {
+  const caps = execs.filter(isCapture);
+  check(
+    caps.length === 1 &&
+      caps[0].command[0] === userShell() &&
+      caps[0].command[1] === "-lc" &&
+      caps[0].command[2] === captureScript(userShell()) &&
+      caps[0].sandboxPolicy.type === "readOnly",
+    "the shell environment is captured once, the harness's way (login shell + the rc file), read-only",
+  );
+  const runs = execs.filter(isRun);
+  check(
+    runs.length === 1 &&
+      runs[0].command[0] === userShell() &&
+      runs[0].command[1] === "-c" &&
+      runs[0].env?.PATH?.startsWith("/orc-marker-bin:"),
+    "RUN goes out as a non-login shell with the captured environment (the rc file's PATH first)",
+  );
+} else
+  log(`  (skipped: the login shell here is ${userShell()}, the PATH checks are written for zsh)`);
+{
+  const b64 = Buffer.from(
+    "PATH=/a:/b\0FOO=x=y\0PWD=/z\0SHLVL=2\0CODEX_SANDBOX=seatbelt\0",
+  ).toString("base64");
+  const env = parseCapturedEnv(`rc noise\n__ORC_ENV_BEGIN__\n${b64}\n`);
+  check(
+    env?.PATH === "/a:/b" &&
+      env.FOO === "x=y" &&
+      !("PWD" in env) &&
+      !("SHLVL" in env) &&
+      !("CODEX_SANDBOX" in env),
+    "the captured environment is read back; what the shell sets per command is left out",
+  );
+  check(
+    parseCapturedEnv("no marker") === null &&
+      parseCapturedEnv(`__ORC_ENV_BEGIN__\n${Buffer.from("FOO=1\0").toString("base64")}`) === null,
+    "a capture without the marker or without PATH is not used (RUN falls back to a login shell)",
+  );
+}
 check(
   execs.every((e) => e.cwd === work && e.sandboxPolicy && typeof e.sandboxPolicy.type === "string"),
   "every command names the thread's folder and an explicit sandbox policy",
 );
 const isWrite = (e: (typeof execs)[number]) => e.command.join(" ").includes("base64 --decode");
-const isRun = (e: (typeof execs)[number]) => e.command[1] === "-lc";
 check(
   execs.filter((e) => isWrite(e) || isRun(e)).length === 3 &&
     execs
@@ -1281,6 +1722,410 @@ check(
     /^No free model could take this right now/.test(turn.error?.message ?? ""),
   "a 503 mid-step ends the turn with the plain message",
 );
+
+// ---- what the benchmark asked for ------------------------------------------------------------------
+const waitLines = (t: Turn) =>
+  t.items.filter((i) => i.type === "agentMessage" && /free model/.test(i.text ?? ""));
+const sawStatus = (threadId: string, re: RegExp) =>
+  notes.some(
+    (n) =>
+      n.method === "item/started" &&
+      n.params?.threadId === threadId &&
+      re.test((n.params.item as TurnItem).text ?? ""),
+  );
+const interrupts = () => fake().filter((l) => l.interrupt).length;
+
+log("retries: a model call the router can't serve is waited out inside the turn");
+seen.length = 0;
+faults.push({ role: "think", match: /retryok/, kind: 503, times: 2 });
+const rk = await start("hyperexperimental");
+await say(rk.id, "retryok");
+turn = await turnDone(rk.id);
+check(
+  turn.status === "completed" && last(turn) === "Got through.",
+  "two 503s, then an answer: the turn completes",
+);
+check(
+  seen.length === 3 && turn.orchestration?.retries === 2 && turn.orchestration.modelCalls === 1,
+  "three requests reached the router; they count as one model call and two retries",
+);
+check(
+  sawStatus(rk.id, /^Waiting for a free model… retry 1 in .* \(no model is free\)\.$/) &&
+    sawStatus(rk.id, /^Waiting for a free model… retry 2 in /),
+  "while waiting the thread shows a status line, rewritten at each retry",
+);
+check(
+  waitLines(turn).length === 1 &&
+    /^Waited .* for a free model \(2 retries\)\.$/.test(waitLines(turn)[0].text ?? ""),
+  `it is one item, closed when the model answered (${waitLines(turn)[0]?.text})`,
+);
+for (const kind of [429, 502, 500]) {
+  seen.length = 0;
+  faults.push({ role: "planner", match: /hello/, kind, times: 1 });
+  const t = await start("experimental");
+  await say(t.id, "hello");
+  turn = await turnDone(t.id);
+  check(
+    turn.status === "completed" && seen.length === 2 && turn.orchestration?.retries === 1,
+    `a ${kind} is retried too`,
+  );
+}
+seen.length = 0;
+faults.push(
+  { role: "think", match: /emptyreply/, kind: "failed-empty", times: 1 },
+  { role: "think", match: /emptyreply/, kind: "blank", times: 1 },
+);
+const er = await start("hyperexperimental");
+await say(er.id, "emptyreply");
+turn = await turnDone(er.id);
+check(
+  turn.status === "completed" &&
+    last(turn) === "After an empty reply." &&
+    seen.length === 3 &&
+    turn.orchestration?.retries === 2,
+  'a stream that ends in response.failed ("empty reply"), then a blank reply: both retried',
+);
+check(
+  sawStatus(er.id, /\(a model sent an empty reply\)\.$/),
+  "the status line says it was an empty reply",
+);
+
+log("retries used up: the turn ends, the summary is kept, and continue resumes");
+seen.length = 0;
+faults.push({ role: "think", match: /retryfail[\s\S]*This is step 2;/, kind: 503, times: 99 });
+const rf = await start("hyperexperimental");
+await say(rf.id, "retryfail: do the two things");
+turn = await turnDone(rf.id);
+check(
+  turn.status === "failed" &&
+    /^No free model could take this right now \(the router answered 503/.test(
+      turn.error?.message ?? "",
+    ) &&
+    / What was done so far is kept: send "continue" to go on from there\.$/.test(
+      turn.error?.message ?? "",
+    ),
+  "step 2 never gets a model: after the waits the turn ends with the plain message, and says how to go on",
+);
+check(
+  seen.map((s) => s.role).join(",") === "think,translate,summarize,think,think,think,think" &&
+    turn.items.some((i) => i.command === "echo one" && i.status === "completed"),
+  "step 1 ran in full; step 2's think was tried four times",
+);
+rec = stored(rf.id);
+check(
+  rec.summary.startsWith("SUMMARY v") && rec.openGoal === "retryfail: do the two things",
+  "the thread keeps the summary and the request it did not finish",
+);
+faults.length = 0;
+seen.length = 0;
+await say(rf.id, "continue");
+turn = await turnDone(rf.id);
+check(
+  turn.status === "completed" &&
+    last(turn) === "Resumed fine." &&
+    seen.length === 1 &&
+    /GOAL:\nretryfail: do the two things\n/.test(seen[0].input) &&
+    /SUMMARY SO FAR:\nSUMMARY v/.test(seen[0].input),
+  '"continue" is thought about with the unfinished request and the summary, not started over',
+);
+check(stored(rf.id).openGoal === null, "once finished, nothing is left open");
+
+log("experimental: a worker whose model request failed is run again; then continue");
+const flakyFile = `${fakeLog}.flaky`;
+writeFileSync(flakyFile, "2");
+writeFileSync(fakeLog, "");
+seen.length = 0;
+const fl = await start("experimental");
+await say(fl.id, "flaky job");
+turn = await turnDone(fl.id);
+check(
+  turn.status === "completed" &&
+    fake().filter((l) => /YOUR TASK \(2 of 3\): FLAKY thing/.test(l.turnStart?.brief ?? ""))
+      .length === 3 &&
+    turn.orchestration?.retries === 2,
+  "the worker's turn failed twice for want of a model: the task was run again each time, after a wait",
+);
+check(
+  waitLines(turn).length === 1 &&
+    /^Waited .* \(2 retries\)\.$/.test(waitLines(turn)[0].text ?? "") &&
+    turn.items.filter((i) => /^\*\*Task 2 of 3:\*\*/.test(i.text ?? "")).length === 1 &&
+    seen.map((s) => s.role).join(",") === "planner,final",
+  `one status line, the task announced once, and no revision: it was not the task's fault (${JSON.stringify(waitLines(turn).map((i) => i.text))} ${turn.items.filter((i) => /^\*\*Task 2 of 3:\*\*/.test(i.text ?? "")).length} ${seen.map((s) => s.role).join(",")})`,
+);
+check(stored(fl.id).notes.done.length === 3, "all three tasks finished");
+writeFileSync(flakyFile, "99");
+seen.length = 0;
+const fx = await start("experimental");
+await say(fx.id, "flaky job");
+turn = await turnDone(fx.id);
+check(
+  turn.status === "failed" &&
+    /^No free model could take this right now/.test(turn.error?.message ?? "") &&
+    /send "continue"/.test(turn.error?.message ?? ""),
+  "no model for the whole schedule: the turn ends with the plain message",
+);
+rec = stored(fx.id);
+check(
+  rec.notes.done.length === 1 &&
+    rec.notes.pending.map((t) => t.title).join("|") === "FLAKY thing|Wrap up" &&
+    /STILL TO DO \(planned, not finished\):\n1\. FLAKY thing\n2\. Wrap up/.test(
+      notesText(rec.notes),
+    ),
+  "the notes keep the finished task and the two still to do",
+);
+writeFileSync(flakyFile, "0");
+seen.length = 0;
+await say(fx.id, "continue");
+turn = await turnDone(fx.id);
+rec = stored(fx.id);
+check(
+  turn.status === "completed" &&
+    /^Going on from where the last turn stopped, 2 tasks left:/.test(turn.items[1].text ?? "") &&
+    seen.map((s) => s.role).join(",") === "final" &&
+    turn.orchestration?.workers === 2,
+  '"continue" runs the two tasks that were left, without planning again',
+);
+check(
+  rec.notes.done.length === 3 && rec.notes.pending.length === 0 && rec.notes.requests.length === 1,
+  "and the notes end with all three done, nothing pending",
+);
+
+log("interrupt during a wait");
+{
+  const caps = backend.caps as { retryDelaysMs: number[] };
+  const keep = caps.retryDelaysMs;
+  caps.retryDelaysMs = [20_000];
+  faults.push({ role: "think", match: /waitint/, kind: 503, times: 99 });
+  const wi = await start("hyperexperimental");
+  await say(wi.id, "waitint");
+  await until("the waiting line", () =>
+    sawStatus(wi.id, /^Waiting for a free model… retry 1 in 20 s/),
+  );
+  t0 = performance.now();
+  await call("turn/interrupt", { threadId: wi.id });
+  turn = await turnDone(wi.id, 5000);
+  check(
+    turn.status === "interrupted" && performance.now() - t0 < 1000 && turn.error === null,
+    `turn/interrupt ends a 20 s wait at once (${Math.round(performance.now() - t0)} ms)`,
+  );
+  check(/^Stopped while waiting for a free model/.test(last(turn)), "and the status line says so");
+  caps.retryDelaysMs = keep;
+  faults.length = 0;
+}
+
+log("hyperexperimental: file bodies are written once, as the think step gave them");
+seen.length = 0;
+const lf = await start("hyperexperimental");
+await say(lf.id, "liftjob");
+turn = await turnDone(lf.id);
+check(turn.status === "completed" && last(turn) === "Lifted.", "turn completed");
+check(
+  readFileSync(path.join(work, "lifted.py"), "utf8") ===
+    'import os\n# RUN: rm -rf /   (a comment that looks like an action)\nprint("lifted", "$HOME `date` <<<")\n' &&
+    readFileSync(path.join(work, "here.txt"), "utf8") ===
+      "line one $NOT_EXPANDED\nWRITE: not-an-action.txt\n" &&
+    !existsSync(path.join(work, "not-an-action.txt")),
+  "both files hold exactly what the think step wrote (action-like lines inside them are content)",
+);
+check(
+  turn.items.some(
+    (i) => i.command === "python3 lifted.py" && i.aggregatedOutput === "lifted $HOME `date` <<<",
+  ),
+  "and the script runs",
+);
+{
+  const t = seen.find((s) => s.role === "translate")!;
+  check(
+    !t.input.includes("import os") &&
+      !t.input.includes("NOT_EXPANDED") &&
+      t.input.includes("[file block: lifted.py (3 lines)") &&
+      t.input.includes("[file block: here.txt (2 lines)"),
+    "the translator never saw the bodies, only a marker for each",
+  );
+  const sum = seen.find((s) => s.role === "summarize")!;
+  check(!sum.input.includes("import os"), "nor did the summarizer");
+}
+
+log("hyperexperimental: a WRITE with no content is refused and fed back");
+seen.length = 0;
+const nb = await start("hyperexperimental");
+await say(nb.id, "nobody wrote the body");
+turn = await turnDone(nb.id);
+check(
+  turn.status === "completed" && last(turn) === "big.py written and run.",
+  `refused once, then a step with nothing, then the file: the turn still finishes (${last(turn).slice(0, 60)})`,
+);
+{
+  const th = seen.filter((s) => s.role === "think");
+  check(
+    th[1].input.includes(
+      "(refused, nothing was written or run) WRITE: big.py was not done: no content came with it. Give the whole file in a file block (```file:big.py)",
+    ) &&
+      th[1].input.includes(
+        "(not run, because of the refused action before it) RUN: python3 big.py",
+      ),
+    "the next think is told what was refused, how to give the file, and what did not run",
+  );
+  check(
+    turn.items.filter((i) => i.type === "fileChange").length === 1 &&
+      turn.items.filter((i) => i.command === "python3 big.py").length === 1 &&
+      readFileSync(path.join(work, "big.py"), "utf8") === "print('big')\n",
+    "nothing was written or run for the refused step; the file block of step 3 was",
+  );
+  check(
+    th.length === 4,
+    'the refused step did not count toward "nothing runnable" (a step with nothing followed it)',
+  );
+}
+
+log("experimental: a plan must produce what was asked");
+{
+  writeFileSync(path.join(work, "main.db"), "x");
+  const d = deliverablesIn(
+    `Fix README.md and create zz-out/result.json, plus \`zz-notes.txt\` and ${work}/zz-abs.json. Read main.db. See https://example.com/a.json, v1.2.3, e.g. this; not /no-such-dir-zz/app/out.json.`,
+    work,
+  );
+  check(
+    d.join("|") === "zz-out/result.json|zz-notes.txt|zz-abs.json",
+    `the files a request names that are not there are its deliverables (${d.join("|")})`,
+  );
+}
+seen.length = 0;
+const io = await start("experimental");
+await say(io.id, "inspectonly: recover the rows from main.db and create out-xyz.json");
+turn = await turnDone(io.id);
+check(
+  /^Plan, 2 tasks:/.test(turn.items[1].text ?? "") &&
+    /2\. Using what the notes show, produce what the request asks for \(create out-xyz\.json\): inspectonly/.test(
+      turn.items[1].text ?? "",
+    ),
+  "a plan that only inspects gets a last task that produces the file the request names",
+);
+check(
+  seen.map((s) => s.role).join(",") === "planner,revise,final" &&
+    /Every planned task ran, but out-xyz\.json does not exist/.test(seen[1].input),
+  "the tasks ran and the file is still not there: the planner is asked once for the tasks that make it",
+);
+check(
+  /RECORDED AT THE END:\nout-xyz\.json: MISSING\nlast check: passed/.test(seen[2].input),
+  "the closing call is given what was recorded at the end",
+);
+check(
+  turn.status === "completed" &&
+    last(turn) ===
+      "**Not finished.** `out-xyz.json`, named in the request, does not exist.\n\nAll done: the tasks finished.",
+  "and the reply says first that the deliverable does not exist, whatever the model wrote",
+);
+seen.length = 0;
+const iok = await start("experimental");
+await say(iok.id, "inspectonly: recover the rows and create out-ok.json MAKES out-ok.json");
+turn = await turnDone(iok.id);
+check(
+  turn.status === "completed" &&
+    existsSync(path.join(work, "out-ok.json")) &&
+    seen.map((s) => s.role).join(",") === "planner,final" &&
+    last(turn) === "All done: the tasks finished." &&
+    /out-ok\.json: exists \(3 bytes\)/.test(seen[1].input),
+  "when the added task makes the file, the turn ends as usual",
+);
+
+log("experimental: a worker out of budget is stopped, and the plan revised");
+seen.length = 0;
+before = interrupts();
+const bu = await start("experimental");
+await say(bu.id, "budget test");
+turn = await turnDone(bu.id);
+check(
+  turn.status === "completed" &&
+    interrupts() === before + 1 &&
+    seen.map((s) => s.role).join(",") === "planner,revise,final",
+  "a worker that used its 12 requests is stopped; the turn goes on with a revised plan",
+);
+check(
+  /The worker was stopped: it used its budget of 12 model requests for one task\. It had not finished\./.test(
+    seen[1].input,
+  ) && /TASK THAT HIT A PROBLEM: LOOPCALLS circle/.test(seen[1].input),
+  "the planner is told why, and which task",
+);
+check(
+  stored(bu.id).notes.problems.some((p) => /used its budget of 12 model requests/.test(p)) &&
+    traces.some((t) => t.type === "worker" && t.status === "stopped (calls)" && t.calls === 12) &&
+    turn.orchestration?.workerCalls === 16,
+  "the notes keep it; the turn spent 12 + 2 + 2 worker requests, not the turn's whole allowance",
+);
+
+log("experimental: a planner that declines is asked again");
+seen.length = 0;
+const dc = await start("experimental");
+await say(dc.id, "decline to plan");
+turn = await turnDone(dc.id);
+check(
+  seen.map((s) => s.role).join(",") === "planner,planner" &&
+    !seen[0].instructions.includes("Your last reply said") &&
+    seen[1].instructions.includes("Your last reply said you cannot run commands"),
+  '"I can\'t run commands on your computer" is not a plan: one more call, with a firmer prompt',
+);
+check(
+  turn.status === "completed" &&
+    /RESULT: finished "Follow up on it"/.test(last(turn)) &&
+    !turn.items.some((i) => /can't run commands/.test(i.text ?? "")),
+  "the second plan is used, and the refusal is never shown",
+);
+seen.length = 0;
+const dc2 = await start("experimental");
+await say(dc2.id, "declinetwice please");
+turn = await turnDone(dc2.id);
+check(
+  seen.length === 2 &&
+    turn.status === "completed" &&
+    turn.orchestration?.workers === 1 &&
+    /RESULT: finished "declinetwice please"/.test(last(turn)) &&
+    !turn.items.some((i) => /cannot access your files/.test(i.text ?? "")),
+  "declined twice: the request itself goes to a worker (which has the tools)",
+);
+
+log("clocks: the wall clock jumps a day mid-turn");
+{
+  writeFileSync(fakeLog, "");
+  const qt = await start("experimental");
+  await say(qt.id, "quiet worker");
+  await until("the worker's turn", () => fake().some((l) => l.turnStart));
+  const realNow = Date.now;
+  Date.now = () => realNow() + 24 * 3600_000;
+  try {
+    turn = await turnDone(qt.id);
+  } finally {
+    Date.now = realNow;
+  }
+  check(
+    turn.status === "completed" && /RESULT: finished "QUIETTASK think slowly"/.test(last(turn)),
+    `a worker that is quiet for 1.3 s (the idle guard is 1.5 s) is not stopped when the date changes (${turn.error?.message ?? turn.status})`,
+  );
+  check(
+    (turn.durationMs ?? 1e9) < 30_000,
+    `and the turn's duration is what it took, not a day (${turn.durationMs} ms)`,
+  );
+}
+
+log("environment: a RUN sees the PATH the harness's shell tool gives");
+if (zsh) {
+  const pc = await start("hyperexperimental");
+  await say(pc.id, "pathcheck");
+  turn = await turnDone(pc.id);
+  const out = turn.items.find((i) => i.command === "echo PATHIS $PATH")?.aggregatedOutput ?? "";
+  check(
+    out.startsWith("PATHIS /orc-marker-bin:") && !out.includes("rc noise"),
+    "what ~/.zshrc puts first on PATH is first for a RUN (and the rc file's own output is not in it)",
+  );
+  const bare = spawnSync(userShell(), ["-lc", "echo $PATH"], {
+    env: { ...process.env, ZDOTDIR: zdot },
+    encoding: "utf8",
+  }).stdout;
+  check(
+    !bare.startsWith("/orc-marker-bin:"),
+    "(a bare login shell, what RUN used before, does not read it)",
+  );
+}
 
 // ---- restart ----------------------------------------------------------------------------------------
 log("read back");

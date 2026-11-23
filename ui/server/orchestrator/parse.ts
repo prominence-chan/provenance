@@ -111,6 +111,80 @@ function clip(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s;
 }
 
+/**
+ * A reply that declines instead of planning ("I can't run commands on your computer", "as an AI
+ * I don't have access to your files"). Only asked of a reply with no task list in it.
+ */
+export function looksLikeRefusal(text: string): boolean {
+  const t = text.replace(/[’‘]/g, "'");
+  return (
+    /\bI(?:'m| am)? (?:can't|cannot|can not|could not|couldn't|won't be able to|not able to|unable to|do not|don't)\b[^.\n]{0,120}\b(?:run|execute|access|open|read|modify|inspect|interact|commands?|files?|computer|machine|system|terminal|shell|tools?|environment)\b/i.test(
+      t,
+    ) ||
+    /\bas an? (?:ai|language model|text-based)\b/i.test(t) ||
+    /\bI (?:do not|don't) have (?:access|the ability|a way|tools)\b/i.test(t) ||
+    /\byou(?:'ll| will)? (?:need|have) to run (?:these|this|the|them)\b/i.test(t)
+  );
+}
+
+/** "continue", "go on", "keep going", "try again": a message that only asks to resume. */
+export function isContinue(text: string): boolean {
+  const t = text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s.!…]+$/g, "");
+  return (
+    t.length <= 60 &&
+    /^(?:ok(?:ay)?[, ]+|yes[, ]+|please[, ]+|now[, ]+)*(?:continue|go on|go ahead|keep going|carry on|resume|proceed|try again|retry|again|next|finish(?: it| the job| up)?|pick up where (?:you|it) (?:left off|stopped))(?:[, ]+please)?(?: (?:from|with|where)\b.*)?$/.test(
+      t,
+    )
+  );
+}
+
+/** Words that say a task (or a request) makes or changes something, rather than only looks. */
+const PRODUCE_RE =
+  /\b(?:creat(?:e|es|ing)|writ(?:e|es|ing)|produc(?:e|es|ing)|generat(?:e|es|ing)|fix(?:es|ing)?|implement(?:s|ing)?|recover(?:s|ing)?|repair(?:s|ing)?|sav(?:e|es|ing)|add(?:s|ing)?|updat(?:e|es|ing)|modif(?:y|ies|ying)|build(?:s|ing)?|convert(?:s|ing)?|export(?:s|ing)?|mak(?:e|es|ing)|rewrit(?:e|es|ing)|refactor(?:s|ing)?|chang(?:e|es|ing)|edit(?:s|ing)?|delet(?:e|es|ing)|remov(?:e|es|ing)|renam(?:e|es|ing)|install(?:s|ing)?|migrat(?:e|es|ing)|port(?:s|ing)?|replac(?:e|es|ing)|patch(?:es|ing)?|restor(?:e|es|ing)|extract(?:s|ing)?|appl(?:y|ies|ying)|configur(?:e|es|ing)|set(?:ting)? up|mov(?:e|es|ing)|merg(?:e|es|ing)|compil(?:e|es|ing)|modernis(?:e|es|ing)|moderniz(?:e|es|ing)|upgrad(?:e|es|ing)|output(?:s|ting)?)\b/i;
+
+/** Does the text ask for (or describe) making or changing something? */
+export function producesSomething(text: string): boolean {
+  return PRODUCE_RE.test(text);
+}
+
+function baseName(p: string): string {
+  return p.replace(/\/+$/, "").split("/").pop() ?? p;
+}
+
+/**
+ * The check behind "a plan must end by producing what was asked": when the request asks for
+ * something to be made or changed, some task must make it. With deliverables named in the
+ * request (files that don't exist yet) a task has to name one of them; otherwise a task has to
+ * say it creates or changes something. A plan of looking only (ls, read, dump, query) fails.
+ */
+export function planProduces(tasks: MiniTask[], request: string, deliverables: string[]): boolean {
+  if (!tasks.length) return true;
+  if (!deliverables.length && !producesSomething(request)) return true; // a question: looking is the job
+  const texts = tasks.map((t) => `${t.title} ${t.done}`);
+  if (deliverables.length) {
+    const names = deliverables.map((d) => baseName(d).toLowerCase());
+    return texts.some((t) => names.some((n) => t.toLowerCase().includes(n)));
+  }
+  return texts.some((t) => producesSomething(t));
+}
+
+/** The task that is added to a plan that only looks. */
+export function producingTask(request: string, deliverables: string[]): MiniTask {
+  const list = deliverables.join(", ");
+  return {
+    title: clip(
+      `Using what the notes show, produce what the request asks for${list ? ` (create ${list})` : ""}: ${request.replace(/\s+/g, " ").trim()}`,
+      500,
+    ),
+    done: list
+      ? `${list} ${deliverables.length === 1 ? "exists" : "exist"} with the content the request describes, and you have checked it`
+      : "what the request asks for exists, and you have checked it",
+  };
+}
+
 // ---- Hyperexperimental: the action vocabulary --------------------------------------------------
 
 export type Action =
@@ -127,6 +201,169 @@ export interface ParsedActions {
   none: boolean;
   /** Lines that looked like actions but couldn't be read (shown to the next Think). */
   problems: string[];
+  /**
+   * Actions refused before anything runs: a WRITE with no content, a `cat > file` with no
+   * heredoc body (it would wait for input forever). `at` is how many actions precede it: the
+   * executor runs those, then stops the step and tells the next Think what was refused.
+   */
+  rejected: { at: number; text: string }[];
+}
+
+/** A file's content as the Think step wrote it, lifted out of its text (liftFiles). */
+export interface LiftedFile {
+  path: string;
+  content: string;
+}
+
+export interface Lifted {
+  files: LiftedFile[];
+  /** The Think text with each lifted body replaced by a one-line marker. */
+  plan: string;
+}
+
+/** The fence the Think step is asked to put a file in: ```file:<path>. */
+export const FILE_BLOCK_HELP = "```file:path/to/name.py\n<the whole file>\n```";
+
+const SHELL_LANGS =
+  /^(?:bash|sh|zsh|shell|console|terminal|shellsession|fish|powershell|ps1|cmd|bat)$/i;
+const FILE_TOKEN =
+  /`([^`\s]+\.[A-Za-z0-9_+-]{1,10})`|(?:^|[\s"'(])((?:[\w.~-]*\/)*[\w.-]+\.[A-Za-z][A-Za-z0-9_+-]{0,9})(?=$|[\s"'),:;])/g;
+
+function fileMarker(path: string, content: string): string {
+  const n = content === "" ? 0 : content.split("\n").length;
+  return `[file block: ${path} (${n} line${n === 1 ? "" : "s"}) is held by the executor; for it output only "WRITE: ${path}", with no content]`;
+}
+
+function cleanPath(p: string): string {
+  return unquote(p.trim().replace(/[,;:]+$/, "")).replace(/[,;:]+$/, "");
+}
+
+/** `cat > path <<'EOF'` or `cat <<'EOF' > path` (or tee): the path, the delimiter, quoted or not. */
+function heredocWrite(
+  line: string,
+): { path: string; delim: string; quoted: boolean; dash: boolean } | null {
+  const a =
+    /^\s*(?:\$\s+)?(?:cat|tee)\s*>?\s*(\S+)\s*<<(-?)\s*(['"]?)([A-Za-z_]\w*)\3\s*(?:>\s*\/dev\/null\s*)?$/.exec(
+      line,
+    );
+  if (a && (/^\s*(?:\$\s+)?cat\s*>[^>]/.test(line) || /^\s*(?:\$\s+)?tee\s+[^-]/.test(line)))
+    return { path: cleanPath(a[1]), dash: a[2] === "-", quoted: a[3] !== "", delim: a[4] };
+  const b = /^\s*(?:\$\s+)?cat\s*<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2\s*>\s*(\S+)\s*$/.exec(line);
+  if (b) return { path: cleanPath(b[4]), dash: b[1] === "-", quoted: b[2] !== "", delim: b[3] };
+  return null;
+}
+
+/**
+ * Take the file bodies out of the Think step's text, so no later step has to copy them: what a
+ * model wrote once is what gets written. Lifted, verbatim:
+ *   - a fenced block named for its file: ```file:src/a.py (also ```python file:src/a.py, and
+ *     path= / filename=);
+ *   - a fenced block (not shell) right under a line that names exactly one file and says its
+ *     content follows ("Create `fix.py` with this exact content:", "File: fix.py");
+ *   - a complete `cat > file <<'EOF' … EOF` heredoc, when the shell would not change the body
+ *     (a quoted delimiter, or no $, backtick or backslash in it).
+ * A block that is never closed (a reply cut off) is left where it is: half a file is not written.
+ */
+export function liftFiles(text: string): Lifted {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out: string[] = [];
+  const files = new Map<string, string>();
+  const put = (path: string, content: string) => {
+    files.delete(path);
+    files.set(path, content);
+    out.push(fileMarker(path, content));
+  };
+  /** The file a label line names, when it names exactly one and says content follows. */
+  const labelled = (): string | null => {
+    let k = out.length - 1;
+    while (k >= 0 && !out[k].trim()) k--;
+    if (k < 0 || out.length - 1 - k > 1) return null;
+    const label = strip(out[k]);
+    const direct = /^(?:file|path|filename|file ?name)\s*[:=]\s*(\S.*)$/i.exec(label);
+    if (direct) {
+      const p = cleanPath(direct[1]);
+      return p && !/\s/.test(p) ? p : null;
+    }
+    if (!/\bcontents?\b|\bfollowing code\b|\bcode below\b/i.test(label) || !/[:：]\s*$/.test(label))
+      return null;
+    const found = new Set<string>();
+    for (const m of label.matchAll(FILE_TOKEN)) found.add(cleanPath(m[1] ?? m[2]));
+    return found.size === 1 ? [...found][0] : null;
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = /^\s*(`{3,}|~{3,})\s*(.*?)\s*$/.exec(line);
+    if (fence) {
+      const info = fence[2];
+      const named = /^(?:[\w+#.-]+[\s,]+)?(?:file|path|filename)\s*[:=]\s*(\S.*)$/i.exec(info);
+      const lang = /^[\w+#.-]*/.exec(info)?.[0] ?? "";
+      const path = named
+        ? cleanPath(named[1])
+        : !SHELL_LANGS.test(lang) && !/[:=]/.test(info)
+          ? labelled()
+          : null;
+      if (path && !/[\s$]/.test(path)) {
+        let close = -1;
+        for (let k = i + 1; k < lines.length; k++) {
+          const t = lines[k].trim();
+          if (t.startsWith(fence[1]) && t.replace(/[`~]/g, "") === "" && t[0] === fence[1][0]) {
+            close = k;
+            break;
+          }
+        }
+        if (close !== -1 && lines.slice(i + 1, close).some((l) => l.trim())) {
+          put(path, lines.slice(i + 1, close).join("\n"));
+          i = close + 1;
+          continue;
+        }
+      }
+      out.push(line);
+      i++;
+      continue;
+    }
+    const h = heredocWrite(line);
+    if (h && h.path && !/[$`]/.test(h.path)) {
+      let end = -1;
+      for (let k = i + 1; k < lines.length; k++)
+        if ((h.dash ? lines[k].trim() : lines[k].replace(/\s+$/, "")) === h.delim) {
+          end = k;
+          break;
+        }
+      if (end !== -1) {
+        const body = lines.slice(i + 1, end);
+        if (body.some((l) => l.trim()) && (h.quoted || !/[$`\\]/.test(body.join("\n")))) {
+          put(h.path, (h.dash ? body.map((l) => l.replace(/^\t+/, "")) : body).join("\n"));
+          i = end + 1;
+          continue;
+        }
+      }
+    }
+    out.push(line);
+    i++;
+  }
+  return {
+    files: [...files].map(([path, content]) => ({ path, content })),
+    plan: out.join("\n"),
+  };
+}
+
+function normPath(p: string): string {
+  return p.replace(/^\.\//, "").replace(/\/+/g, "/");
+}
+
+/** The lifted file a path means: the same path, one a suffix of the other, or the only one of that name. */
+export function matchFile(files: LiftedFile[], p: string): LiftedFile | null {
+  const want = normPath(p);
+  const exact = files.find((f) => normPath(f.path) === want);
+  if (exact) return exact;
+  const suffix = files.filter((f) => {
+    const have = normPath(f.path);
+    return have.endsWith(`/${want}`) || want.endsWith(`/${have}`);
+  });
+  if (suffix.length === 1) return suffix[0];
+  const same = files.filter((f) => baseName(f.path) === baseName(want));
+  return same.length === 1 ? same[0] : null;
 }
 
 /** The vocabulary as the translator is told it (also the reference for the parser below). */
@@ -286,14 +523,25 @@ function parseSearch(arg: string): Action | null {
 
 /**
  * The translator's reply as actions. Accepts the vocabulary in any case, numbered or bulleted,
- * with bold or backticks; RUN followed by a fenced block (each line a command, or one script);
- * WRITE / REPLACE content in <<< >>> or a code fence; READ "path:10-20" / "path lines 10 to 20".
- * Prose lines are ignored. At most `max` actions are kept.
+ * with bold or backticks; RUN followed by a fenced block (each line a command, or one script) or
+ * carrying a heredoc on the lines under it; WRITE / REPLACE content in <<< >>> or a code fence;
+ * READ "path:10-20" / "path lines 10 to 20". Prose lines are ignored. At most `max` actions.
+ *
+ * `files` are the bodies lifted from the Think text (liftFiles): a WRITE that names one gets that
+ * body, verbatim, whatever the translator copied or dropped; so does a bare `cat > file`; a
+ * lifted file no action mentions is written first. A WRITE with no content and nothing lifted
+ * for it, or a `cat >` with no heredoc body, is not an action: it goes to `rejected`.
  */
-export function parseActions(text: string, max = 8): ParsedActions {
+export function parseActions(text: string, max = 8, files: LiftedFile[] = []): ParsedActions {
   const lines = text.replace(/\r/g, "").split("\n");
   const actions: Action[] = [];
   const problems: string[] = [];
+  const rejected: { at: number; text: string }[] = [];
+  const used = new Set<string>();
+  const writeLifted = (f: LiftedFile) => {
+    if (!used.has(f.path)) actions.push({ kind: "write", path: f.path, content: f.content });
+    used.add(f.path);
+  };
   let none = false;
   let i = 0;
   while (i < lines.length) {
@@ -319,8 +567,48 @@ export function parseActions(text: string, max = 8): ParsedActions {
             i = b.next;
           }
         }
-        if (command) actions.push({ kind, command });
-        else problems.push(`RUN without a command: ${clip(raw.trim(), 80)}`);
+        if (!command) {
+          problems.push(`RUN without a command: ${clip(raw.trim(), 80)}`);
+          break;
+        }
+        // A heredoc opened on the RUN line: its body is the lines under it, up to the delimiter.
+        const here = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1/.exec(command);
+        const complete = (c: string, delim: string) =>
+          c.split("\n").some((l, n) => n > 0 && l.trim() === delim);
+        if (here && !command.includes("\n")) {
+          for (let k = i; k < Math.min(lines.length, i + 600); k++)
+            if (lines[k].trim() === here[2]) {
+              command = [arg.replace(/^`+|`+$/g, ""), ...lines.slice(i, k + 1)].join("\n");
+              i = k + 1;
+              break;
+            }
+        }
+        const first = command.split("\n")[0];
+        const write = heredocWrite(first);
+        const bare = /^\s*cat\s*>\s*(\S+)\s*$/.exec(command);
+        const target = bare
+          ? cleanPath(bare[1])
+          : write && !complete(command, write.delim)
+            ? write.path
+            : null;
+        if (target !== null) {
+          const f = matchFile(files, target);
+          if (f) writeLifted(f);
+          else
+            rejected.push({
+              at: actions.length,
+              text: `RUN: ${clip(first.trim(), 120)} was not run: it has no heredoc body, so it would write nothing and wait for input. Give the file in a file block (${"```"}file:${target}) instead.`,
+            });
+          break;
+        }
+        if (here && !complete(command, here[2])) {
+          rejected.push({
+            at: actions.length,
+            text: `RUN: ${clip(first.trim(), 120)} was not run: the heredoc (<<${here[2]}) has no body. Put the script in a file block and run the file.`,
+          });
+          break;
+        }
+        actions.push({ kind, command });
         break;
       }
       case "read": {
@@ -339,14 +627,22 @@ export function parseActions(text: string, max = 8): ParsedActions {
         break;
       }
       case "write": {
-        const p = unquote(arg.replace(/\s+(?:with(?: content)?|content)\s*:?\s*$/i, ""));
+        const p = cleanPath(arg.replace(/\s+(?:with(?: content)?|content)\s*:?\s*$/i, ""));
         const b = readBlock(lines, i);
-        if (!p) problems.push(`WRITE without a path: ${clip(raw.trim(), 80)}`);
-        else if (!b) problems.push(`WRITE ${p}: no content block (<<< … >>>) followed`);
-        else {
-          actions.push({ kind, path: p, content: b.body });
-          i = b.next;
+        if (b) i = b.next;
+        if (!p) {
+          problems.push(`WRITE without a path: ${clip(raw.trim(), 80)}`);
+          break;
         }
+        // The body the Think step wrote wins over whatever was copied here.
+        const f = matchFile(files, p);
+        if (f) writeLifted(f);
+        else if (b && b.body.trim()) actions.push({ kind, path: p, content: b.body });
+        else
+          rejected.push({
+            at: actions.length,
+            text: `WRITE: ${p} was not done: ${b ? "its content was empty" : "no content came with it"}. Give the whole file in a file block (${"```"}file:${p}); for an empty file use RUN: touch ${p}.`,
+          });
         break;
       }
       case "replace": {
@@ -375,11 +671,19 @@ export function parseActions(text: string, max = 8): ParsedActions {
       }
     }
   }
+  // A file block is an instruction to write that file, whether or not an action repeated it.
+  const unmentioned = files.filter((f) => !used.has(f.path));
+  if (unmentioned.length) {
+    actions.unshift(
+      ...unmentioned.map((f) => ({ kind: "write" as const, path: f.path, content: f.content })),
+    );
+    for (const r of rejected) r.at += unmentioned.length;
+  }
   if (actions.length > max) {
     problems.push(`${actions.length - max} action(s) beyond the limit of ${max} were dropped`);
     actions.length = max;
   }
-  return { actions, none: none && !actions.length, problems };
+  return { actions, none: none && !actions.length && !rejected.length, problems, rejected };
 }
 
 /** One line for an action (rows, notes, prompts). */
