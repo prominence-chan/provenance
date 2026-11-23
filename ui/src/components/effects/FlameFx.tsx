@@ -36,8 +36,9 @@
 // The fallbacks (Claude Code, Codex) are terminal coding agents, not flames, and have styles of
 // their own, in their own colour ramps:
 //   claude    write head: a block cursor travels the composer's outline a character cell at a
-//             time, leaving a short dashed trail that cools behind it; on switch that same
-//             head runs one lap of the outline, fast at first with a long hot trail, slowing
+//             time, leaving a dashed trail that cools behind it, as long as the ground it
+//             covers while a cell cools (TRAIL: short when it creeps, a long streak when it
+//             runs); on switch that same head runs one lap of the outline, fast at first, slowing
 //             smoothly until it lands back where it started at the creeping speed (one motion,
 //             see LAP); while active, two more heads join and they step faster, with longer
 //             trails
@@ -146,10 +147,18 @@ const FLARE: Record<
  *   R(t) = 1 - (1 - t/attack)^2 up to `attack`, then 1,
  * from vs (the head's speed when the lap starts: 0 for a new head) up to vp within `attack`, then
  * slowing down to ve = the resting speed, with D'(1) = 0 so it lands without a jolt. vp is solved
- * so that the integral over T is exactly one lap (lapAt). The trail eases from LAP's long hot one
- * to the resting one by the same D.
+ * so that the integral over T is exactly one lap (lapAt).
  */
-const LAP = { T: 4.4, attack: 0.22, tau: 13 };
+const LAP = { T: 4.4, attack: 0.22 };
+/**
+ * Claude Code's trail: the cells a head leaves cool over `cool` s, so the trail is as long as
+ * the ground the head covers in that time, plus `min` cells (the creeping head's short tail):
+ * min + speed * cool cells, at most `cap` of the outline so a head never meets its own tail.
+ * Brightness falls off evenly along it, to nothing at its end. It can only grow by the ground
+ * the head actually covers (a new head, or one setting off on a lap, draws its trail out behind
+ * it; cold cells never light up), and it shortens as soon as the head slows.
+ */
+const TRAIL = { cool: 0.7, min: 4, cap: 0.7 };
 /** Claude Code's head, cells a second: at rest, and the extra while active. */
 const HEAD_REST = 1.2;
 const HEAD_ACTIVE = 7.8;
@@ -194,8 +203,7 @@ uniform int uMode;      // 0 = composer band, 1 = header filament, 2 = nova erup
 uniform int uTier;      // 0 spark, 1 ember, 2 solstice, 3 nova, 4 claude, 5 codex
 uniform float uPhase;   // claude: the write head's place, 0..1 round the outline; codex: how far
                         // the refresh sweep has run, 0..1 (0.5 while it is held off)
-uniform vec4 uAux;      // claude: x -, y cells the head has run this lap, z cells it has run at all
-                        // (both capped); codex: x the regular sweep's strength
+uniform vec4 uAux;      // claude: x the trail's length, cells; codex: x the regular sweep's strength
 uniform vec4 uRect;     // composer x, y, w, h (CSS px)
 uniform vec4 uBand;     // the quad being drawn, x0 y0 x1 y1: everything fades out before it
 uniform vec3 uC0, uC1, uC2, uC3, uOff1, uOff2, uDusk;
@@ -632,7 +640,9 @@ void main() {
       // them, so nothing seams); each cell is a short dash hugging the border. One head (a
       // block cursor) steps along it a cell at a time and the cells it leaves cool behind it;
       // while active two more join. On switch the same head runs one lap (the engine's LAP):
-      // uFl is how much of the lap's long hot trail is left, 1 as it sets off, 0 as it lands.
+      // uFl is how much of the lap is left (the head runs a little hotter), 1 as it sets off.
+      // The trail is uAux.x cells long, set by the heads' speed (the engine's TRAIL); the
+      // heads all move together, so one length serves them all.
       float L;
       float s = perimS(vPos, L);
       float N = max(12.0, floor(L / 9.0 + 0.5));
@@ -643,22 +653,16 @@ void main() {
       float bar = smoothstep(-0.3, 0.4, d) * smoothstep(2.3, 1.6, d);  // ~2 px out from the border
       float blk = smoothstep(-0.3, 0.4, d) * smoothstep(4.4, 3.6, d);  // the cursor, a block
       float lvl = 0.0, head = 0.0;
-      float tau = mix(2.2, 4.5, act);
       float lap = fl;
-      float tauL = mix(tau, 13.0, lap);                      // the lap's trail, cells
+      float Lt = max(uAux.x, 0.001);                         // trail length, cells
       float h0 = floor(fract(uPhase) * N);
       for (int i = 0; i < 3; i++) {
         float hb = i == 0 ? 1.0 : smoothstep(0.15, 0.8, act);
         if (hb < 0.01) continue;
         float hk = mod(h0 + float(i) * floor(N / 3.0), N);
         float back = mod(hk - k, N);                         // cells behind this head
-        // Only cells a head has been over are warm: none behind a new head, and the lap's
-        // trail only over what it has run this lap.
-        float been = i == 0 ? step(back, uAux.z) : 1.0;
-        float rest = exp(-back / tau) * step(back, 16.0) * mix(0.42, 0.5, act);
-        float run = i == 0 ? exp(-back / tauL) * smoothstep(52.0, 30.0, back) * 0.54 * lap
-                             * step(back, uAux.y) : 0.0;
-        lvl = max(lvl, hb * been * max(rest, run));
+        float trail = max(1.0 - back / Lt, 0.0) * mix(0.42, 0.5, act);
+        lvl = max(lvl, hb * trail);
         head = max(head, hb * step(back, 0.5) * mix(mix(0.62, 0.75, act), 0.8, lap));
       }
       float rest = (0.035 * uBreath + 0.05 * act) * mix(0.45, 1.0, topW);
@@ -878,11 +882,11 @@ interface Layer {
   selEnd: number;
   /** The streaming gate (gateOf) when the select began. */
   gate0: number;
-  /** claude: the lap in progress (null once landed); the head's speed, laps/s; cells it has
-   * run since it appeared (capped). */
+  /** claude: the lap in progress (null once landed); the head's speed, laps/s; the trail's
+   * length, cells (TRAIL). */
   lap: Lap | null;
   vel: number;
-  ran: number;
+  trail: number;
   /** codex: the regular sweep's strength (an in-flight sweep fades as a select starts), and the
    * phase before which no regular sweep is drawn (one period after the select). */
   sweepA: number;
@@ -906,8 +910,6 @@ interface Lap {
   ve: number;
   /** cells round the outline when it started */
   N: number;
-  /** the layer's `ran` when it started */
-  ran0: number;
 }
 
 /** Seconds of wall clock after which a calm layer is renewed (see the header). */
@@ -960,10 +962,10 @@ const lapE = (t: number, T: number, a: number) => {
   return (sum * h) / 3;
 };
 /** A lap from u0 starting at speed vs, landing at ve (laps/s); vp makes it exactly one lap. */
-const makeLap = (at: number, u0: number, vs: number, ve: number, N: number, ran0: number): Lap => {
+const makeLap = (at: number, u0: number, vs: number, ve: number, N: number): Lap => {
   const { T, attack: a } = LAP;
   const vp = vs + (1 - ve * T - ((vs - ve) * T) / 3) / (T / 3 - lapE(a, T, a));
-  return { at, T, u0, vs, vp, ve, N, ran0 };
+  return { at, T, u0, vs, vp, ve, N };
 };
 /** How far the lap has run (laps, 0..1 at T) and its speed (laps/s), t s in. */
 const lapAt = (l: Lap, t: number) => {
@@ -1410,35 +1412,33 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
    * Claude Code's head: during the select lap its place and speed are the lap's (exact, from
    * its start); once landed (one lap on, at the resting speed) it steps on at ~1.2 cells a
    * second, ~9 while active. Kept as a fraction of the outline, so a composer that grows keeps
-   * the head where it was.
+   * the head where it was. Then the trail (TRAIL) from its speed.
    */
   const stepHead = (l: Layer, dt: number, now: number, r: Rect, act: number) => {
     l.pre = 0;
     l.ft = now - l.selAt;
+    const N = cellsOf(r);
+    const was = l.phase;
     const lap = l.lap;
     if (lap && now - lap.at < lap.T) {
       const p = lapAt(lap, now - lap.at);
       l.phase = frac(lap.u0 + p.run);
       l.vel = p.v;
-      l.ran = Math.min(1e4, lap.ran0 + p.run * lap.N);
       l.fl = lapD((now - lap.at) / lap.T);
-      return;
-    }
-    if (lap) {
+    } else if (lap) {
       // Landed: exactly one lap on from where it set off, going at the resting speed.
-      const over = now - lap.at - lap.T;
-      l.phase = frac(lap.u0 + lap.ve * over);
-      l.ran = Math.min(1e4, lap.ran0 + lap.N * (1 + lap.ve * over));
+      l.phase = frac(lap.u0 + lap.ve * (now - lap.at - lap.T));
       l.vel = lap.ve;
       l.lap = null;
       l.fl = 0;
-      return;
+    } else {
+      l.vel = (HEAD_REST + HEAD_ACTIVE * act) / N;
+      l.phase = frac(l.phase + l.vel * dt);
+      l.fl = 0;
     }
-    const N = cellsOf(r);
-    l.vel = (HEAD_REST + HEAD_ACTIVE * act) / N;
-    l.phase = frac(l.phase + l.vel * dt);
-    l.ran = Math.min(1e4, l.ran + l.vel * N * dt);
-    l.fl = 0;
+    const v = l.vel * N; // cells a second
+    const want = Math.min(TRAIL.min + v * TRAIL.cool, TRAIL.cap * N);
+    l.trail = Math.min(want, l.trail + frac(l.phase - was) * N);
   };
 
   /**
@@ -1639,8 +1639,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.uniform1i(fu.uTier, STYLE_INDEX[l.tier]);
     // Both small: the head's place round the outline, how far the sweep has run.
     gl.uniform1f(fu.uPhase, l.tier === "codex" ? sweepOf(l) : frac(l.phase));
-    if (l.tier === "claude") gl.uniform4f(fu.uAux, 0, l.lap ? l.ran - l.lap.ran0 : 1e4, l.ran, 0);
-    else gl.uniform4f(fu.uAux, l.sweepA, 0, 0, 0);
+    gl.uniform4f(fu.uAux, l.tier === "claude" ? l.trail : l.sweepA, 0, 0, 0);
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
     gl.uniform3fv(fu.uC2, c(2));
@@ -1728,6 +1727,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
           fading: l.fading,
           head: frac(l.phase) * N,
           speed: l.vel * N,
+          trail: l.trail,
           lap: l.tier === "claude" ? l.fl : 0,
           act: isFallback(l.tier) ? l.act * gateOf(l, now) : l.act,
           sweep: l.tier === "codex" ? sweepOf(l) : -1,
@@ -1968,7 +1968,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       // composer, nothing to run round: it just rests.)
       const N = cellsOf(r);
       if (fresh) l.phase = (rand(0.3, 0.7) * Math.max(r.w - 2 * r.radius, 1)) / perimLength(r);
-      l.lap = makeLap(l.flareAt, l.phase, fresh ? 0 : l.vel, HEAD_REST / N, N, l.ran);
+      l.lap = makeLap(l.flareAt, l.phase, fresh ? 0 : l.vel, HEAD_REST / N, N);
       l.selEnd = l.flareAt + l.lap.T;
     }
     if (l.tier === "codex") {
@@ -2030,7 +2030,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             gate0: 0,
             lap: null,
             vel: 0,
-            ran: 0,
+            trail: 0,
             sweepA: 1,
             sweepFrom: 0,
             fadeIn: RENEW_FADE,
