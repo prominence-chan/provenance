@@ -84,6 +84,8 @@ type Result = {
   workerCalls?: number;
   workerMaxInputTokens?: number;
   steps?: number;
+  retries?: number;
+  threadId?: string;
   maxInputTokens?: number;
   totalInputTokens?: number;
   servedBy: Record<string, number>;
@@ -173,6 +175,7 @@ if (mode === "stock") {
     roles: {},
     maxInputTokens: maxInput,
     totalInputTokens: totalInput,
+    threadId: tid,
     servedBy: {},
     approvalsDeclined: approvals,
     finalMessage,
@@ -287,6 +290,7 @@ finish({
   workerCalls: o?.workerCalls,
   workerMaxInputTokens: o?.workerMaxInputTokens,
   steps: o?.steps,
+  retries: (o as { retries?: number } | undefined)?.retries,
   servedBy,
   approvalsDeclined: approvals,
   finalMessage: [...turn.items].reverse().find((i) => i.type === "agentMessage")?.text ?? "",

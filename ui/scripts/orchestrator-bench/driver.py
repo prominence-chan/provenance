@@ -16,8 +16,8 @@ RUNS = os.path.join(BENCH, "runs")
 LEDGER = os.path.expanduser("~/.tierlm/usage-ledger.jsonl")
 TIER = "solstice"
 LIMIT_MIN = 25
-CALL_BUDGET = 900
-HOURS = 5.0
+CALL_BUDGET = 1600
+HOURS = 8.0
 ORDER = ["sqlite-db-truncate", "cancel-async-tasks", "modernize-scientific-stack", "db-wal-recovery",
          "model-extraction-relu-logits", "regex-log", "polyglot-c-py", "sparql-university",
          "constraints-scheduling", "large-scale-text-editing"]
@@ -148,11 +148,10 @@ def one(mode, task, model, attempt):
     rec = {"task": task, "mode": mode, "model": model, "attempt": attempt, "run_dir": run_dir, "passed": g["passed"],
            "grade_summary": g["summary"], **{k: res.get(k) for k in (
                "status", "timedOut", "error", "guard", "modelCalls", "roles", "workers", "workerCalls",
-               "workerMaxInputTokens", "steps", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
+               "workerMaxInputTokens", "steps", "retries", "threadId", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
                "ledger_window_all", "ledger_window_new_keys", "ledger_new_key_calls", "wall_seconds")}}
     # A timeout is a failure whatever the folder holds? No: the official harness grades what is there
     # after an agent timeout too; we do the same and flag it.
-    open(os.path.join(BENCH, "results.jsonl"), "a").write(json.dumps(rec) + "\n")
     b = budget()
     b["calls"] += (res.get("modelCalls") or 0) or (res.get("ledger_new_key_calls") or 0)
     save_budget(b)
@@ -161,74 +160,80 @@ def one(mode, task, model, attempt):
     return rec
 
 
+def records():
+    rp = os.path.join(BENCH, "results.jsonl")
+    return [json.loads(l) for l in open(rp)] if os.path.exists(rp) else []
+
+
+def state(task, mode):
+    """final | blocked (a failed attempt awaits review) | pending, and the next attempt number."""
+    rs = [r for r in records() if r["task"] == task and r["mode"] == mode]
+    if any(r.get("final") for r in rs):
+        return "final", len(rs)
+    runs = [r for r in rs if "release" not in r]
+    released = sum(1 for r in rs if r.get("release"))
+    review = sum(1 for r in runs if r.get("needs_review"))
+    return ("blocked" if review > released else "pending"), len(runs)
+
+
 def main():
+    """Arm by arm (stock, then experimental, then hyperexperimental), the fixed task order inside
+    each. A run that passed, or failed with the turn completed or at the time limit, is final. A
+    run whose turn failed or whose runner died is kept as needs_review and the driver moves on:
+    it is run again only after mark.py releases it (or mark.py makes it final as it stands)."""
     modes = sys.argv[1].split(",")
     todo = sys.argv[2:] or ORDER
-    done = set()
     rp = os.path.join(BENCH, "results.jsonl")
-    if os.path.exists(rp):
-        for l in open(rp):
-            d = json.loads(l)
-            if d.get("final"):
-                done.add((d["task"], d["mode"]))
-    for task in todo:
+    while True:
+        ran = blocked = 0
         for mode in modes:
-            if (task, mode) in done:
-                continue
-            if os.path.exists(os.path.join(BENCH, "STOP")):
-                log("STOP file: not starting more runs")
-                return
-            b = budget()
-            if b["first_run_at"] is None:
-                b["first_run_at"] = time.time()
-                save_budget(b)
-            for _ in range(10):  # the wall clock jumped a day ahead once and came back: wait it out
-                if time.time() - b["first_run_at"] < 12 * 3600:
-                    break
-                time.sleep(30)
-            if b["calls"] >= CALL_BUDGET or time.time() - b["first_run_at"] > HOURS * 3600:
-                log(f"budget reached (calls={b['calls']}, hours={(time.time() - b['first_run_at']) / 3600:.2f}): not starting {task} {mode}")
-                return
-            model, attempt = TIER, 0
-            ov = os.path.join(BENCH, "overrides.json")
-            if os.path.exists(ov):
-                model = json.load(open(ov)).get(f"{task}|{mode}", TIER)
-            # The allowance is shared: when the tier is nearly used up, wait for it to recover
-            # instead of draining it (4 waits of 5 minutes, then a lower tier for this run).
-            for w in range(5):
-                av = tier_available()
-                if av is None or any((r or 0) >= 0.08 for _, r, _ in av):
-                    break
-                if w == 4:
-                    model = "ember"
-                    log("solstice still nearly used up: this run goes to the tier ember")
-                    break
-                log(f"solstice nearly used up ({av}): waiting 5 minutes")
-                time.sleep(300)
-            while True:
-                av = tier_available()
-                log(f"start {task} {mode} model={model} attempt={attempt} (tier sources available: {av})")
-                rec = one(mode, task, model, attempt)
-                err = (rec.get("error") or "")
-                stalled = (not rec["passed"]) and rec.get("status") == "failed" and any(
-                    x in err for x in ("503", "502", "429", "No free model", "empty reply", "isn't answering", "model call failed"))
-                if not stalled:
-                    break
-                attempt += 1
-                empty = "empty reply" in err  # the pool's first model answers this prompt with nothing: waiting long does not help
-                if attempt <= (1 if empty else 2):
-                    log(f"router could not serve: waiting {1 if empty else 4} minute(s)")
-                    time.sleep(60 if empty else 240)
-                elif attempt == (2 if empty else 3):
-                    # an empty reply comes from the pool's first model for this prompt, so pool/<tier>
-                    # would meet it again: go one tier down instead
-                    model = "ember" if "empty reply" in err else f"pool/{TIER}"
-                    log(f"falling back to {model}")
+            for task in todo:
+                st, attempt = state(task, mode)
+                if st == "final":
+                    continue
+                if st == "blocked":
+                    blocked += 1
+                    continue
+                if os.path.exists(os.path.join(BENCH, "STOP")):
+                    log("STOP file: not starting more runs")
+                    return
+                b = budget()
+                if b["first_run_at"] is None:
+                    b["first_run_at"] = time.time()
+                    save_budget(b)
+                for _ in range(10):  # the wall clock jumped a day ahead once and came back: wait it out
+                    if time.time() - b["first_run_at"] < 12 * 3600:
+                        break
+                    time.sleep(30)
+                if b["calls"] >= CALL_BUDGET or time.time() - b["first_run_at"] > HOURS * 3600:
+                    log(f"budget reached (calls={b['calls']}, hours={(time.time() - b['first_run_at']) / 3600:.2f}): not starting {task} {mode}")
+                    return
+                # The allowance is shared: when the tier is nearly used up, wait for it to recover.
+                for w in range(4):
+                    av = tier_available()
+                    if av is None or any((r or 0) >= 0.08 for _, r, _ in av):
+                        break
+                    log(f"solstice nearly used up ({av}): waiting 5 minutes")
+                    time.sleep(300)
+                log(f"start {task} {mode} model={TIER} attempt={attempt} (tier sources available: {tier_available()})")
+                rec = one(mode, task, TIER, attempt)
+                ran += 1
+                ok_end = rec["passed"] or rec.get("status") == "completed" or (rec.get("timedOut") and rec.get("status") != "runner-killed")
+                rec = dict(rec)
+                if ok_end:
+                    rec["final"] = True
                 else:
-                    break
-            rec["final"] = True
-            open(rp, "a").write(json.dumps(rec) + "\n")
-    log("all requested runs done")
+                    rec["needs_review"] = True
+                    log(f"NEEDS REVIEW {task} {mode}: status={rec.get('status')} err={(rec.get('error') or '')[:300]}")
+                open(rp, "a").write(json.dumps(rec) + "\n")
+        if not ran:
+            if not blocked:
+                log("all requested runs done")
+                return
+            if os.path.exists(os.path.join(BENCH, "STOP")):
+                log("STOP file: leaving with runs awaiting review")
+                return
+            time.sleep(60)
 
 
 if __name__ == "__main__":
