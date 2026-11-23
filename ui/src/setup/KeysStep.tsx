@@ -17,16 +17,22 @@ import {
   KeyForm,
   KeyGuide,
   OpenButtons,
+  PersonBadge,
   rejectedText,
   TermsNote,
 } from "./KeyGuide";
 import { IconPlusSmall, IconTrash, Status } from "./parts";
 import { AssistNote, GeminiKeyPrompt } from "./PoolAssist";
 import { manualResult } from "./pool-outcome";
+import type { KeyPatch } from "../../shared/router-api";
 import {
   clearPoolKeys,
+  dayText,
+  isAnon,
   keyName,
+  ownKeys,
   removePoolKey,
+  shortReason,
   untilText,
   updatePoolKey,
   type PoolHelp,
@@ -188,30 +194,25 @@ export function KeysStep({
           )}
         </>
       )}
-      {removed.length > 0 && <RemovedLine removed={removed} pool={allPool} onChanged={onChanged} />}
+      {removed.length > 0 && <RemovedLine removed={removed} onChanged={onChanged} />}
     </div>
   );
 }
 
 /**
- * "No longer in the pool: Mistral (no free API tier), …": one folded line at the bottom; open,
- * each with when, and a key still saved for one of them with Remove.
+ * "No longer in the pool: Mistral AI (No free API tier any more), …": one folded line at the
+ * bottom; open, each with why and since when, and a key still saved for one of them
+ * (`leftover_key`) with Remove (DELETE /pool/keys/{id} forgets it).
  */
 function RemovedLine({
   removed,
-  pool,
   onChanged,
 }: {
   removed: RemovedProvider[];
-  pool: PoolProvider[];
   onChanged: () => void;
 }) {
-  const left = (id: string) => {
-    const p = pool.find((x) => x.id === id);
-    return !!p && (!!p.keys?.length || p.vars.some((v) => v.set && v.from === "app"));
-  };
   // Unfolded when a key is left for one of them; it stays as it is while the person acts.
-  const [unfolded] = useState(() => removed.some((r) => left(r.id)));
+  const [unfolded] = useState(() => removed.some((r) => r.leftover));
   const [isOpen, setIsOpen] = useState(unfolded);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -240,19 +241,20 @@ function RemovedLine({
           No longer in the pool
           {isOpen
             ? ` (${removed.length})`
-            : `: ${removed.map((r) => `${r.name}${r.reason ? ` (${r.reason})` : ""}`).join(", ")}`}
+            : `: ${removed.map((r) => `${r.name}${r.reason ? ` (${shortReason(r.reason)})` : ""}`).join(", ")}`}
         </span>
       </summary>
       <ul className="key-removed-list">
         {removed.map((r) => (
           <li key={r.id} data-removed={r.id}>
             <span className="key-removed-text">
-              <span>{r.name}</span>
-              <span className="meta">
-                {[r.reason, r.date && `since ${dayText(r.date)}`].filter(Boolean).join(" · ")}
+              <span>
+                {r.name}
+                {r.date && <span className="meta"> · since {dayText(r.date)}</span>}
               </span>
+              {r.reason && <span className="meta">{r.reason}</span>}
             </span>
-            {left(r.id) &&
+            {r.leftover &&
               (confirm === r.id ? (
                 <span className="setup-confirm">
                   <span className="meta">Remove its saved key?</span>
@@ -295,20 +297,6 @@ function RemovedLine({
   );
 }
 
-/** "20 Nov 2026", its spaces bound. */
-function dayText(iso: string): string {
-  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T00:00:00Z` : iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d
-    .toLocaleDateString("en-GB", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-      timeZone: "UTC",
-    })
-    .replace(/ /g, "\u00a0");
-}
-
 const helpOf = (help: PoolHelpData | null, id: string): PoolHelp | undefined =>
   help?.providers.find((h) => h.id === id);
 
@@ -326,7 +314,7 @@ function KeyRow({
   onOpen: () => void;
   /** A first key saved (working: the provider closes) or the last one removed. */
   onDone: (o: KeyOutcome | "removed") => void;
-  /** A key added, renamed or removed beside others: read the keys again, stay open. */
+  /** A key added, renamed, switched or removed beside others: read the keys again, stay open. */
   onReload: () => void;
 }) {
   const fromApp = p.vars.some((v) => v.from === "app");
@@ -334,16 +322,19 @@ function KeyRow({
   const missing = p.vars.filter((v) => !v.set);
   const fullName = help?.name ?? providerName(p.id);
   const name = shortName(fullName);
-  // A router that keeps several keys lists them; a provider with none yet starts as before.
-  const keys = p.keys?.length ? p.keys : null;
-  const working = keys?.filter((k) => k.usable && k.enabled).length ?? 0;
+  // A router that keeps several keys lists them; a provider with none of the person's own yet
+  // (none, or only the keyless slot) starts as before.
+  const own = ownKeys(p);
+  const keys = own?.length ? own : null;
+  const anon = keys ? p.keys?.find(isAnon) : undefined;
+  const inUse = keys?.filter((k) => k.usable && k.enabled).length ?? 0;
   // When the provider was opened, for the rough minutes a manual save reports.
   const openedAt = useRef<number | null>(null);
   useEffect(() => {
     openedAt.current = open ? Date.now() : null;
   }, [open]);
-  // The save just made: which keys there were before it, and what the check said.
-  const [fresh, setFresh] = useState<{ before: Set<string>; outcome: KeyOutcome } | null>(null);
+  // The save just made: which key (the router's key_id) and what the check said.
+  const [fresh, setFresh] = useState<{ id: string | null; outcome: KeyOutcome } | null>(null);
   const [adding, setAdding] = useState(false);
   useEffect(() => {
     if (!open) {
@@ -351,9 +342,9 @@ function KeyRow({
       setFresh(null);
     }
   }, [open]);
-  const saved = (o: KeyOutcome | "removed", another = false) => {
+  const saved = (o: KeyOutcome | "removed", keyId?: string | null, another = false) => {
     if (o !== "removed" && o.kind !== "not_saved") {
-      setFresh({ before: new Set((p.keys ?? []).map((k) => k.id)), outcome: o });
+      setFresh({ id: keyId ?? null, outcome: o });
       setAdding(false);
       manualResult(p.id, o, openedAt.current);
       openedAt.current = Date.now();
@@ -361,18 +352,19 @@ function KeyRow({
     if (another) onReload();
     else onDone(o);
   };
-  const freshId = fresh ? keys?.find((k) => !fresh.before.has(k.id))?.id : undefined;
 
   let cls = "dot-off";
   let text = "Needs a key";
   if (keys) {
-    cls = working ? "dot-ok" : "dot-warn";
+    cls = inUse ? "dot-ok" : "dot-warn";
     text =
       keys.length === 1
-        ? working
+        ? inUse
           ? "Key set"
-          : "Key not working"
-        : `${keys.length} keys · ${working} working`;
+          : keys[0].enabled
+            ? "Key not in use"
+            : "Key off"
+        : `${keys.length} keys · ${inUse} in use`;
   } else if (p.usable && p.anonymous && !p.vars.some((v) => v.set)) {
     cls = "dot-ok";
     text = "Works without a key";
@@ -392,6 +384,7 @@ function KeyRow({
           <span className="setup-account-name">
             {fullName}
             <FreeBadge help={help} />
+            <PersonBadge help={help} />
           </span>
           <span className="setup-account-status">
             <Status cls={cls} text={text} />
@@ -399,10 +392,10 @@ function KeyRow({
               {help?.recommended === false && help.why_not
                 ? help.why_not
                 : !p.usable && help?.time_minutes
-                  ? `about ${help.time_minutes}\u00a0min`
+                  ? `about ${help.time_minutes} min`
                   : `${p.models} model${p.models === 1 ? "" : "s"}${p.tiers.length ? ` · ${p.tiers.join(", ")}` : ""}`}
             </span>
-            {until && <span className="meta key-until">{untilText(until)}</span>}
+            {until && <span className="meta key-until">{untilText(until, p.expired)}</span>}
           </span>
         </div>
         {p.vars.length > 0 && (
@@ -430,12 +423,25 @@ function KeyRow({
                   k={k}
                   i={i}
                   name={name}
-                  fresh={k.id === freshId ? fresh!.outcome : null}
+                  fresh={k.id === fresh?.id ? fresh.outcome : null}
                   last={keys.length === 1}
-                  onRenamed={onReload}
+                  onChanged={onReload}
                   onRemoved={() => (keys.length === 1 ? onDone("removed") : onReload())}
                 />
               ))}
+              {anon && (
+                <li className="key-item" data-key-id={anon.id}>
+                  <span className="key-item-main">
+                    <span className="key-item-name">No key needed</span>
+                  </span>
+                  <span className="key-item-state">
+                    <Status
+                      cls={anon.usable ? "dot-ok" : "dot-warn"}
+                      text={anon.usable ? "In use" : (anon.reason ?? "Not in use")}
+                    />
+                  </span>
+                </li>
+              )}
             </ul>
             {adding ? (
               <div className="key-add" data-key-add>
@@ -457,7 +463,7 @@ function KeyRow({
                     defaultLabel: `Key ${keys.length + 1}`,
                     onCancel: () => setAdding(false),
                   }}
-                  onDone={(o) => saved(o, true)}
+                  onDone={(o, id) => saved(o, id, true)}
                 />
               </div>
             ) : (
@@ -477,7 +483,11 @@ function KeyRow({
   );
 }
 
-/** One saved key: its name (renamed in place), plan, last four, working or why not, Remove. */
+/**
+ * One saved key: its name (renamed in place), plan, last four, in use or why not, on/off, Try
+ * again for one the provider refused, and Remove (asks first; not for a key from the router's
+ * environment, which is removed there).
+ */
 function KeyItem({
   provider,
   k,
@@ -485,7 +495,7 @@ function KeyItem({
   name,
   fresh,
   last,
-  onRenamed,
+  onChanged,
   onRemoved,
 }: {
   provider: string;
@@ -496,7 +506,7 @@ function KeyItem({
   fresh: KeyOutcome | null;
   /** The provider's only key: removing it closes the provider. */
   last: boolean;
-  onRenamed: () => void;
+  onChanged: () => void;
   onRemoved: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -504,24 +514,34 @@ function KeyItem({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const label = keyName(k, i);
+  const env = k.source === "env";
+  // Refused by the provider (not off, not missing a field): the person can have it tried again.
+  const refused = k.enabled && !k.usable && !!k.reason && !/^Needs\b/.test(k.reason);
   const [cls, text] = !k.enabled
     ? ["dot-off", "Off"]
-    : k.usable
-      ? ["dot-ok", "Working"]
-      : fresh?.kind === "rejected"
-        ? ["dot-warn", rejectedText(name, fresh)]
-        : ["dot-warn", k.reason ? `${name} rejected it: ${k.reason}` : "Not working"];
+    : fresh?.kind === "rejected"
+      ? ["dot-warn", rejectedText(name, fresh)]
+      : !k.usable
+        ? ["dot-warn", k.reason ?? "Not in use"]
+        : fresh?.kind === "working"
+          ? ["dot-ok", "Working"]
+          : fresh?.kind === "saved"
+            ? ["dot-ok", "Saved"]
+            : ["dot-ok", "In use"];
 
+  const patch = async (body: KeyPatch) => {
+    setBusy(true);
+    setErr(null);
+    const r = await updatePoolKey(provider, k.id, body);
+    setBusy(false);
+    if (!r.ok) setErr(r.detail);
+    else onChanged();
+  };
   const rename = async (value: string) => {
     setEditing(false);
     const v = value.trim();
     if (v === (k.label ?? "") || (!k.label && v === label)) return;
-    setBusy(true);
-    setErr(null);
-    const r = await updatePoolKey(provider, k.id, { label: v || null });
-    setBusy(false);
-    if (!r.ok) setErr(r.detail);
-    else onRenamed();
+    await patch({ label: v || null });
   };
   const remove = async () => {
     setBusy(true);
@@ -534,7 +554,7 @@ function KeyItem({
   };
 
   return (
-    <li className="key-item" data-key-id={k.id}>
+    <li className="key-item" data-key-id={k.id} data-off={!k.enabled || undefined}>
       <span className="key-item-main">
         {editing ? (
           <input
@@ -587,14 +607,44 @@ function KeyItem({
       ) : (
         <span className="key-item-state">
           <Status cls={cls} text={text} />
-          <button
-            className="icon-btn setup-remove"
-            aria-label={`Remove ${label}`}
-            title="Remove key"
-            onClick={() => setConfirm(true)}
-          >
-            <IconTrash />
-          </button>
+          {refused && (
+            <button
+              type="button"
+              className="btn btn-small key-item-retry"
+              disabled={busy}
+              onClick={() => void patch({ enabled: true })}
+            >
+              Try again
+            </button>
+          )}
+          <input
+            type="checkbox"
+            className="switch key-item-switch"
+            checked={k.enabled}
+            disabled={busy}
+            aria-label={`Use ${label}`}
+            title={
+              k.enabled ? "In the pool: switch off to stop using it" : "Off: switch on to use it"
+            }
+            onChange={(e) => void patch({ enabled: e.currentTarget.checked })}
+          />
+          {env ? (
+            <span
+              className="meta key-item-env"
+              title="Set in the router's keys.env or the shell: remove it there."
+            >
+              From the router's setup
+            </span>
+          ) : (
+            <button
+              className="icon-btn setup-remove"
+              aria-label={`Remove ${label}`}
+              title="Remove key"
+              onClick={() => setConfirm(true)}
+            >
+              <IconTrash />
+            </button>
+          )}
         </span>
       )}
       {err && (

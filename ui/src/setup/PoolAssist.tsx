@@ -49,6 +49,7 @@ import {
   getPoolKeysAll,
   getWebOpen,
   inUse,
+  ownKeys,
   type PoolHelpData,
   type PoolProvider,
   type RemovedProvider,
@@ -78,16 +79,19 @@ export function AssistNote({
 }) {
   const f = useAssistant();
   const [busy, setBusy] = useState(false);
-  const left = guided(
+  const open = guided(
     help.providers.filter((h) => h.recommended),
     pool,
   ).filter((h) => !poolSetUp(pool.find((p) => p.id === h.id)));
+  // The ones only the person can do (`setup: person`) are counted apart.
+  const left = open.filter((h) => !h.person);
+  const theirs = open.length - left.length;
   if (!left.length) return null;
   return (
     <div className="assist-note" data-assist={f ? f.cli : "none"}>
       <span className="assist-note-text">
         {f
-          ? `${f.name} can walk you through getting ${left.length === 1 ? "the last free API key" : `${left.length} free API keys`}, one at a time. You paste each key into the app, never into the chat.`
+          ? `${f.name} can walk you through getting ${left.length === 1 ? "one more free API key" : `${left.length} free API keys, one at a time`}${theirs ? ` (${theirs} more you set up yourself)` : ""}. You paste each key into the app, never into the chat.`
           : "Once Claude Code or Codex is connected as a fallback, it can walk you through getting free API keys, one at a time."}
       </span>
       {f ? (
@@ -247,7 +251,7 @@ export function PoolKeyCard({
   const sending = useAppState((s) => s.sending);
   // A router that keeps several keys per provider; else saving replaces the one there is.
   const multi = !!pool && pool.keys !== null;
-  const another = add && multi && (pool?.keys?.length ?? 0) > 0;
+  const another = add && multi && (ownKeys(pool!)?.length ?? 0) > 0;
 
   // The card is up: the minutes it takes count from here.
   const counted = useRef(false);
@@ -269,7 +273,7 @@ export function PoolKeyCard({
 
   if (!live || sent) {
     const tone = sent
-      ? sent.kind === "working"
+      ? sent.kind === "working" || sent.kind === "saved"
         ? "ok"
         : sent.kind === "skipped"
           ? "off"
@@ -283,7 +287,9 @@ export function PoolKeyCard({
     const t = !tone
       ? null
       : tone === "ok"
-        ? "Saved and working"
+        ? (sent ? sent.kind === "saved" : /not checked/.test(outcome?.text ?? ""))
+          ? "Saved (not checked)"
+          : "Saved and working"
         : tone === "off"
           ? "Skipped"
           : notSaved
@@ -326,7 +332,7 @@ export function PoolKeyCard({
         <span className="setup-key-actions">{skip}</span>
       </div>
     );
-  const count = pool.keys?.length ?? 0;
+  const count = ownKeys(pool)?.length ?? 0;
   const terms = pool.multiple_keys ?? help?.multiple_keys ?? null;
   return (
     <div className="key-card" data-key-card={id} data-live data-add={another || undefined}>
@@ -419,7 +425,7 @@ export function KeyIntercept({
     const { outcome } = await savePoolKey(
       p.id,
       { [v.name]: keyText },
-      p.keys?.length ? { keyVar: v.name } : undefined,
+      ownKeys(p)?.length ? { keyVar: v.name } : undefined,
     );
     setBusy(false);
     if (outcome.kind === "not_saved") return setErr(outcome.reason);

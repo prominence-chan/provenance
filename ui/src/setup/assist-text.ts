@@ -84,6 +84,8 @@ export function splitAssistBrief(text: string): { brief: string; rest: string } 
 
 export type KeyOutcome =
   | { kind: "working"; nth?: number }
+  /** Saved and in use, but this provider has no free check: the first request will tell. */
+  | { kind: "saved"; detail: string | null; nth?: number }
   /** by: the provider refused it (the router's check), or the router can't use it yet. */
   | { kind: "rejected"; reason: string; by?: "provider" | "router"; nth?: number }
   | { kind: "not_saved"; reason: string }
@@ -97,6 +99,8 @@ export function outcomeNote(name: string, o: KeyOutcome): string {
   switch (o.kind) {
     case "working":
       return `${NOTE_PREFIX}${keyWord(name, o.nth)}: saved and working.`;
+    case "saved":
+      return `${NOTE_PREFIX}${keyWord(name, o.nth)}: saved, not checked (${name} has no free check; its first request shows whether the key works).`;
     case "rejected":
       return o.by === "router"
         ? `${NOTE_PREFIX}${keyWord(name, o.nth)}: saved, but it can't be used yet: ${o.reason}`
@@ -112,7 +116,11 @@ export function outcomeNote(name: string, o: KeyOutcome): string {
 export function parseNote(text: string): { text: string; tone: "ok" | "warn" | "off" } | null {
   if (!text.startsWith(NOTE_PREFIX)) return null;
   const body = text.slice(NOTE_PREFIX.length).trim();
-  const tone = /saved and working/.test(body) ? "ok" : /skipped/.test(body) ? "off" : "warn";
+  const tone = /saved and working|saved, not checked/.test(body)
+    ? "ok"
+    : /skipped/.test(body)
+      ? "off"
+      : "warn";
   return { text: body.replace(/:\s*/, " ").replace(/\.$/, ""), tone };
 }
 
@@ -188,7 +196,10 @@ export function redact(text: string, secrets: string[]): string {
 
 // ---- what a setup came to, for the router's guide (POST /pool/help/{id}/outcome) ------------
 
-const EMAIL = /[^\s@<>()"',;:]+@[^\s@<>()"',;:]+\.[A-Za-z]{2,}/g;
+/** The router's own tests (provenance-core pool_help.py): a body with either is refused whole. */
+const PREFIXED =
+  /(?<![A-Za-z0-9])(?:sk-|sk_|gsk_|csk-|eyJ|AIza|hf_|cf[ua]t_|nvapi-|vck_|cpk_|xai-|ghp_|github_pat_|pk_)[A-Za-z0-9_-]{12,}/g;
+const EMAIL = /[^\s@]+@[^\s@]+\.[A-Za-z]{2,}/g;
 const URLS = /\bhttps?:\/\/\S+/gi;
 /** A run of letters and digits, mixed, long enough to be a key, a token or an account id. */
 const TOKENISH = /[A-Za-z0-9_\-+/=.]{16,}/g;
@@ -205,6 +216,7 @@ export function scrub(text: string, help: PoolHelp[] = [], max = 120): string {
     if (re) out = out.replace(new RegExp(re.source, "g"), " ");
   }
   out = out
+    .replace(PREFIXED, " ")
     .replace(new RegExp(KNOWN.source, "g"), " ")
     .replace(EMAIL, " ")
     .replace(URLS, " ")
@@ -294,10 +306,15 @@ export function poolBrief(
   const gone = new Set(removed.map((r) => r.id));
   const all = guided(help.providers, pool).filter((h) => !gone.has(h.id));
   const list = all.filter((h) => h.recommended);
-  const todo = list.filter((h) => !poolSetUp(pool.find((p) => p.id === h.id)));
+  const left = list.filter((h) => !poolSetUp(pool.find((p) => p.id === h.id)));
+  // `setup: person`: the person does it alone (a phone code, their own details): not walked.
+  const todo = left.filter((h) => !h.person);
+  const theirs = left.filter((h) => h.person);
   const notWorth = all.filter((h) => !h.recommended && !poolSetUp(pool.find((p) => p.id === h.id)));
   const doneHelp = all.filter((h) => poolSetUp(pool.find((p) => p.id === h.id)));
-  const keyCount = (id: string) => pool.find((p) => p.id === id)?.keys?.length ?? 0;
+  const keyCount = (id: string) =>
+    pool.find((p) => p.id === id)?.keys?.filter((k) => k.id !== "anon" && k.source !== "anonymous")
+      .length ?? 0;
   const done = doneHelp.map((h) => {
     const n = keyCount(h.id);
     return `${h.name} (card id: ${h.id}${n ? `; ${n} key${n === 1 ? "" : "s"}` : ""})`;
@@ -314,12 +331,17 @@ export function poolBrief(
     "- When they are ready to paste a key, end your message with this line, alone on the last line:",
     "  [[provenance:pool-key <id>]]",
     "  The app shows that line as a card with the provider's steps, a button that opens its keys page, and the key field. The person pastes the key into the card, not into this chat.",
-    `- The app then sends you one line starting "${NOTE_PREFIX.trim()}": "<Provider> key: saved and working", "<Provider> key: saved, but <Provider> rejected it: <what the provider answered>" (the app tried the key with the provider itself), "not saved: <reason>" or "skipped by the person". You never see the key. After a rejection, help them fix it (a key copied with a space or cut short, a step missed) and show the card again; after "skipped", move on.`,
+    `- The app then sends you one line starting "${NOTE_PREFIX.trim()}": "<Provider> key: saved and working" (the provider accepted it), "<Provider> key: saved, not checked (…)" (this provider has no free check: treat it as done, the first request will tell), "<Provider> key: saved, but <Provider> rejected it: <what the provider answered>", "not saved: <reason>" or "skipped by the person". You never see the key. After a rejection, help them fix it (a key copied with a space or cut short, a step missed) and show the card again; after "skipped", move on.`,
     ...(multi
       ? [
           "- A provider can hold several keys, one per account the person has: each account's limits add up, and a paid key usually has higher limits (Provenance uses all of them). Offer another key only when the person says they have another account. For it, end your message with this line instead, which shows a card that adds a key beside the saved ones rather than replacing them:",
           "  [[provenance:pool-key <id> add]]",
           "  Before they use a second account, pass on that provider's note on more than one key (below), once, in your own words. Where its terms don't allow a second account for more free usage, say so plainly: another key is for a separate paid account of theirs.",
+        ]
+      : []),
+    ...(theirs.length
+      ? [
+          "- Some providers need the person alone (a phone code, an e-mail approval, their own details or a payment step); they are listed apart under \"These need you\". Don't walk them step by step or wait on them: say once what each gives and why it needs the person, point them to its written steps on Provenance's keys page, show its card only if the person says they have its key, and carry on with the others.",
         ]
       : []),
     "- When you are done with a provider (its key saved, skipped, or the person gives up), put this line alone in your next message, before any card line (which stays last). The app reads it to improve these steps for the next person and doesn't show it:",
@@ -340,9 +362,20 @@ export function poolBrief(
     "",
     todo.length
       ? `Not set up yet, in this order (${todo.length}${minutes ? `, about ${minutes} minutes in all` : ""}):`
-      : "Every provider here is set up already: say so, and offer to check nothing else is needed.",
+      : theirs.length
+        ? 'Nothing is left for you to walk through: say so, and mention the ones under "These need you" once.'
+        : "Every provider here is set up already: say so, and offer to check nothing else is needed.",
   ].join("\n");
   const extra: string[] = [];
+  if (theirs.length)
+    extra.push(
+      "",
+      "These need you (the person does them alone, with the steps on the keys page; not part of your walk-through):",
+      ...theirs.map(
+        (h) =>
+          `- ${h.name} (card id: ${h.id}): ${h.what_you_get}${h.why_person ? ` Why it needs the person: ${h.why_person}` : ""}`,
+      ),
+    );
   const doneMulti = multi
     ? doneHelp.flatMap((h) => {
         const line = multipleLine(
@@ -361,13 +394,23 @@ export function poolBrief(
   if (removed.length)
     extra.push(
       "",
-      `No longer in the pool (don't offer them): ${removed.map((r) => `${r.name}${r.reason ? ` (${r.reason})` : ""}`).join(", ")}.`,
+      "No longer in the pool (don't offer them; a key the person still has saved for one is ignored):",
+      ...removed.map((r) => `- ${r.name}${r.reason ? `: ${r.reason}` : ""}`),
     );
   if (notWorth.length)
     extra.push(
       "",
       "Not worth setting up for the free pool (skip unless the person asks; their cards still work):",
-      ...notWorth.map((h) => `- ${h.name} (card id: ${h.id}): ${h.why_not ?? "not recommended"}`),
+      ...notWorth.map((h) => {
+        const until = pool.find((p) => p.id === h.id)?.until ?? h.until;
+        return `- ${h.name} (card id: ${h.id}): ${h.why_not ?? "not recommended"}${until ? ` ${untilLine(until)}` : ""}`;
+      }),
+    );
+  if (help.considered.length)
+    extra.push(
+      "",
+      'Looked at and not added to the pool (don\'t suggest them; this is for answering "why not X?"):',
+      ...help.considered.map((c) => `- ${c.name}: ${c.why_not}`),
     );
   if (help.notes.length)
     extra.push(
@@ -466,6 +509,8 @@ function providerBlock(h: PoolHelp, n: number, p: PoolProvider | undefined, mult
   const x = h.experience;
   if (x?.tries) lines.push(`   Earlier setups: ${x.worked} of ${x.tries} got a working key.`);
   for (const t of x?.common_trouble ?? [])
-    lines.push(`   People often get stuck${t.step ? ` at step ${t.step}` : ""}: ${t.note}`);
+    lines.push(
+      `   ${t.count > 1 ? `${t.count} people got stuck` : "Someone got stuck"}${t.step ? ` at step ${t.step}` : ""}${t.note ? `: ${t.note}` : ""}`,
+    );
   return lines.join("\n");
 }

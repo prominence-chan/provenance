@@ -184,14 +184,19 @@ export interface WirePoolProvider {
   keys?: WirePoolKey[];
   /** Whether the provider's terms allow a second account's key. */
   multiple_keys?: WireMultipleKeys;
-  /** ISO date: it stops being offered after it (Inception after its API shuts down). */
+  /** ISO date: the last day it is used (Inception, whose API shuts down). */
   until?: string | null;
+  /** Past `until`: its models are no longer offered. */
+  expired?: boolean;
+  /** The router's own line about it (a temporary provider), for logs and the assistant. */
+  note?: string | null;
 }
 
 export type KeyTier = "free" | "paid";
 
 /** One saved key: never the value, only enough to tell it apart. */
 export interface WirePoolKey {
+  /** "main": the provider's first key (its variable); "k" + 6 hex: a further one; "anon": the keyless slot. */
   id: string;
   /** The person's name for it; null: "Key 1", "Key 2" by position. */
   label: string | null;
@@ -199,14 +204,16 @@ export interface WirePoolKey {
   usable: boolean;
   /** Why it isn't usable (the provider's answer to the check). */
   reason: string | null;
-  /** ISO time it was saved. */
+  /** ISO day it was saved. */
   added: string | null;
-  /** The key's last four characters. */
+  /** The key's last four characters ("" for a key too short to show them safely). */
   last4: string | null;
   /** The router's view of its limits (shape the router's; the app doesn't read it). */
   limits?: unknown;
-  /** false: kept but not used (PATCH {enabled}). */
+  /** false: kept but not used (PATCH {enabled}); PATCH {enabled: true} also clears a rejection. */
   enabled?: boolean;
+  /** "app": saved from the app; "env": the router's environment (keys.env, the shell), not removable here. */
+  source?: "app" | "env" | "anonymous";
 }
 
 /** yes; check_terms: the person should read the terms first; no: not for more free usage. */
@@ -215,13 +222,24 @@ export interface WireMultipleKeys {
   note: string | null;
 }
 
-/** A provider taken out of the pool, and why. */
+/** A provider taken out of the pool, and why. It is no longer listed in `providers`. */
 export interface WireRemovedProvider {
   id: string;
   name: string;
   reason: string;
   /** ISO date it was taken out. */
-  date: string;
+  removed: string;
+  /** /pool/keys: a key for it is still saved (ignored); DELETE /pool/keys/{id} forgets it. */
+  leftover_key?: boolean;
+  note?: string | null;
+}
+
+/** /pool/help `considered`: a provider looked at and not added. */
+export interface WireConsidered {
+  name: string;
+  allowance: string | null;
+  why_not: string;
+  source: string;
 }
 
 export interface WirePoolKeys {
@@ -229,16 +247,24 @@ export interface WirePoolKeys {
   removed?: WireRemovedProvider[];
 }
 
-/** PUT /pool/keys/{provider}. Values go one way: they are never sent back. */
+/** PUT /pool/keys/{provider}: set or replace the first key. Values go one way: never sent back. */
 export interface KeysPut {
   values: Record<string, string>;
+  label?: string;
+  tier?: KeyTier;
 }
 
-/** What the router found when it tried a key just saved (PUT, POST). */
+/**
+ * What the router found when it tried a key just saved (PUT, POST): ok null = not checked (only some
+ * providers have a free check; the first request shows whether it works).
+ */
 export interface WireKeyCheck {
-  ok: boolean;
+  ok: boolean | null;
   detail: string | null;
 }
+
+/** PUT and POST answer with the provider's view, the key's id and the check. */
+export type WireKeySaved = WirePoolProvider & { key_id: string | null; check: WireKeyCheck };
 
 /** POST /pool/keys/{provider}: one more key (409 when that key is saved already). */
 export interface KeyPost {
@@ -249,7 +275,7 @@ export interface KeyPost {
   extras?: Record<string, string>;
 }
 
-/** PATCH /pool/keys/{provider}/{key_id}. */
+/** PATCH /pool/keys/{provider}/{key_id}: answers with the provider's view. */
 export interface KeyPatch {
   label?: string | null;
   tier?: KeyTier | null;
@@ -309,12 +335,24 @@ export interface WirePoolHelpProvider {
   open_with?: { provider: string; account: string }[];
   multiple_keys?: WireMultipleKeys;
   until?: string | null;
+  /**
+   * "person": it needs something only the person can do (a phone code, an e-mail approval, their
+   * own details, a payment step): they do it alone with the written steps, outside the assisted
+   * walk-through. Absent: the assistant can walk them through it.
+   */
+  setup?: "person" | null;
+  /** Why it needs the person, one sentence. */
+  why_person?: string | null;
   /** What earlier setups (POST …/outcome) came to. */
   experience?: WirePoolExperience;
 }
 
-/** Where people got stuck: a step (1-based) and what went wrong there, or a line of text. */
-export type WireTrouble = string | { step?: number | null; note?: string; text?: string };
+/** A step people reported as not matching: its number (1-based) or, where it couldn't be told, its text. */
+export interface WireTrouble {
+  step: number | string;
+  count: number;
+  notes: string[];
+}
 
 export interface WirePoolExperience {
   tries: number;
@@ -328,11 +366,13 @@ export interface WirePoolHelp {
   /** Rules for an assistant walking someone through these (the app's setup assistant gets them). */
   assistant_notes?: string[];
   providers: WirePoolHelpProvider[];
-  removed?: WireRemovedProvider[];
+  removed?: (Omit<WireRemovedProvider, "leftover_key" | "note"> & { key_var?: string })[];
+  considered?: WireConsidered[];
 }
 
 // ---- POST /pool/help/{provider}/outcome: how a setup went, for the next person's guide -----
-// No key, e-mail or other personal detail: step numbers, the site's control names, a result.
+// No key, e-mail or other personal detail: step numbers, the site's control names, a result. The
+// router refuses the whole body (400) for an unknown field or anything shaped like a key or e-mail.
 
 export type OutcomeResult = "saved_working" | "saved_rejected" | "skipped" | "gave_up";
 
