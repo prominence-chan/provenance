@@ -8,6 +8,10 @@
 //   - reported: one line per task from the worker's report (its RESULT), and its BLOCKERS.
 // When the text would pass the bound, the oldest entries are folded first: finished-task lines
 // into a count, then old commands, then old files. The user's request is never folded.
+//
+// The notes also hold where the plan stands: the tasks still to do (kept current as tasks start
+// and finish, so a turn that ends early leaves the list "continue" resumes from) and the files
+// the request names that did not exist when it was made (what the job has to produce).
 
 export interface Notes {
   /** What the user asked for, newest last (each clipped). The first is the thread's goal. */
@@ -22,12 +26,25 @@ export interface Notes {
   commands: { cmd: string; ok: boolean }[];
   /** Open problems (blockers reported and not since resolved), newest last. */
   problems: string[];
+  /** Tasks planned and not finished, in order (empty when a plan ran to its end). */
+  pending: { title: string; done: string }[];
+  /** Files the latest request names that it did not find: what has to exist at the end. */
+  deliverables: string[];
 }
 
 export const NOTES_LIMIT = 2400;
 
 export function emptyNotes(): Notes {
-  return { requests: [], done: [], folded: 0, files: [], commands: [], problems: [] };
+  return {
+    requests: [],
+    done: [],
+    folded: 0,
+    files: [],
+    commands: [],
+    problems: [],
+    pending: [],
+    deliverables: [],
+  };
 }
 
 export function clip(s: string, n: number): string {
@@ -84,7 +101,14 @@ export function clearProblems(n: Notes): void {
   n.problems = [];
 }
 
-function render(n: Notes): string {
+/** The plan as it stands: the task being worked on and those after it (at most 8 are kept). */
+export function setPending(n: Notes, tasks: { title: string; done: string }[]): void {
+  n.pending = tasks
+    .slice(0, 8)
+    .map((t) => ({ title: clip(t.title, 240), done: clip(t.done, 120) }));
+}
+
+function render(n: Notes, withPending: boolean): string {
   const out: string[] = [];
   if (n.requests.length) {
     out.push(`GOAL: ${n.requests[0]}`);
@@ -105,15 +129,21 @@ function render(n: Notes): string {
     out.push("PROBLEMS HIT (later tasks may have fixed them):");
     for (const p of n.problems) out.push(`- ${p}`);
   }
+  if (withPending && n.pending.length) {
+    out.push("STILL TO DO (planned, not finished):");
+    n.pending.slice(0, 6).forEach((t, i) => out.push(`${i + 1}. ${clip(t.title, 110)}`));
+    if (n.pending.length > 6) out.push(`(and ${n.pending.length - 6} more)`);
+  }
   return out.join("\n");
 }
 
 /**
  * The notes as text, at most `limit` characters. Folds the notes themselves (oldest first) until
- * they fit, so what is stored is always what is shown.
+ * they fit, so what is stored is always what is shown. The tasks still to do are shown (never
+ * folded) unless `withPending` is false: a worker's brief names the later tasks itself.
  */
-export function notesText(n: Notes, limit = NOTES_LIMIT): string {
-  let text = render(n);
+export function notesText(n: Notes, limit = NOTES_LIMIT, withPending = true): string {
+  let text = render(n, withPending);
   for (let guard = 0; text.length > limit && guard < 200; guard++) {
     if (n.done.length > 2) {
       n.done.shift();
@@ -126,7 +156,7 @@ export function notesText(n: Notes, limit = NOTES_LIMIT): string {
       n.done.shift();
       n.folded++;
     } else break;
-    text = render(n);
+    text = render(n, withPending);
   }
   return text.length > limit ? clipMiddle(text, limit) : text;
 }

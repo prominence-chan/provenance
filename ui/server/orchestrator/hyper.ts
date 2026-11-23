@@ -3,13 +3,20 @@
 //
 //   a. think      a new chat, no tools: the goal, a one-line listing of the folder, the summary
 //                 and the last step's results -> free-form text saying what to do next, or
-//                 "FINISHED: <answer for the user>".
+//                 "FINISHED: <answer for the user>". A file it wants written it gives once, whole,
+//                 in a block fenced ```file:<path>.
 //   b. translate  another new chat: that text, the folder and the platform -> actions in a small
 //                 fixed vocabulary (RUN, READ, LIST, SEARCH, WRITE, REPLACE; parse.ts reads it
-//                 forgivingly). It never sees the goal, the summary or any history.
+//                 forgivingly). It never sees the goal, the summary or any history, and it never
+//                 copies a file: the bodies are lifted out of the think text first (parse.ts
+//                 liftFiles; a complete `cat > f <<'EOF'` heredoc counts too) and attached to the
+//                 WRITE that names them, verbatim. Translate only decides the actions.
 //   c. execute    each action runs through the orchestrators' app-server as a sandboxed command
 //                 (command/exec with the thread's sandbox as an explicit policy; exec below), never
 //                 a shell of our own. Rows appear in the thread as commands and file changes.
+//                 A WRITE with no content, or a `cat > f` with no heredoc body, is refused before
+//                 anything runs: what came before it in the step runs, the rest doesn't, and the
+//                 next think is told what was refused and how to give the file.
 //   d. summarize  a third new chat folds the step (what was intended, the actions and their cut
 //                 results) into the summary, which is then cut to SUMMARY_LIMIT. Back to a.
 //
@@ -25,10 +32,20 @@
 //     file changes, in this thread until the app restarts. Auto / Read only / Full access don't
 //     ask: the sandbox is the limit.
 //
+// Environment: a RUN sees what a command of the stock harness's shell tool sees (shellEnv below),
+// not what a bare login shell gives.
+//
 // Guards (backend.ts Caps): steps per turn, model calls per turn, time per command; and the turn
-// stops when a step is the same as the one before it twice, or two steps in a row yield no action.
+// stops when a step is the same as the one before it twice, or two steps in a row yield no action
+// (a step whose only fault was a refused write is fed back once without counting).
+//
+// A turn that ends without FINISHED (no model after the retries, a guard, an interrupt) leaves
+// the summary and the request on the thread: the next message, "continue" or anything else, is
+// thought about with both.
 
+import { userInfo } from "node:os";
 import { command, fileChange, type Item } from "../fallback/items.ts";
+import type { AppServer } from "./appserver.ts";
 import {
   folderBrief,
   Interrupted,
@@ -38,8 +55,16 @@ import {
   errText,
   type Run,
 } from "./backend.ts";
+import { mono } from "./clock.ts";
 import { clip, clipMiddle } from "./notes.ts";
-import { describeAction, parseActions, parseThought, type Action } from "./parse.ts";
+import {
+  describeAction,
+  isContinue,
+  liftFiles,
+  parseActions,
+  parseThought,
+  type Action,
+} from "./parse.ts";
 import {
   RESULTS_LIMIT,
   SUMMARY_LIMIT,
@@ -50,18 +75,27 @@ import {
 
 type Json = Record<string, unknown>;
 
-const SHELL = process.platform === "darwin" ? "/bin/zsh" : "/bin/sh";
 const MAX_WRITE_CHARS = 200_000;
 const READ_LINES = 250;
 
 export async function runHyper(run: Run): Promise<void> {
   const caps = run.caps;
-  const goal = run.text;
+  // The request: this message, or, when the last turn stopped short, that turn's request with
+  // this message after it ("continue" alone means just: go on).
+  const open = run.thread.openGoal ?? "";
+  const goal = !open
+    ? run.text
+    : isContinue(run.text)
+      ? open
+      : `${clipMiddle(run.text.trim(), 800)}\n\n(Before this message, this request was left unfinished: ${clip(open, 600)})`;
+  run.thread.openGoal = open && isContinue(run.text) ? open : clipMiddle(run.text.trim(), 1500);
+  run.save();
   let summary = run.thread.summary;
   let results = "";
   let lastSig = "";
   let repeats = 0;
   let empty = 0;
+  let refusedBefore = false;
   for (let step = 1; ; step++) {
     run.check();
     if (step > caps.steps)
@@ -90,54 +124,75 @@ export async function runHyper(run: Run): Promise<void> {
         `${summary}\n\nThe request "${clip(goal, 300)}" was answered: ${clip(thought.final, 400)}`.trim(),
         SUMMARY_LIMIT,
       );
+      run.thread.openGoal = null;
       run.save();
       return;
     }
     run.say(thought.next);
-    // b. translate
+    // b. translate: the file bodies stay here; the translator sees a marker for each
+    const lifted = liftFiles(thought.next);
     const parsed = parseActions(
-      await run.model("translate", translatePrompt(thought.next, run.cwd, platformName())),
+      await run.model("translate", translatePrompt(lifted.plan, run.cwd, platformName())),
+      8,
+      lifted.files,
     );
-    // c. execute
+    // c. execute, up to the first refused action
     const lines: string[] = [];
     for (const problem of parsed.problems) lines.push(`(not understood) ${problem}`);
-    if (!parsed.actions.length) {
-      empty++;
-      lines.push(
-        "No action could be read from the last plan. Say the commands and the file content concretely.",
-      );
-      if (empty >= 2)
-        throw new StopTurn(
-          "cap",
-          "Stopped: two steps in a row produced nothing that could be run.",
-        );
-    } else empty = 0;
-    const sig = parsed.actions.map(signature).join("\n");
+    const stopAt = parsed.rejected.length ? parsed.rejected[0].at : parsed.actions.length;
+    const todo = parsed.actions.slice(0, stopAt);
+    const skipped = parsed.actions.slice(stopAt);
+    if (!todo.length) {
+      if (parsed.rejected.length && !refusedBefore) {
+        // The first time, a refused write is only fed back: the next think can give the file.
+        refusedBefore = true;
+      } else {
+        empty++;
+        if (!parsed.rejected.length)
+          lines.push(
+            "No action could be read from the last plan. Say the commands concretely, and give file content in a file block.",
+          );
+        if (empty >= 2)
+          throw new StopTurn(
+            "cap",
+            "Stopped: two steps in a row produced nothing that could be run.",
+          );
+      }
+    } else {
+      empty = 0;
+      refusedBefore = false;
+    }
+    const sig = todo.map(signature).join("\n");
     if (sig && sig === lastSig) {
       repeats++;
       if (repeats >= 2)
         throw new StopTurn("cap", "Stopped: the same step came back three times in a row.");
     } else repeats = 0;
     lastSig = sig;
-    for (const action of parsed.actions) {
+    for (const action of todo) {
       run.check();
       const result = await execute(run, action);
       lines.push(`${describeAction(action)}\n${result}`);
     }
+    for (const r of parsed.rejected) lines.push(`(refused, nothing was written or run) ${r.text}`);
+    if (skipped.length)
+      lines.push(
+        `(not run, because of the refused action before ${skipped.length === 1 ? "it" : "them"}) ${skipped.map(describeAction).join("; ")}`,
+      );
     results = clipMiddle(lines.join("\n\n"), RESULTS_LIMIT);
     // d. summarize
     let next: string;
     try {
       next = await run.model(
         "summarize",
-        summarizePrompt({ goal, summary, intent: thought.next, results }),
+        summarizePrompt({ goal, summary, intent: lifted.plan, results }),
         900,
       );
     } catch (e) {
       if (!(e instanceof StopTurn) || e.kind !== "router" || run.interrupted) throw e;
       // Keep what happened even if nobody could write it up; the turn ends on this error.
       run.thread.summary = clipMiddle(
-        `${summary}\n\nStep ${step}: ${parsed.actions.map(describeAction).join("; ")}`.trim(),
+        `${summary}\n\nStep ${step} ran but was not summarized (no model): ${clipMiddle(results, 700)}`.trim(),
         SUMMARY_LIMIT,
       );
       run.save();
@@ -176,6 +231,7 @@ async function sandboxed(
   argv: string[],
   policy: Json,
   timeoutMs: number,
+  env?: Record<string, string>,
 ): Promise<ExecResult> {
   run.check();
   const processId = `orc-${process.pid}-${++processSeq}`;
@@ -190,6 +246,7 @@ async function sandboxed(
       sandboxPolicy: policy,
       timeoutMs,
       outputBytesCap: 256 * 1024,
+      ...(env ? { env } : {}),
     });
     if (run.signal.aborted) throw new Interrupted();
     return {
@@ -206,6 +263,135 @@ async function sandboxed(
 }
 
 const READ_ONLY: Json = { type: "readOnly", networkAccess: false };
+
+// ---- the environment of a RUN ------------------------------------------------------------------
+//
+// What a command of the stock harness's shell tool sees (codex-rs core: shell_snapshot.rs,
+// tools/runtimes/mod.rs maybe_wrap_shell_lc_with_snapshot, unified_exec/process_manager.rs):
+//   1. once per thread the harness runs the user's login shell (`$SHELL -lc`) with a prefix that
+//      also sources the interactive rc file (~/.zshrc, ~/.bashrc), and snapshots every exported
+//      variable (PATH included);
+//   2. each command then runs in a NON-login shell (`$SHELL -c`) with the snapshot's exports laid
+//      over the app-server's environment plus a few fixed values (no colours, no pager).
+// A bare `zsh -lc <command>`, which is what command/exec was given before, differs in both: it
+// never reads ~/.zshrc (where pyenv, nvm and the like usually put themselves on PATH), and macOS's
+// /etc/zprofile (path_helper) moves the system folders to the front of PATH on every command: the
+// user's python3 lost to /usr/bin/python3.
+//
+// command/exec has no snapshot and no switch for one, but it takes `env` overrides. So the same
+// two steps are done here: capture the exported environment once (per app-server and folder,
+// refreshed after ENV_TTL_MS) with the harness's own prefix, under the read-only policy, then run
+// each RUN as `$SHELL -c` with those exports as `env`. If the capture fails, RUN falls back to
+// `-lc` as before.
+
+/** The fixed values the shell tool sets (UNIFIED_EXEC_ENV); the captured exports go over them. */
+const TOOL_ENV: Record<string, string> = {
+  NO_COLOR: "1",
+  TERM: "dumb",
+  LANG: "C.UTF-8",
+  LC_CTYPE: "C.UTF-8",
+  LC_ALL: "C.UTF-8",
+  COLORTERM: "",
+  PAGER: "cat",
+  GIT_PAGER: "cat",
+  GH_PAGER: "cat",
+  CODEX_CI: "1",
+};
+/** The harness's rc prefixes (shell-command/src/startup.rs), their output dropped. */
+const RC_PREFIX: Record<string, string> = {
+  zsh: `{ if [[ -n "\${ZDOTDIR-}" ]]; then rc="$ZDOTDIR/.zshrc"; elif [[ -n "\${HOME-}" ]]; then rc="$HOME/.zshrc"; else rc=; fi; [[ -r "$rc" ]] && . "$rc"; } >/dev/null 2>&1 </dev/null`,
+  bash: `{ if [ -z "\${BASH_ENV-}" ] && [ -n "\${HOME-}" ] && [ -r "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi; } >/dev/null 2>&1 </dev/null`,
+};
+const ENV_MARK = "__ORC_ENV_BEGIN__";
+const ENV_TTL_MS = 10 * 60_000;
+/** Not carried over: the shell sets these itself for each command. */
+const ENV_SKIP = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
+
+/** The user's login shell, as the harness picks it; zsh on macOS and sh elsewhere if unknown. */
+export function userShell(): string {
+  let shell = "";
+  try {
+    shell = userInfo().shell ?? "";
+  } catch {
+    // no passwd entry
+  }
+  shell ||= process.env.SHELL ?? "";
+  if (/\/(?:zsh|bash)$/.test(shell)) return shell;
+  return process.platform === "darwin" ? "/bin/zsh" : "/bin/sh";
+}
+
+/** The script that prints the exported environment the shell tool's snapshot would hold. */
+export function captureScript(shell: string): string | null {
+  const prefix = RC_PREFIX[shell.split("/").pop() ?? ""];
+  if (!prefix) return null;
+  return `${prefix}\nprintf '\\n%s\\n' ${ENV_MARK}\nenv -0 | base64`;
+}
+
+/** `env -0 | base64` after the marker -> the variables (null when it can't be read). */
+export function parseCapturedEnv(stdout: string): Record<string, string> | null {
+  const at = stdout.lastIndexOf(ENV_MARK);
+  if (at === -1) return null;
+  const raw = Buffer.from(
+    stdout.slice(at + ENV_MARK.length).replace(/\s+/g, ""),
+    "base64",
+  ).toString("utf8");
+  const env: Record<string, string> = {};
+  for (const entry of raw.split("\0")) {
+    const eq = entry.indexOf("=");
+    if (eq <= 0) continue;
+    const key = entry.slice(0, eq);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || ENV_SKIP.has(key)) continue;
+    if (key.startsWith("CODEX_SANDBOX")) continue; // set for the capture's own sandbox, not the user's
+    env[key] = entry.slice(eq + 1);
+  }
+  return env.PATH ? env : null;
+}
+
+interface ShellEnv {
+  shell: string;
+  /** null: the capture failed; RUN uses a login shell as before. */
+  env: Record<string, string> | null;
+  at: number;
+}
+const shellEnvs = new WeakMap<AppServer, Map<string, Promise<ShellEnv>>>();
+
+/** The shell and environment a RUN in this thread's folder gets (captured once, then reused). */
+async function shellEnv(run: Run): Promise<ShellEnv> {
+  const as = run.appServer;
+  let byCwd = shellEnvs.get(as);
+  if (!byCwd) shellEnvs.set(as, (byCwd = new Map()));
+  const cached = byCwd.get(run.cwd);
+  if (cached) {
+    const got = await cached;
+    if (mono.now() - got.at < ENV_TTL_MS) return got;
+  }
+  const shell = userShell();
+  const script = captureScript(shell);
+  const capture = (async (): Promise<ShellEnv> => {
+    if (!script) return { shell, env: null, at: mono.now() };
+    try {
+      const r = await as.request("command/exec", {
+        command: [shell, "-lc", script],
+        cwd: run.cwd,
+        sandboxPolicy: READ_ONLY,
+        timeoutMs: 15_000,
+        outputBytesCap: 1024 * 1024,
+      });
+      const env =
+        r.exitCode === 0 && typeof r.stdout === "string" ? parseCapturedEnv(r.stdout) : null;
+      if (!env)
+        run.backend.log(`couldn't read the shell environment (${shell}); RUN uses a login shell`);
+      return { shell, env: env ? { ...TOOL_ENV, ...env } : null, at: mono.now() };
+    } catch (e) {
+      run.backend.log(`couldn't read the shell environment: ${errText(e)}`);
+      return { shell, env: null, at: mono.now() };
+    }
+  })();
+  byCwd.set(run.cwd, capture);
+  const got = await capture;
+  run.check();
+  return got;
+}
 
 /** Does the thread's approval preset want the user asked before this? Unknown policies ask. */
 export function mustAsk(approvalPolicy: unknown): boolean {
@@ -230,7 +416,7 @@ async function execute(run: Run, a: Action): Promise<string> {
       .set(run.threadId, { commands: new Set(), files: false })
       .get(run.threadId))!;
   const id = run.nextId("act");
-  const t0 = Date.now();
+  const t0 = mono.now();
   switch (a.kind) {
     case "read":
     case "list":
@@ -279,7 +465,7 @@ async function execute(run: Run, a: Action): Promise<string> {
           output: text,
           exitCode: r.exitCode,
           actions,
-          durationMs: Date.now() - t0,
+          durationMs: Math.round(mono.now() - t0),
         }),
       );
       return a.kind === "search" && r.exitCode === 0 && !r.stdout.trim() ? "(no matches)" : text;
@@ -302,14 +488,18 @@ async function execute(run: Run, a: Action): Promise<string> {
           return "[the user declined to run this command]";
         }
       }
-      const r = await sandboxed(run, [SHELL, "-lc", a.command], policy, run.caps.commandMs);
+      // The shell tool's way: a non-login shell over the captured environment (see shellEnv).
+      const sh = await shellEnv(run);
+      const r = sh.env
+        ? await sandboxed(run, [sh.shell, "-c", a.command], policy, run.caps.commandMs, sh.env)
+        : await sandboxed(run, [sh.shell, "-lc", a.command], policy, run.caps.commandMs);
       const text = output(r);
       run.complete(
         command(id, a.command, cwd, {
           status: r.exitCode === 0 ? "completed" : "failed",
           output: text,
           exitCode: r.exitCode,
-          durationMs: Date.now() - t0,
+          durationMs: Math.round(mono.now() - t0),
         }),
       );
       return text;

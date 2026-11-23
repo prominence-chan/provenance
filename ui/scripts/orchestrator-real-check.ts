@@ -4,7 +4,9 @@
 // free allowance.
 //
 //   node scripts/orchestrator-real-check.ts sandbox            no model: Hyperexperimental's
-//        execute step under each preset, with the real sandbox (scripted think / translate)
+//        execute step under each preset, with the real sandbox (scripted think / translate), and
+//        the environment of a RUN against the harness's own shell (thread/shellCommand, which
+//        uses the same shell snapshot as the model's shell tool): the same python3, the same PATH
 //   node scripts/orchestrator-real-check.ts experimental [model]   one small job, real models
 //   node scripts/orchestrator-real-check.ts hyperexperimental [model]
 //   node scripts/orchestrator-real-check.ts stock [model]      the same job on the stock harness
@@ -220,6 +222,8 @@ function report(turn: Turn): void {
 try {
   if (mode === "sandbox") {
     // Think and translate are scripted; everything else (app-server, command/exec, the sandbox) is real.
+    let parity = false;
+    const PARITY_CMD = 'command -v python3; echo "$PATH"';
     const script: CallModel = async (c) => {
       const role = c.instructions.startsWith("You direct")
         ? "think"
@@ -233,7 +237,9 @@ try {
             ? "do the writes"
             : "FINISHED: done"
           : role === "translate"
-            ? `WRITE: inside.txt\n<<<\nhello\n>>>\nWRITE: ${outside}/escape.txt\n<<<\nno\n>>>\nRUN: echo ran > by-run.txt; echo x > ${outside}/escape2.txt; cat inside.txt\nREAD: inside.txt\nREPLACE: inside.txt\n<<<\nhello\n===\nhello again\n>>>\nSEARCH: again IN .`
+            ? parity
+              ? `RUN: ${PARITY_CMD}`
+              : `WRITE: inside.txt\n<<<\nhello\n>>>\nWRITE: ${outside}/escape.txt\n<<<\nno\n>>>\nRUN: echo ran > by-run.txt; echo x > ${outside}/escape2.txt; cat inside.txt\nREAD: inside.txt\nREPLACE: inside.txt\n<<<\nhello\n===\nhello again\n>>>\nSEARCH: again IN .`
             : "wrote things";
       return { text: reply, promptChars: 0, servedBy: "script", ms: 0 };
     };
@@ -320,6 +326,49 @@ try {
           existsSync(path.join(outside, "escape2.txt")),
         "full access writes outside the folder, as the preset says",
       );
+      log("environment: a RUN against the harness's own shell");
+      parity = true;
+      t = await run("workspace-write", "on-request");
+      const ours = (
+        t.items.find((i) => i.type === "commandExecution" && i.command === PARITY_CMD)
+          ?.aggregatedOutput ?? ""
+      ).trim();
+      // The harness's side: a thread's own shell command (no model involved). Its snapshot is
+      // made in the background when the thread starts, so ask until it is in use (the answer
+      // stops changing) or a few seconds have passed.
+      const outputs: string[] = [];
+      let tid = "";
+      const off = appServer.listen((m) => {
+        if (m.params.threadId !== tid || m.method !== "item/completed") return;
+        const it = m.params.item as Item;
+        if (it.type === "commandExecution") outputs.push((it.aggregatedOutput ?? "").trim());
+      });
+      const th = await appServer.request("thread/start", {
+        model,
+        cwd: work,
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+        ephemeral: true,
+      });
+      tid = String((th.thread as { id: string }).id);
+      let theirs = "";
+      for (let i = 0; i < 8 && theirs !== ours; i++) {
+        await new Promise((r) => setTimeout(r, i === 0 ? 1500 : 1000));
+        const n = outputs.length;
+        await appServer.request("thread/shellCommand", { threadId: tid, command: PARITY_CMD });
+        for (let k = 0; k < 100 && outputs.length === n; k++)
+          await new Promise((r) => setTimeout(r, 100));
+        theirs = outputs.at(-1) ?? "";
+      }
+      off();
+      const [ourPy, ourPath] = ours.split("\n");
+      const [theirPy, theirPath] = theirs.split("\n");
+      log(`  python3: RUN ${ourPy} | harness ${theirPy}`);
+      log(
+        `  PATH entries: RUN ${ourPath?.split(":").length} | harness ${theirPath?.split(":").length}`,
+      );
+      check(!!ourPy && ourPy === theirPy, "a RUN finds the same python3 as the harness's shell");
+      check(!!ourPath && ourPath === theirPath, "and has the same PATH, entry for entry");
     });
     log("all good");
   } else if (mode === "experimental" || mode === "hyperexperimental") {

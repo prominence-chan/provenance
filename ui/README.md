@@ -522,16 +522,32 @@ characters.
   done-criteria, notes); its commands, edits and approval requests show in the visible thread;
   its last message is its report. The notes (`notes.ts`, at most 2,400 characters, oldest folded
   first) are the only thing carried between tasks and turns: files and commands as recorded,
-  one line per task as reported. A blocked task sends the remaining list back to the planner.
+  one line per task as reported, and the tasks still to do (so "continue" after a turn that
+  ended early runs what was left, without planning again). A blocked task, or a worker that used
+  up its own budget (24 requests, 10 minutes), sends the remaining list back to the planner. A
+  plan that only looks around gets a last task that makes what the request asks for; a file the
+  request named that is still missing at the end, or a last recorded command that failed, is
+  stated first in the reply. A planner reply that declines ("I can't run commands…") is asked for
+  once more.
 - **Hyperexperimental** (`hyper.ts`): per step, three new chats (think in plain words → translate
   into `RUN / READ / LIST / SEARCH / WRITE / REPLACE` → summarize) and one execution through
   app-server's `command/exec` under the thread's sandbox as an explicit policy (reads always
   read-only; "Ask every time" shows each command and file change for approval first). Only the
-  summary (2,500 characters) and the last step's results are carried.
+  summary (2,500 characters) and the last step's results are carried. File bodies are written
+  once: the think step gives a file in a ` ```file:<path> ` block, which is lifted out and attached
+  to the translated `WRITE` verbatim (the translator sees a marker); a `WRITE` with no content or
+  a `cat >` with no heredoc is refused before it runs and fed back. A `RUN` sees the environment
+  the harness's shell tool gives a command (the login shell plus the rc file, captured once, then
+  a non-login shell), not a bare `zsh -lc`.
 
 Loop guards are `Caps` in `backend.ts` (tasks, tries per task, plan revisions, steps, model calls
-per turn); one that stops the work ends the turn with a plain message. A router that can't serve
-(503 / 429) fails the turn with its message. `npm run check:orchestrator` checks all of it against
+per turn, requests and minutes per worker); one that stops the work ends the turn with a plain
+message. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
+retried inside the turn after 5, 20, 60 and 120 s (`PROVENANCE_ORC_RETRY_S`), with a status line
+in the thread; a worker whose own request failed is run again on the same schedule; interrupt ends
+a wait at once. Only then does the turn fail with the router's message, and what was done stays
+in the notes / summary for "continue". Guards read the monotonic clock (`clock.ts`).
+`npm run check:orchestrator` checks all of it against
 a stand-in router and app-server; `node scripts/orchestrator-real-check.ts sandbox` runs the
 execute step against the real binary's sandbox (no model), and `… experimental | hyperexperimental
 | stock [model]` one small real job each (they spend the free allowance).

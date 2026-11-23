@@ -9,10 +9,18 @@
 // them for its own coding prompt. Streaming is what makes interrupt work: closing the stream
 // frees the router's window (a non-streamed request runs to its end whatever the client does).
 //
-// The router answers "nobody can serve this" with 503 (and a named model with 429): those end
-// the caller's turn with a plain message; they are not retried here.
+// The router answers "nobody can serve this" with 503 (and a named model with 429). Nothing is
+// retried here: a failure is thrown as a RouterError that says whether waiting can help
+// (`retryable`: 429, 5xx, no answer, a timeout, a stream that ended in `response.failed`, an empty
+// reply), and the caller (backend.ts Run.model) waits and tries again inside the turn. After an
+// empty reply on a streamed call the router rests that model for a few minutes (it sends
+// `response.failed` with "empty reply" in the error), so the retry is served by another one.
+//
+// Time: the call's timeout is a timer and its duration is read off the monotonic clock; the wall
+// clock is not consulted (clock.ts).
 
 import { randomUUID } from "node:crypto";
+import { mono } from "./clock.ts";
 
 export interface RouterConn {
   url: string;
@@ -41,17 +49,41 @@ export interface ModelReply {
   ms: number;
 }
 
+/** HTTP statuses that a later try can get past (0 is ours: no answer, or a timeout). */
+const RETRYABLE = new Set([
+  0, 408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529,
+]);
+
 export class RouterError extends Error {
+  /** The HTTP status; 0 when there was no answer; 502 / 503 for a stream that failed. */
   status: number;
-  constructor(status: number, message: string) {
+  /** The model answered with nothing (the router rests it; another one takes the retry). */
+  empty: boolean;
+  constructor(status: number, message: string, empty = false) {
     super(message);
     this.status = status;
+    this.empty = empty || /empty (?:reply|response|output)/i.test(message);
   }
+  /** Waiting and asking again can help (not: a refused token, a malformed request). */
+  get retryable(): boolean {
+    return RETRYABLE.has(this.status);
+  }
+}
+
+/** A few words on why a call is being retried (the status line in the thread). */
+export function retryReason(e: unknown): string {
+  if (!(e instanceof RouterError)) return "the call failed";
+  if (e.empty) return "a model sent an empty reply";
+  if (e.status === 503) return "no model is free";
+  if (e.status === 429) return "rate limited";
+  if (e.status === 0) return /timed out/.test(e.message) ? "the call timed out" : "no answer";
+  return `the router answered ${e.status}`;
 }
 
 export type CallModel = (call: ModelCall) => Promise<ModelReply>;
 
-const DEFAULT_TIMEOUT_MS = 8 * 60_000;
+/** How long one call may take before it is given up (a timer: monotonic). */
+export const CALL_TIMEOUT_MS = 8 * 60_000;
 
 /** A message for the user from a router failure. */
 export function routerProblem(status: number, detail: string): string {
@@ -69,8 +101,8 @@ export function routerProblem(status: number, detail: string): string {
 export function makeCallModel(conn: () => RouterConn): CallModel {
   return async (call) => {
     const { url, token } = conn();
-    const t0 = Date.now();
-    const timeout = AbortSignal.timeout(call.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const t0 = mono.now();
+    const timeout = AbortSignal.timeout(call.timeoutMs ?? CALL_TIMEOUT_MS);
     const signal = AbortSignal.any([call.signal, timeout]);
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -118,8 +150,12 @@ export function makeCallModel(conn: () => RouterConn): CallModel {
         const out = outputText(ev.response);
         if (out) finalText = out;
       } else if (type === "response.failed" || type === "error") {
-        const r = (ev.response ?? ev) as { error?: { message?: string }; message?: string };
-        failure = r.error?.message ?? r.message ?? "the model call failed";
+        const r = (ev.response ?? ev) as {
+          error?: { message?: string } | string;
+          message?: string;
+        };
+        const err = typeof r.error === "string" ? r.error : r.error?.message;
+        failure = err ?? r.message ?? "the model call failed";
       } else if (ev.error && typeof ev.error === "object") {
         failure = (ev.error as { message?: string }).message ?? "the model call failed";
       }
@@ -149,16 +185,21 @@ export function makeCallModel(conn: () => RouterConn): CallModel {
       throw new RouterError(0, timeout.aborted ? "timed out waiting for the reply" : errText(e));
     }
     if (failure !== null) {
+      // A stream that ends in response.failed: always worth another try (503: nobody free; 502:
+      // this model failed, e.g. an empty reply, and the router has rested it).
       const f = String(failure);
-      throw new RouterError(/no model in|no capacity|none available/i.test(f) ? 503 : 502, f);
+      throw new RouterError(
+        /no model in|no[_ ]capacity|none available|rate.?limit/i.test(f) ? 503 : 502,
+        f,
+      );
     }
     const reply = (finalText ?? text).trim();
-    if (!reply) throw new RouterError(502, "the model sent an empty reply");
+    if (!reply) throw new RouterError(502, "the model sent an empty reply", true);
     return {
       text: reply,
       promptChars: call.instructions.length + call.input.length,
       servedBy: res.headers.get("x-pcore-model"),
-      ms: Date.now() - t0,
+      ms: Math.round(mono.now() - t0),
     };
   };
 }
