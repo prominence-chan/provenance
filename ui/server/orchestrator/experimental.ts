@@ -116,6 +116,8 @@ export interface WorkerResult {
   modelFailure: boolean;
   /** The worker's harness thread id (null until it started). */
   threadId: string | null;
+  /** Commands it ran, looking around included (`commands` leaves those out). */
+  ran: number;
 }
 
 const LOOKING_RE =
@@ -287,7 +289,7 @@ export async function runExperimental(run: Run): Promise<void> {
         status: res.budget ? `stopped (${res.budget})` : res.modelFailure ? "no model" : res.status,
         threadId: res.threadId,
         report: res.report,
-        commands: res.commands.length,
+        commands: res.ran,
       });
       // Recorded facts first: they hold whatever the report says, and whatever stopped the worker.
       for (const c of res.commands) {
@@ -335,7 +337,7 @@ export async function runExperimental(run: Run): Promise<void> {
       const idleWorker =
         res.status === "completed" &&
         !res.budget &&
-        res.commands.length === 0 &&
+        res.ran === 0 &&
         res.files.length === 0 &&
         rep.status !== "done";
       if (idleWorker && !idled.has(key)) {
@@ -522,6 +524,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
     budget: null,
     modelFailure: false,
     threadId: null,
+    ran: 0,
   };
   run.stats.workers++;
   let wid: string;
@@ -603,6 +606,7 @@ export async function runWorker(run: Run, brief: string, n: number): Promise<Wor
             : { cmd, output: clipMiddle(String(item.aggregatedOutput ?? "").trim(), 500) };
           // Looking around and writing files (those are under FILES) are not worth a line of notes.
           if (!ok || !LOOKING_RE.test(cmd)) out.commands.push({ cmd, ok });
+          out.ran++;
           out.recent.push({ cmd, ok });
           if (out.recent.length > 5) out.recent.shift();
         }
