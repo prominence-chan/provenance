@@ -1093,6 +1093,27 @@ log("hyperexperimental: commands are lifted too, and a retyped name is set back"
   );
 }
 
+{
+  log("finish check: a review that came back as a table is read");
+  const table = [
+    "| R1: Recover as many rows as possible from `trunc.db` | MET | Recorded commands read `trunc.db`. |",
+    "| --- | --- | --- |",
+    '| R3: Output format `[{"word": "testwordXY", "value": M}]` | NOT SHOWN | CHECK: `python3 -m json.tool recover.json` |',
+    "| R4: Use the exact field names `word` and `value` | VIOLATED | The excerpt has `Word`. |",
+  ].join("\n");
+  const rv = parseReview(table);
+  check(
+    rv.items.length === 3 &&
+      rv.items[0].verdict === "met" &&
+      rv.items[1].verdict === "not-shown" &&
+      /CHECK: `python3 -m json\.tool recover\.json`$/.test(rv.items[1].note) &&
+      rv.items[2].verdict === "violated" &&
+      rv.open.length === 2 &&
+      !rv.items.some((i) => /\|/.test(i.requirement + i.note)),
+    "table rows give the same items as plain lines: three requirements, two open, no pipes left",
+  );
+}
+
 // ---- stand-in router --------------------------------------------------------------------------
 interface Seen {
   role: string;

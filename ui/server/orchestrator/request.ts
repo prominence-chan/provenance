@@ -401,13 +401,17 @@ const VERDICT_RE =
 /**
  * "R1: <requirement> | MET | <evidence>" lines in whatever shape they came back: numbered or
  * bulleted, with | or - or : between the parts, the verdict in any case, the check on the same
- * line ("CHECK: …") or the next. Lines without a verdict are ignored. At most 12 items.
+ * line ("CHECK: …") or the next, or as the rows of a table. Lines without a verdict are ignored.
+ * At most 12 items.
  */
 export function parseReview(text: string): Review {
   const items: ReviewItem[] = [];
   const lines = text.replace(/\r/g, "").split("\n");
   for (const raw of lines) {
     const line = raw
+      // (a chat page can hand the lines back as a table: "| R1: … | MET | … |" under "| --- |")
+      .replace(/^\s*\|\s*/, "")
+      .replace(/\s*\|\s*$/, "")
       .replace(/^\s*(?:[-*•>]+\s+|#{1,6}\s*)*/, "")
       .replace(/\*\*/g, "")
       .trim();
