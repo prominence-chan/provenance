@@ -64,6 +64,7 @@ import { useTheme } from "../../theme/theme";
 import type { FallbackCli } from "../../../shared/fallback-api";
 import type { TierId } from "../../theme/tiers";
 import { GLSL_HASH } from "./glsl";
+import { publishNovaBurst } from "./fxSync";
 import { devUptime, useReducedMotion, type FxState } from "./useFx";
 
 export function FlameFx({ fx }: { fx: FxState }) {
@@ -920,6 +921,10 @@ const RENEW_FADE = 4;
 const FT_CAP = 1000;
 
 const MAX_PARTICLES = 420;
+/** Where nova's burst looks brightest, s after the charge: the core flash peaks at 0.05
+ * (pulse(ft, 0.05, ...) in the shader) and the first shock front adds to it just after;
+ * measured headless (frame by frame, at ?fxspeed=0.25) at ~0.08. */
+const NOVA_PEAK = 0.08;
 /** Seconds after nova's eruption that the remnant nebula lasts. */
 const REMNANT = 11;
 const MAX_POINTS = 4200;
@@ -1954,6 +1959,12 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   const flare = (l: Layer, fresh: boolean) => {
     l.flareAt = clock();
     l.ts = rand(0.88, 1.14);
+    // Nova's burst peaks after its charge, at ft = NOVA_PEAK (both stretched by ts): the hero
+    // sun's collapse lands on that moment (fxSync.ts).
+    if (l.tier === "nova") {
+      const now = performance.now();
+      publishNovaBurst(now, now + ((FLARE.nova.pre + NOVA_PEAK) * l.ts * 1000) / speed);
+    }
     // A fallback coming back keeps its seed (its raster's rows and its breathing stay put).
     if (fresh || !isFallback(l.tier)) l.seed = Math.random() * 100;
     l.blasted = false;

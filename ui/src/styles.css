@@ -630,6 +630,8 @@ select {
 
 .hero {
   flex: 1;
+  position: relative;
+  isolation: isolate; /* the nebula's canvas sits behind the heading, inside the hero */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -647,6 +649,15 @@ select {
 .hero-sun {
   display: block;
   margin-bottom: -18px;
+  pointer-events: none;
+}
+/* Nova's nebula: the whole hero, behind the heading; it fades out before every edge. */
+.hero-nebula {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
   pointer-events: none;
 }
 /* Without WebGL2: the mark, or the remnant's for nova, cross-faded in place. */
