@@ -13,7 +13,11 @@
 //              (each failure takes one off)     QUIETTASK  silent for 1.3 s, then finishes
 //   NOTOOLS    runs nothing and reports that the terminal is unavailable, unless its brief
 //              records that an earlier worker ran nothing (NOTOOLS ALWAYS: even then)
-//   MAKES <name>  also writes that file in the folder
+//   MAKES <name>  also writes that file in the folder (in the request or the task)
+//   PARTLY     reports STATUS: PARTIAL (its commands passed; the rest is the job's remainder)
+//   NEARMISS <name>  (in the task) also writes that file: a planner's respelling of the name asked for
+//   the finish check's follow-up task reports BLOCKED when the request says UNSETTLED
+//   ASKME      once its brief records a refused approval, it does without (ASKME ALWAYS: asks again)
 //   (anything else: a command, an edit, STATUS: DONE)
 // command/exec honours `env` (laid over this process's environment), like the real one.
 // Appends what it was asked to $FAKE_ORC_LOG as JSON lines.
@@ -83,7 +87,13 @@ const cmdItem = (id, command, cwd, status, output = null, exitCode = null) => ({
 
 async function workerTurn(threadId, turnId, brief) {
   const th = threads.get(threadId);
-  const task = /YOUR TASK \(\d+ of \d+\):\s*(.*)/.exec(brief)?.[1] ?? brief.slice(0, 80);
+  // (the task line and what stands under it: a job that was not split carries the planner's
+  // suggestion there)
+  const shown = (
+    /YOUR TASK \(\d+ of \d+\):\s*([\s\S]*?)\nDONE WHEN:/.exec(brief)?.[1] ?? brief.slice(0, 80)
+  ).replace(/\s+/g, " ");
+  // (of a job that was not split, the first thing the planner suggested scripts the worker)
+  const task = /the request decides\): 1\. (.*?)(?: 2\. |$)/.exec(shown)?.[1] ?? shown;
   const item = (method, it) => note(method, { threadId, turnId, item: it });
   const finish = (status, error = null) => {
     th.turnId = null;
@@ -166,7 +176,9 @@ async function workerTurn(threadId, turnId, brief) {
   }
   const command = `python3 check.py ${task.replace(/[^a-zA-Z0-9 ]/g, "").slice(0, 30)}`;
   item("item/started", cmdItem(cid, command, th.cwd, "inProgress"));
-  if (/ASKME/.test(task)) {
+  // ASKME asks approval for its command; once its brief records a refusal it does without
+  // (ASKME ALWAYS asks again).
+  if (/ASKME/.test(task) && (/ASKME ALWAYS/.test(task) || !/was refused/.test(brief))) {
     const answer = await ask("item/commandExecution/requestApproval", {
       threadId,
       turnId,
@@ -204,11 +216,21 @@ async function workerTurn(threadId, turnId, brief) {
   };
   item("item/started", { ...file, status: "inProgress" });
   item("item/completed", file);
-  const makes = /MAKES ([\w.-]+)/.exec(task)?.[1];
+  const makes = /MAKES ([\w.-]+)/.exec(`${task} ${brief}`)?.[1];
   if (makes) writeFileSync(`${th.cwd}/${makes}`, "[]\n");
+  const near = /NEARMISS ([\w.-]+)/.exec(task)?.[1];
+  if (near) writeFileSync(`${th.cwd}/${near}`, "a near miss\n");
   usage(threadId, turnId, 7500 + brief.length / 4);
   if (th.interrupted) return finish("interrupted");
-  if (/BLOCKME/.test(task))
+  if (/Settle the open points/.test(task) && /UNSETTLED/.test(brief))
+    say(
+      "RESULT: the checks could not be run\nCHANGES: none\nVALIDATION: none\nNOT CHECKED: every open point\nBLOCKERS: wc is missing\nSTATUS: BLOCKED",
+    );
+  else if (/PARTLY/.test(task))
+    say(
+      `RESULT: looked at it; "${task}" is as far as it goes\nCHANGES: none\nVALIDATION: ran ${command}, passed\nBLOCKERS: None for the inspection; the script itself is not written yet.\nSTATUS: PARTIAL`,
+    );
+  else if (/BLOCKME/.test(task))
     say(
       `**RESULT:** could not do "${task}"\n**BLOCKERS:** the dependency frobnicate is missing\n**STATUS:** BLOCKED`,
     );

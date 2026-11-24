@@ -10,6 +10,14 @@
 //   ?fx=nova:flare      same as idle; the page load plays the flare
 //   ?fx=claude          a fallback: claude or codex
 //   &fxspeed=0.1        slow motion (every effect's clock runs at that rate)
+//   &fxuptime=86400     start every effect's clock as if the app had been open that long
+//                       (seconds): for checking that nothing degrades over days
+//   &fxtrace            record every frame's layer state in window.__provenanceFxTrace (the
+//                       write head's place and speed, Codex's sweep), for checking motion headless
+//   &sunseed=7          the hero sun's nebulae use seeds 7, 8, ... (style and palette by seed)
+//   &sunstep            the hero sun's clock stands still; __provenanceSunStep(seconds) moves it
+//                       and returns the sequence state, for frame-by-frame checks headless
+//   ?fx=none:idle       no effect (then __provenanceFx(...) selects one from nothing)
 //   __provenanceFx("spark", "flare")   replay spark's switch flare, then idle
 //   __provenanceFx("spark", "active")  / "idle"
 //   __provenanceFx(null)               back to the real state
@@ -97,6 +105,11 @@ function identity(model: string | null | undefined): Pick<FxState, "tier" | "fal
 export function prefersReducedMotion(): boolean {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
+
+/** Dev only (?fxuptime=s): seconds every effect's clock starts at. 0 in production. */
+export const devUptime = import.meta.env.DEV
+  ? Number(new URLSearchParams(location.search).get("fxuptime")) || 0
+  : 0;
 
 /** prefers-reduced-motion, kept live (the OS setting can change while the app is open). */
 export function useReducedMotion(): boolean {

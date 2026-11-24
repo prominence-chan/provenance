@@ -36,19 +36,36 @@
 // The fallbacks (Claude Code, Codex) are terminal coding agents, not flames, and have styles of
 // their own, in their own colour ramps:
 //   claude    write head: a block cursor travels the composer's outline a character cell at a
-//             time, leaving a short dashed trail that cools behind it; on switch the cursor
-//             blinks twice on the top edge, then types the whole outline out both ways round;
-//             while active, two more heads join and they step faster, with longer trails
+//             time, leaving a dashed trail that cools behind it, as long as the ground it
+//             covers while a cell cools (TRAIL: short when it creeps, a long streak when it
+//             runs); on switch that same head runs one lap of the outline, fast at first, slowing
+//             smoothly until it lands back where it started at the creeping speed (one motion,
+//             see LAP); while active, two more heads join and they step faster, with longer
+//             trails
 //   codex     raster: faint scan lines above the top edge, in the composer's width; a refresh
 //             line rolls up through them every few seconds and leaves them glowing like
-//             phosphor; on switch one bright refresh climbs high and fades; while active the
-//             sweeps come faster and short runs of data slide along the lines
-// Both are discrete where the tiers are organic: they read as a screen, not a fire.
+//             phosphor; on switch a ring round the composer charges up, then discharges as a
+//             refresh band that climbs off the top edge, narrower and fainter the higher it
+//             gets (see DISCHARGE); the regular refresh counts its period from the end of that;
+//             while active the sweeps come faster and short runs of data slide along the lines
+// Both are discrete where the tiers are organic: they read as a screen, not a fire. A fallback's
+// select hands over to its resting state without a second copy of anything: streaming's extras
+// wait until it is over and come in eased (gateOf), and switching back to a fallback that is
+// still fading out brings that same layer back (set()).
+//
+// Days of uptime: the shader only ever sees small time values. Each layer's clocks count from
+// its own epoch, and every RENEW_AFTER seconds a calm layer hands over to a copy of itself
+// whose clocks start again, cross-fading over RENEW_FADE (same seed, same flare state, so only
+// the drifting noise differs). The write head's position is sent modulo its cell count, the
+// flare time is capped where every flare term is long gone, and the noise hash is exact for any
+// input (glsl.ts). Without that, float precision ran out after hours: the flames went blocky.
 import { useEffect, useRef } from "react";
 import { useTheme } from "../../theme/theme";
 import type { FallbackCli } from "../../../shared/fallback-api";
 import type { TierId } from "../../theme/tiers";
-import { useReducedMotion, type FxState } from "./useFx";
+import { GLSL_HASH } from "./glsl";
+import { publishNovaBurst } from "./fxSync";
+import { devUptime, useReducedMotion, type FxState } from "./useFx";
 
 export function FlameFx({ fx }: { fx: FxState }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -114,17 +131,49 @@ const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6 };
  * gone by `len`. Each flare stretches all of it by a random 0.88..1.14.
  */
 const FLARE: Record<
-  FxId,
+  Exclude<FxId, "claude">,
   { pre: number; rise: number; k1: number; k2: number; m: number; len: number }
 > = {
   spark: { pre: 0, rise: 0.45, k1: 2.0, k2: 0.8, m: 0.6, len: 3.0 },
   ember: { pre: 0, rise: 0.7, k1: 1.3, k2: 0.55, m: 0.55, len: 4.2 },
   solstice: { pre: 0, rise: 0.9, k1: 0.8, k2: 0.38, m: 0.5, len: 6.5 },
   nova: { pre: 1.35, rise: 0.1, k1: 1.5, k2: 0.42, m: 0.6, len: 6.5 },
-  // Claude Code's charge is the cursor blinking twice before it types the outline.
-  claude: { pre: 0.45, rise: 0.25, k1: 1.5, k2: 0.5, m: 0.6, len: 4.6 },
-  codex: { pre: 0, rise: 0.25, k1: 1.6, k2: 0.55, m: 0.6, len: 4.4 },
+  // Codex: `pre` is the ring charging (uPre), then ft counts the discharge (DISCHARGE).
+  codex: { pre: 0.55, rise: 0.15, k1: 1.6, k2: 0.55, m: 0.6, len: 2.0 },
 };
+
+/**
+ * Claude Code's select: the head runs one lap of the outline in T s. Its speed (laps/s) is
+ *   v(t) = ve + D(t/T) * ((vs - ve) + (vp - vs) * R(t)),   D(x) = (1 - x)^2,
+ *   R(t) = 1 - (1 - t/attack)^2 up to `attack`, then 1,
+ * from vs (the head's speed when the lap starts: 0 for a new head) up to vp within `attack`, then
+ * slowing down to ve = the resting speed, with D'(1) = 0 so it lands without a jolt. vp is solved
+ * so that the integral over T is exactly one lap (lapAt).
+ */
+const LAP = { T: 4.4, attack: 0.22 };
+/**
+ * Claude Code's trail: the cells a head leaves cool over `cool` s, so the trail is as long as
+ * the ground the head covers in that time, plus `min` cells (the creeping head's short tail):
+ * min + speed * cool cells, at most `cap` of the outline so a head never meets its own tail.
+ * Brightness falls off evenly along it, to nothing at its end. It can only grow by the ground
+ * the head actually covers (a new head, or one setting off on a lap, draws its trail out behind
+ * it; cold cells never light up), and it shortens as soon as the head slows.
+ */
+const TRAIL = { cool: 0.7, min: 4, cap: 0.7 };
+/** Claude Code's head, cells a second: at rest, and the extra while active. */
+const HEAD_REST = 1.2;
+const HEAD_ACTIVE = 7.8;
+/** Codex's discharge: the band climbs towards `top` px (eased) and is gone after `len` s. */
+const DISCHARGE = { top: 96, k: 1.25, len: 2.0 };
+/**
+ * A fallback's streaming extras (more heads, faster sweeps, data runs) are held off during its
+ * select: an extra already showing goes over GATE_OUT s, and they come in over GATE_IN s once
+ * the select is over.
+ */
+const GATE_OUT = 0.5;
+const GATE_IN = 1.2;
+/** Seconds a fallback switched back to (while still fading out) takes to come back. */
+const REVIVE_FADE = 0.4;
 
 const QUAD_VS = `#version 300 es
 in vec2 aPos;           // CSS px, y down
@@ -140,9 +189,9 @@ const FX_FS = `#version 300 es
 precision highp float;
 in vec2 vPos;
 out vec4 outColor;
-uniform float uTime;    // per-layer phase: runs slow when idle, faster when active
-uniform float uClock;   // wall clock, s
-uniform float uFT;      // flare time, s (scaled per flare); < 0 during nova's charge
+uniform float uTime;    // per-layer phase since its epoch: runs slow when idle, faster when active
+uniform float uClock;   // wall clock since the layer's epoch, s
+uniform float uFT;      // flare time, s (scaled per flare); < 0 during nova's charge; capped
 uniform float uFl;      // flare envelope 0..1
 uniform float uPre;     // nova charge 0..1
 uniform float uAct;     // active 0..1 (eased)
@@ -153,17 +202,15 @@ uniform float uAlphaK, uGain, uHaze, uRadius, uTopY;
 uniform vec2 uRes;
 uniform int uMode;      // 0 = composer band, 1 = header filament, 2 = nova eruption
 uniform int uTier;      // 0 spark, 1 ember, 2 solstice, 3 nova, 4 claude, 5 codex
-uniform float uPhase;   // claude: cells the write head has stepped; codex: refresh sweeps run
+uniform float uPhase;   // claude: the write head's place, 0..1 round the outline; codex: how far
+                        // the refresh sweep has run, 0..1 (0.5 while it is held off)
+uniform vec4 uAux;      // claude: x the trail's length, cells; codex: x the regular sweep's strength
 uniform vec4 uRect;     // composer x, y, w, h (CSS px)
 uniform vec4 uBand;     // the quad being drawn, x0 y0 x1 y1: everything fades out before it
 uniform vec3 uC0, uC1, uC2, uC3, uOff1, uOff2, uDusk;
 uniform vec4 uSparks[8]; // spark: x, y, brightness, size
 
-float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
+${GLSL_HASH}
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
@@ -593,8 +640,10 @@ void main() {
       // CLAUDE CODE: a write head. The outline is cut into character cells (a whole number of
       // them, so nothing seams); each cell is a short dash hugging the border. One head (a
       // block cursor) steps along it a cell at a time and the cells it leaves cool behind it;
-      // while active two more join. On switch: the cursor blinks twice on the top edge, then
-      // the outline types itself out both ways round from there, hot at the heads.
+      // while active two more join. On switch the same head runs one lap (the engine's LAP):
+      // uFl is how much of the lap is left (the head runs a little hotter), 1 as it sets off.
+      // The trail is uAux.x cells long, set by the heads' speed (the engine's TRAIL); the
+      // heads all move together, so one length serves them all.
       float L;
       float s = perimS(vPos, L);
       float N = max(12.0, floor(L / 9.0 + 0.5));
@@ -605,30 +654,17 @@ void main() {
       float bar = smoothstep(-0.3, 0.4, d) * smoothstep(2.3, 1.6, d);  // ~2 px out from the border
       float blk = smoothstep(-0.3, 0.4, d) * smoothstep(4.4, 3.6, d);  // the cursor, a block
       float lvl = 0.0, head = 0.0;
-      float tau = mix(2.2, 4.5, act);
+      float lap = fl;
+      float Lt = max(uAux.x, 0.001);                         // trail length, cells
+      float h0 = floor(fract(uPhase) * N);
       for (int i = 0; i < 3; i++) {
         float hb = i == 0 ? 1.0 : smoothstep(0.15, 0.8, act);
         if (hb < 0.01) continue;
-        float hk = mod(floor(uPhase) + floor(uSeed * 7.0) + float(i) * floor(N / 3.0), N);
+        float hk = mod(h0 + float(i) * floor(N / 3.0), N);
         float back = mod(hk - k, N);                         // cells behind this head
-        lvl = max(lvl, hb * exp(-back / tau) * step(back, 16.0) * mix(0.42, 0.5, act));
-        head = max(head, hb * step(back, 0.5) * mix(0.62, 0.75, act));
-      }
-      if (ft > -1.0 && ft < 6.0) {
-        float k0 = floor((hash(vec2(uSeed, 2.3)) * 0.4 + 0.3) * max(uRect.z - 2.0 * uRadius, 1.0) / C);
-        float m = min(mod(k - k0, N), mod(k0 - k, N));     // cells from the start, either way
-        float Lh = N * 0.5;
-        if (ft < 0.0) {
-          // The prompt: a block cursor at the start, blinking.
-          head = max(head, step(m, 0.5) * step(fract((ft + 0.45) / 0.3), 0.6) * uPre);
-        } else {
-          float D = Lh * (1.0 - exp(-ft * 1.5));            // cells typed each way so far
-          float lit = step(m, D);
-          float tm = -log(max(1.0 - m / Lh, 0.001)) / 1.5;   // when this cell was typed
-          float age = max(ft - tm, 0.0);
-          lvl = max(lvl, lit * (0.5 * exp(-age * 1.5) + 0.12 * exp(-age * 0.4)) * smoothstep(5.8, 3.6, ft));
-          head = max(head, lit * step(D - m, 1.0) * exp(-ft * 0.7));
-        }
+        float trail = max(1.0 - back / Lt, 0.0) * mix(0.42, 0.5, act);
+        lvl = max(lvl, hb * trail);
+        head = max(head, hb * step(back, 0.5) * mix(mix(0.62, 0.75, act), 0.8, lap));
       }
       float rest = (0.035 * uBreath + 0.05 * act) * mix(0.45, 1.0, topW);
       float cell = max(lvl, rest);
@@ -641,7 +677,8 @@ void main() {
       // CODEX: raster. Scan lines above the top edge, inside the composer's width; a refresh
       // line rolls up through them now and then and leaves them glowing like phosphor; while
       // active the sweeps come faster and short runs of data slide along the lines. On switch
-      // one bright refresh climbs high, the lines lighting up behind it.
+      // a ring round the composer charges (uPre), then discharges: a refresh band leaves the
+      // top edge (ft = s since) and climbs, narrower, thinner and fainter the higher it gets.
       float xt = smoothstep(uRect.x + 2.0, uRect.x + uRect.z * 0.14, vPos.x)
                * smoothstep(uRect.x + uRect.z - 2.0, uRect.x + uRect.z * 0.86, vPos.x);
       float topBand = smoothstep(uRect.y + uRadius + 2.0, uRect.y + 1.0, vPos.y);
@@ -650,7 +687,7 @@ void main() {
       float r = floor(upc / P);
       float line = smoothstep(1.1, 0.45, abs(upc - (r + 0.5) * P)) * smoothstep(1.0, 2.0, up);
       float hr = hash(vec2(r, floor(uSeed)));
-      float H = 9.0 + 8.0 * act + 30.0 * fl;
+      float H = 9.0 + 8.0 * act;
       float env = exp(-upc / H) * smoothstep(H * 4.5, H * 2.0, upc);
       float flick = 0.6 + 0.4 * noise(vec2(r * 1.7, t * 0.7 + uSeed));
       float dir = hr < 0.5 ? -1.0 : 1.0;
@@ -660,19 +697,32 @@ void main() {
       // the lines below it still lit; then the raster rests until the next one.
       float Y = fract(uPhase) / 0.4 * 56.0;
       float sw = exp(-abs(upc - Y) / 1.4) * 0.7 + (upc < Y ? exp(-(Y - upc) / 9.0) * 0.35 : 0.0);
-      sw *= exp(-upc / (H * 1.9)) * smoothstep(0.0, 4.0, Y) * smoothstep(56.0, 40.0, Y);
+      sw *= exp(-upc / (H * 1.9)) * smoothstep(0.0, 4.0, Y) * smoothstep(56.0, 40.0, Y) * uAux.x;
       float lit = env * ((0.3 * uBreath + 0.1 * act) * flick + seg * act * 0.3) + sw * (0.36 + 0.08 * act);
-      if (ft > 0.0 && ft < 6.0) {
-        float Yf = 104.0 * (1.0 - exp(-ft * 0.95));
-        float front = exp(-abs(upc - Yf) / 2.2) * exp(-ft * 0.4);
-        float behind = upc < Yf ? exp(-(Yf - upc) / (12.0 + 14.0 * ft)) * exp(-ft * 0.6) : 0.0;
-        lit += (front * 0.9 + behind * 0.45) * smoothstep(118.0, 70.0, upc) * smoothstep(6.0, 3.5, ft);
+      float flash = 0.0;
+      if (ft > -0.05 && ft < 2.0) {
+        // The discharge, the same kind of front as the refresh: it climbs fast off the edge and
+        // slows (Yd), and each row it lights is narrower the higher it is (hw, towards the
+        // middle), the front thinner and fainter the higher it has got (A), gone by ~96 px.
+        float Yd = 96.0 * (1.0 - exp(-max(ft, 0.0) * 1.25));
+        float hgt = Yd / 96.0;
+        float A = pow(1.0 - hgt, 1.3);
+        float row = clamp(upc / 96.0, 0.0, 1.0);
+        float hw = (uRect.z * 0.5 - 4.0) * mix(1.0, 0.2, row);
+        float xs = smoothstep(hw, hw * 0.55, abs(vPos.x - c.x));
+        float front = exp(-abs(upc - Yd) / mix(2.0, 0.9, hgt)) * A;
+        float behind = upc < Yd ? exp(-(Yd - upc) / 10.0) * pow(1.0 - row, 1.6) * exp(-max(ft, 0.0) * 0.9) : 0.0;
+        lit += (front * 0.66 + behind * 0.26) * xs * smoothstep(0.0, 0.05, ft);
+        flash = pulse(ft, 0.04, 5.0);                        // the edge lets go as it leaves
       }
       heat = line * lit * xt;
-      // The top edge itself: a faint hairline, bright for a moment on switch.
-      heat += rimLine * topBand * xt * (0.035 * uBreath + 0.05 * act + 0.3 * fl);
-      heat += exp(-upc / 6.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.025 + 0.03 * act + 0.1 * fl);
-      add += rimLine * topBand * xt * fl * 0.1;
+      // The top edge itself: a faint hairline.
+      heat += rimLine * topBand * xt * (0.035 * uBreath + 0.05 * act + 0.2 * flash);
+      heat += exp(-upc / 6.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.025 + 0.03 * act + 0.08 * flash);
+      // The charge: the composer's whole outline glows up, tight to it, the top a little more.
+      float ring = uPre;
+      heat += (rimLine * 0.48 + exp(-dd / 3.0) * outside * 0.15) * ring * mix(0.55, 1.0, topW);
+      add += rimLine * ring * mix(0.55, 1.0, topW) * 0.06;
     } else {
       // NOVA: a shimmering plasma rim all round, plasma wisps drifting along it; the charge
       // tightens it, the eruption leaves a lingering afterglow; flames while active.
@@ -825,11 +875,56 @@ interface Layer {
   blasted: boolean;
   trickle: number;
   nextSpawn: number;
-  /** claude: cells stepped by the write head; codex: refresh sweeps (fract = how far up). */
+  /** claude: the write head's place, 0..1 round the outline; codex: refresh sweeps run (fract =
+   * how far up). */
   phase: number;
+  /** A fallback's select: when it began and when it is over (wall clock s; -1e9 = never). */
+  selAt: number;
+  selEnd: number;
+  /** The streaming gate (gateOf) when the select began. */
+  gate0: number;
+  /** claude: the lap in progress (null once landed); the head's speed, laps/s; the trail's
+   * length, cells (TRAIL). */
+  lap: Lap | null;
+  vel: number;
+  trail: number;
+  /** codex: the regular sweep's strength (an in-flight sweep fades as a select starts), and the
+   * phase before which no regular sweep is drawn (one period after the select). */
+  sweepA: number;
+  sweepFrom: number;
+  /** Seconds a fade-in takes (a renewal: RENEW_FADE; a fallback switched back to: REVIVE_FADE). */
+  fadeIn: number;
+  /** time and clock() when this layer's epoch began (the shader gets both relative to it) */
+  epoch: number;
+  clockAt: number;
+  /** Handing over to a renewed copy of itself: fading out over RENEW_FADE, still live. */
+  retiring: boolean;
 }
 
+/** Claude Code's select lap (LAP): fixed once it starts, so a renewal's copy can share it. */
+interface Lap {
+  at: number;
+  T: number;
+  u0: number;
+  vs: number;
+  vp: number;
+  ve: number;
+  /** cells round the outline when it started */
+  N: number;
+}
+
+/** Seconds of wall clock after which a calm layer is renewed (see the header). */
+const RENEW_AFTER = 600;
+/** Seconds the renewal cross-fades over. */
+const RENEW_FADE = 4;
+/** Flare time sent to the shader is capped here: every flare term is 0 long before. */
+const FT_CAP = 1000;
+
 const MAX_PARTICLES = 420;
+/** Where nova's burst looks brightest, s after the charge: the core flash peaks at 0.05
+ * (pulse(ft, 0.05, ...) in the shader) and the first shock front adds to it just after;
+ * measured headless (frame by frame, at ?fxspeed=0.25) at ~0.08. */
+const NOVA_PEAK = 0.08;
 /** Seconds after nova's eruption that the remnant nebula lasts. */
 const REMNANT = 11;
 const MAX_POINTS = 4200;
@@ -853,6 +948,50 @@ const smooth = (a: number, b: number, x: number) => {
   const t = clamp((x - a) / (b - a), 0, 1);
   return t * t * (3 - 2 * t);
 };
+const frac = (x: number) => x - Math.floor(x);
+const isFallback = (id: FxId): id is FallbackCli => id === "claude" || id === "codex";
+
+// ---- Claude Code's select lap (LAP) ----
+const lapD = (x: number) => (1 - x) * (1 - x);
+/** The integral of D(s/T) over 0..t. */
+const lapA = (t: number, T: number) => (T / 3) * (1 - Math.pow(1 - t / T, 3));
+/** The integral of D(s/T) * (1 - R(s)) over 0..t, t <= a (Simpson: the integrand is a quartic). */
+const lapE = (t: number, T: number, a: number) => {
+  const n = 16;
+  const h = t / n;
+  let sum = 0;
+  for (let i = 0; i <= n; i++) {
+    const s = i * h;
+    sum += lapD(s / T) * (1 - s / a) * (1 - s / a) * (i === 0 || i === n ? 1 : i % 2 ? 4 : 2);
+  }
+  return (sum * h) / 3;
+};
+/** A lap from u0 starting at speed vs, landing at ve (laps/s); vp makes it exactly one lap. */
+const makeLap = (at: number, u0: number, vs: number, ve: number, N: number): Lap => {
+  const { T, attack: a } = LAP;
+  const vp = vs + (1 - ve * T - ((vs - ve) * T) / 3) / (T / 3 - lapE(a, T, a));
+  return { at, T, u0, vs, vp, ve, N };
+};
+/** How far the lap has run (laps, 0..1 at T) and its speed (laps/s), t s in. */
+const lapAt = (l: Lap, t: number) => {
+  t = clamp(t, 0, l.T);
+  const a = LAP.attack;
+  const A = lapA(t, l.T);
+  const E = lapE(Math.min(t, a), l.T, a);
+  const R = t < a ? 1 - (1 - t / a) * (1 - t / a) : 1;
+  return {
+    run: l.ve * t + (l.vs - l.ve) * A + (l.vp - l.vs) * (A - E),
+    v: l.ve + lapD(t / l.T) * (l.vs - l.ve + (l.vp - l.vs) * R),
+  };
+};
+/**
+ * How much of a fallback's streaming extras may show (0..1): during its select, whatever was
+ * showing goes over GATE_OUT; after it, they come in over GATE_IN (smoothstep: no jolt).
+ */
+const gateOf = (l: Layer, now: number) =>
+  now < l.selEnd
+    ? l.gate0 * (1 - smooth(l.selAt, l.selAt + GATE_OUT, now))
+    : smooth(l.selEnd, l.selEnd + GATE_IN, now);
 
 function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   const gl = canvas.getContext("webgl2", {
@@ -910,6 +1049,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     "uMode",
     "uTier",
     "uPhase",
+    "uAux",
     "uRect",
     "uBand",
     "uC0",
@@ -949,12 +1089,15 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
   // ---- state ----
-  const start = performance.now();
+  const start = performance.now() - devUptime * 1000;
   // Dev-only slow motion for looking at a flare frame by frame (?fxspeed=0.1, see useFx.ts).
   const speed = import.meta.env.DEV
     ? Number(new URLSearchParams(location.search).get("fxspeed")) || 1
     : 1;
   const clock = () => ((performance.now() - start) / 1000) * speed;
+  const trace: unknown[] | null =
+    import.meta.env.DEV && new URLSearchParams(location.search).has("fxtrace") ? [] : null;
+  if (trace) (window as unknown as { __provenanceFxTrace: unknown[] }).__provenanceFxTrace = trace;
   let layers: Layer[] = [];
   let active = false;
   let flareKey = 0;
@@ -1113,6 +1256,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   // ---- envelopes ----
   const stepFlare = (l: Layer, now: number) => {
+    if (l.tier === "claude") return; // its select is the lap (stepHead)
     const f = FLARE[l.tier];
     const tt = (now - l.flareAt) / l.ts;
     l.ft = tt - f.pre;
@@ -1266,11 +1410,67 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     }
   };
 
+  // ---- the fallbacks' heads and sweeps ----
+  const cellsOf = (r: Rect) => Math.max(12, Math.floor(perimLength(r) / 9 + 0.5));
+
+  /**
+   * Claude Code's head: during the select lap its place and speed are the lap's (exact, from
+   * its start); once landed (one lap on, at the resting speed) it steps on at ~1.2 cells a
+   * second, ~9 while active. Kept as a fraction of the outline, so a composer that grows keeps
+   * the head where it was. Then the trail (TRAIL) from its speed.
+   */
+  const stepHead = (l: Layer, dt: number, now: number, r: Rect, act: number) => {
+    l.pre = 0;
+    l.ft = now - l.selAt;
+    const N = cellsOf(r);
+    const was = l.phase;
+    const lap = l.lap;
+    if (lap && now - lap.at < lap.T) {
+      const p = lapAt(lap, now - lap.at);
+      l.phase = frac(lap.u0 + p.run);
+      l.vel = p.v;
+      l.fl = lapD((now - lap.at) / lap.T);
+    } else if (lap) {
+      // Landed: exactly one lap on from where it set off, going at the resting speed.
+      l.phase = frac(lap.u0 + lap.ve * (now - lap.at - lap.T));
+      l.vel = lap.ve;
+      l.lap = null;
+      l.fl = 0;
+    } else {
+      l.vel = (HEAD_REST + HEAD_ACTIVE * act) / N;
+      l.phase = frac(l.phase + l.vel * dt);
+      l.fl = 0;
+    }
+    const v = l.vel * N; // cells a second
+    const want = Math.min(TRAIL.min + v * TRAIL.cool, TRAIL.cap * N);
+    l.trail = Math.min(want, l.trail + frac(l.phase - was) * N);
+  };
+
+  /**
+   * Codex's regular refresh: every ~6.5 s at rest, every ~2 s while active (each sweep takes
+   * 40% of that). During a select one in flight fades out; when the select is over the period
+   * starts counting, so the first regular sweep comes one whole period after it.
+   */
+  const stepSweep = (l: Layer, dt: number, now: number, act: number) => {
+    const rate = 1 / (6.5 - 4.4 * act);
+    if (now < l.selEnd) {
+      l.sweepA = Math.max(0, l.sweepA - dt / 0.25);
+      l.phase += dt * rate;
+    } else if (l.sweepFrom === Infinity) {
+      l.phase = Math.floor(l.phase) + 1;
+      l.sweepFrom = l.phase + 1;
+      l.sweepA = 1;
+    } else l.phase += dt * rate;
+  };
+  /** What the shader gets for the sweep: how far it has run, 0.5 (none) while held off. */
+  const sweepOf = (l: Layer) =>
+    l.sweepFrom !== Infinity && l.phase < l.sweepFrom ? 0.5 : frac(l.phase);
+
   // ---- step ----
   const stepLayer = (l: Layer, dt: number, now: number, r: Rect) => {
     stepFlare(l, now);
     // Critically damped spring towards the target: eases in and out, never snaps.
-    const target = !l.fading && active ? 1 : 0;
+    const target = (!l.fading || l.retiring) && active ? 1 : 0;
     const om = target > l.act ? 2.6 : 1.6;
     l.actV += (om * om * (target - l.act) - 2 * om * l.actV) * dt;
     l.act = clamp(l.act + l.actV * dt, 0, 1);
@@ -1278,13 +1478,28 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       l.act = 0;
       l.actV = 0;
     }
-    l.time += dt * (0.3 + 0.7 * l.act + 0.6 * l.fl);
-    // Claude Code's head steps ~1.2 cells a second at rest, ~9 while active; Codex refreshes
-    // every ~6.5 s at rest, every ~2 s while active (each sweep takes 40% of that).
-    if (l.tier === "claude") l.phase += dt * (1.2 + 7.8 * l.act);
-    if (l.tier === "codex") l.phase += dt / (6.5 - 4.4 * l.act);
-    if (l.fading) l.fade = Math.max(0, l.fade - dt / 0.6);
+    // A fallback's streaming extras wait for its select to be over (gateOf).
+    const act = isFallback(l.tier) ? l.act * gateOf(l, now) : l.act;
+    l.time += dt * (0.3 + 0.7 * act + 0.6 * l.fl);
+    if (l.tier === "claude") stepHead(l, dt, now, r, act);
+    if (l.tier === "codex") stepSweep(l, dt, now, act);
+    if (l.fading) l.fade = Math.max(0, l.fade - dt / (l.retiring ? RENEW_FADE : 0.6));
+    else if (l.fade < 1) l.fade = Math.min(1, l.fade + dt / l.fadeIn); // a renewal or a return
     if (l.fading) return;
+    if (
+      now - l.clockAt > RENEW_AFTER &&
+      l.fade >= 1 &&
+      l.fl < 0.002 &&
+      l.pre < 0.002 &&
+      l.ft > 30
+    ) {
+      // Hand over to a copy whose clocks start again; it fades in from the next frame.
+      layers.push({ ...l, epoch: l.time, clockAt: now, fade: 0, fadeIn: RENEW_FADE });
+      if (import.meta.env.DEV) console.debug("[fx] renewed", l.tier, now.toFixed(1));
+      l.fading = true;
+      l.retiring = true;
+      return;
+    }
 
     if (l.tier === "nova" && !l.blasted && l.ft >= 0 && l.ft < 1) {
       l.blasted = true;
@@ -1417,16 +1632,19 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   const drawLayer = (l: Layer, now: number, r: Rect) => {
     const c = (k: number) => color(l.id, k);
-    gl.uniform1f(fu.uTime, l.time);
-    gl.uniform1f(fu.uFT, l.ft);
+    gl.uniform1f(fu.uTime, l.time - l.epoch);
+    gl.uniform1f(fu.uClock, now - l.clockAt);
+    gl.uniform1f(fu.uFT, Math.min(l.ft, FT_CAP));
     gl.uniform1f(fu.uFl, l.fl);
     gl.uniform1f(fu.uPre, l.pre);
-    gl.uniform1f(fu.uAct, l.act);
+    gl.uniform1f(fu.uAct, isFallback(l.tier) ? l.act * gateOf(l, now) : l.act);
     gl.uniform1f(fu.uFade, l.fade);
     gl.uniform1f(fu.uBreath, breathOf(l, now));
     gl.uniform1f(fu.uSeed, l.seed);
     gl.uniform1i(fu.uTier, STYLE_INDEX[l.tier]);
-    gl.uniform1f(fu.uPhase, l.phase);
+    // Both small: the head's place round the outline, how far the sweep has run.
+    gl.uniform1f(fu.uPhase, l.tier === "codex" ? sweepOf(l) : frac(l.phase));
+    gl.uniform4f(fu.uAux, l.tier === "claude" ? l.trail : l.sweepA, 0, 0, 0);
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
     gl.uniform3fv(fu.uC2, c(2));
@@ -1455,9 +1673,11 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       top = side = below = 34;
     }
     if (l.tier === "codex") {
-      top = l.ft > 0 && l.ft < 6 ? 140 : 76 + 30 * l.act;
-      side = 12;
-      below = 0;
+      top = l.ft > -1 && l.ft < DISCHARGE.len ? 124 : 76 + 30 * l.act;
+      // The charge's ring goes all round (plus the band's 16 px fade).
+      const ring = l.ft < 0.6;
+      side = ring ? 30 : 12;
+      below = ring ? 30 : 0;
     }
     if (l.tier === "solstice") {
       // Everything solstice draws tapers off inside the composer's own width.
@@ -1497,16 +1717,38 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.clear(gl.COLOR_BUFFER_BIT);
     const r = composerRect();
     if (!r) return;
-    for (const l of layers) stepLayer(l, dt, now, r);
-    layers = layers.filter((l) => l.fade > 0);
+    for (const l of [...layers]) stepLayer(l, dt, now, r);
+    layers = layers.filter((l) => !l.fading || l.fade > 0); // a renewal comes in from 0
     setHeat(layers.find((l) => l.tier === "nova" && !l.fading)?.pre ?? 0);
     stepParticles(dt, now, r);
+    if (import.meta.env.DEV && trace) {
+      // Dev only (?fxtrace): every frame's fallback state, for checking the motion headless.
+      const N = cellsOf(r);
+      trace.push({
+        t: now,
+        layers: layers.map((l) => ({
+          id: l.id,
+          fade: l.fade,
+          fading: l.fading,
+          head: frac(l.phase) * N,
+          speed: l.vel * N,
+          trail: l.trail,
+          lap: l.tier === "claude" ? l.fl : 0,
+          act: isFallback(l.tier) ? l.act * gateOf(l, now) : l.act,
+          sweep: l.tier === "codex" ? sweepOf(l) : -1,
+          sweepA: l.sweepA,
+          pre: l.pre,
+          ft: l.ft,
+          N,
+        })),
+      });
+      if (trace.length > 50000) trace.splice(0, 10000);
+    }
 
     gl.useProgram(fxProg);
     gl.bindVertexArray(quadVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
     gl.uniform2f(fu.uRes, w, h);
-    gl.uniform1f(fu.uClock, now);
     gl.uniform1f(fu.uAlphaK, alphaK);
     gl.uniform1f(fu.uGain, gain);
     gl.uniform1f(fu.uHaze, alphaK < 1 ? 1 : 0);
@@ -1648,7 +1890,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   };
 
   /** Something is moving fast enough to need full frame rate. */
-  const busy = () =>
+  const busy = (now = clock()) =>
     arcs.length > 0 ||
     particles.some((p) => p.kind !== 0 || Math.abs(p.vy) > 45) ||
     layers.some(
@@ -1657,6 +1899,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         l.fl > 0.002 ||
         l.pre > 0.002 ||
         l.act > 0.002 ||
+        now < l.selEnd ||
         active ||
         (l.tier === "nova" && l.ft > 0 && l.ft < REMNANT),
     );
@@ -1713,26 +1956,68 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   window.addEventListener("blur", onBlur);
   resize();
 
-  const flare = (l: Layer) => {
+  const flare = (l: Layer, fresh: boolean) => {
     l.flareAt = clock();
     l.ts = rand(0.88, 1.14);
-    l.seed = Math.random() * 100;
+    // Nova's burst peaks after its charge, at ft = NOVA_PEAK (both stretched by ts): the hero
+    // sun's collapse lands on that moment (fxSync.ts).
+    if (l.tier === "nova") {
+      const now = performance.now();
+      publishNovaBurst(now, now + ((FLARE.nova.pre + NOVA_PEAK) * l.ts * 1000) / speed);
+    }
+    // A fallback coming back keeps its seed (its raster's rows and its breathing stay put).
+    if (fresh || !isFallback(l.tier)) l.seed = Math.random() * 100;
     l.blasted = false;
     const r = composerRect();
+    if (isFallback(l.tier)) {
+      l.gate0 = fresh ? 0 : gateOf(l, l.flareAt);
+      l.selAt = l.flareAt;
+    }
+    if (l.tier === "claude" && r) {
+      // The head that is there sets off on its lap from where it is, at the speed it has; a new
+      // one appears on the top edge, a third to two thirds along, and starts from still. (No
+      // composer, nothing to run round: it just rests.)
+      const N = cellsOf(r);
+      if (fresh) l.phase = (rand(0.3, 0.7) * Math.max(r.w - 2 * r.radius, 1)) / perimLength(r);
+      l.lap = makeLap(l.flareAt, l.phase, fresh ? 0 : l.vel, HEAD_REST / N, N);
+      l.selEnd = l.flareAt + l.lap.T;
+    }
+    if (l.tier === "codex") {
+      // A new raster or one held off (nothing showing) shows none; one in flight fades
+      // (stepSweep).
+      if (fresh || (l.sweepFrom !== Infinity && l.phase < l.sweepFrom)) l.sweepA = 0;
+      l.sweepFrom = Infinity;
+      l.selEnd = l.flareAt + (FLARE.codex.pre + DISCHARGE.len) * l.ts;
+    }
     if (!r) return;
     if (l.tier === "solstice") spawnEmbers(l, r, 10, true);
     if (l.tier === "spark") l.nextSpawn = 0.2;
-    // The switch's own refresh replaces the next regular one (it starts after the flare).
-    if (l.tier === "codex") l.phase = Math.floor(l.phase) + 0.4;
   };
 
   return {
     set(id: FxId | null, isActive: boolean, key: number) {
       active = isActive;
+      const now = clock();
       const cur = layers.find((l) => !l.fading);
+      // Switched back to a fallback that is still fading out: that same layer comes back (with a
+      // renewal's copy folded into it), so there is never a second write head or a second
+      // raster; its select plays again from where it is, unless it is still playing one.
+      const back = id && isFallback(id) && cur?.id !== id ? layers.filter((l) => l.id === id) : [];
       if (cur?.id !== id) {
         if (cur) cur.fading = true;
-        if (id) {
+        for (const l of layers) l.retiring = false; // a renewal in progress: away quickly too
+        if (back.length) {
+          back.sort((a, b) => b.fade - a.fade);
+          const l = back[0];
+          l.fade = Math.min(
+            1,
+            back.reduce((s, b) => s + b.fade, 0),
+          );
+          layers = layers.filter((o) => o === l || o.id !== id);
+          l.fading = false;
+          l.fadeIn = REVIVE_FADE;
+          if (now >= l.selEnd) flare(l, false);
+        } else if (id) {
           const l: Layer = {
             id,
             tier: id,
@@ -1743,20 +2028,37 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             ts: 1,
             act: 0,
             actV: 0,
-            time: Math.random() * 50,
+            time: Math.random() * 50 + devUptime * 0.3,
             fl: 0,
             pre: 0,
             ft: 99,
             blasted: false,
             trickle: 0,
             nextSpawn: 1,
-            phase: Math.random() * 40,
+            phase: id === "codex" ? Math.random() * 40 + devUptime / 6.5 : Math.random(),
+            selAt: -1e9,
+            selEnd: -1e9,
+            gate0: 0,
+            lap: null,
+            vel: 0,
+            trail: 0,
+            sweepA: 1,
+            sweepFrom: 0,
+            fadeIn: RENEW_FADE,
+            epoch: 0,
+            clockAt: 0,
+            retiring: false,
           };
+          // Its epoch starts now. Dev ?fxuptime: the counters are as after that long, and the
+          // epoch as the last renewal would have left it.
+          const since = devUptime % RENEW_AFTER;
+          l.epoch = l.time - since * 0.3;
+          l.clockAt = clock() - since;
           layers.push(l);
-          flare(l);
+          flare(l, true);
         }
-      } else if (cur && key !== flareKey) {
-        flare(cur);
+      } else if (cur && key !== flareKey && !(isFallback(cur.id) && now < cur.selEnd)) {
+        flare(cur, false); // (dev replay; a fallback's select already playing carries on)
       }
       flareKey = key;
       // Restart the loop at full rate for the change.

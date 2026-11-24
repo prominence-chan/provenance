@@ -6,17 +6,16 @@
 // on or was used), the Claude Code / Codex CLI threads (/rpc/fallback), and the tier threads an
 // experimental orchestrator drives (/rpc/orchestrator). Threads from all of them share one list
 // and one store; each request goes to the thread's own backend.
+//
+// A conversation moved to another backend stays one thread on the page (shared/thread-links.ts,
+// store/segments.ts): its later sessions' threads are hidden from the list, their events are
+// shown in the conversation, and each message goes to the session serving it now.
 
 import type { FallbacksInfo } from "../../shared/fallback-api";
-import { threadBrief } from "../fallback/brief";
+import type { LinkSegment, ThreadLinks } from "../../shared/thread-links";
+import { CARRY_ON, threadBrief } from "../fallback/brief";
 import { chosenEffort } from "../fallback/effort";
-import {
-  backendOfModel,
-  backendOfThreadId,
-  modelKeyFor,
-  wireModel,
-  type BackendId,
-} from "../fallback/model";
+import { modelKeyFor, wireModel, type BackendId } from "../fallback/model";
 import type {
   BridgeStatus,
   CommandExecutionApprovalDecision,
@@ -26,8 +25,10 @@ import type {
   ServerNotification,
   ServerRequest,
   Thread,
+  Turn,
 } from "../protocol";
 import { RpcClient } from "../rpc/client";
+import { isAssistView } from "../setup/assist-text";
 import { splitModel } from "../theme/tiers";
 import { applyNotification, turnFromProtocol, upsertThreadInList } from "./reducer";
 import {
@@ -39,6 +40,16 @@ import {
   type TurnUsage,
   type TurnView,
 } from "./state";
+import {
+  currentSegment,
+  homeOf,
+  movesConversation,
+  ownerOf,
+  segmentOfTurn,
+  segmentsOf,
+  targetBackend as targetOf,
+  type Segment,
+} from "./segments";
 import { getState, setState } from "./store";
 
 const HISTORY_TURNS = 50;
@@ -100,18 +111,25 @@ function makeClient(id: BackendId): RpcClient {
             (r) => String(r.id) === String(req.id) && (r as TaggedRequest)._backend === id,
           )
             ? s
-            : { ...s, serverRequests: [...s.serverRequests, tagRequest(req, id)] },
+            : { ...s, serverRequests: [...s.serverRequests, tagRequest(req, id, s)] },
         ),
     },
     url,
   );
 }
 
-function tagRequest(req: ServerRequest, id: BackendId): ServerRequest {
+function tagRequest(req: ServerRequest, id: BackendId, s: AppState): ServerRequest {
   const tagged: TaggedRequest = { ...req };
   tagged._backend = id;
+  // A later session's request (an approval) shows in its conversation. Answers go by request id.
+  const tid = (req.params as { threadId?: unknown }).threadId;
+  const owner = typeof tid === "string" ? ownerOf(s, tid) : null;
+  if (owner) tagged.params = { ...(req.params as object), threadId: owner.id } as never;
   return tagged;
 }
+
+/** Per backend: the conversation whose new session is being started there (its thread/started). */
+const startingSegment = new Map<BackendId, string>();
 
 function onNotification(id: BackendId, n: ServerNotification): void {
   if (n.method === "serverRequest/resolved") {
@@ -125,16 +143,57 @@ function onNotification(id: BackendId, n: ServerNotification): void {
     }));
     return;
   }
+  // A conversation's new session starting: not a new thread in the list.
+  if (
+    n.method === "thread/started" &&
+    (startingSegment.has(id) || ownerOf(getState(), n.params.thread.id))
+  ) {
+    const tid = n.params.thread.id;
+    setState((s) => ({ ...s, threadBackend: { ...s.threadBackend, [tid]: id } }));
+    return;
+  }
+  // A later session's events belong to its conversation.
+  const tid = (n.params as { threadId?: unknown }).threadId;
+  const owner = typeof tid === "string" ? ownerOf(getState(), tid) : null;
+  if (owner) {
+    // Its own name and archiving are bookkeeping: the conversation keeps its own.
+    if (
+      n.method === "thread/name/updated" ||
+      n.method === "thread/archived" ||
+      n.method === "thread/deleted"
+    )
+      return;
+    n = { ...n, params: { ...n.params, threadId: owner.id } } as ServerNotification;
+  }
   setState((s) => {
     let next = applyNotification(s, n);
     if (n.method === "thread/started" && next.threadBackend[n.params.thread.id] !== id)
       next = { ...next, threadBackend: { ...next.threadBackend, [n.params.thread.id]: id } };
+    if (owner) next = tagTurn(next, owner.id, turnIdOf(n), owner.segment);
     return next;
   });
   if (n.method === "warning" || n.method === "configWarning" || n.method === "deprecationNotice") {
     const p = n.params as { message?: string; summary?: string };
     notify("warn", p.message ?? p.summary ?? n.method);
   }
+}
+
+/** The turn a notification is about, if any. */
+function turnIdOf(n: ServerNotification): string | null {
+  const p = n.params as { turnId?: unknown; turn?: { id?: unknown } };
+  if (typeof p.turnId === "string") return p.turnId;
+  return typeof p.turn?.id === "string" ? p.turn.id : null;
+}
+
+/** Mark which of the conversation's sessions served a turn (set once). */
+function tagTurn(s: AppState, threadId: string, turnId: string | null, segment: number): AppState {
+  const v = s.views[threadId];
+  if (!turnId || !v) return s;
+  const i = v.turns.findIndex((t) => t.id === turnId);
+  if (i === -1 || v.turns[i].segment === segment) return s;
+  const turns = v.turns.slice();
+  turns[i] = { ...turns[i], segment };
+  return { ...s, views: { ...s.views, [threadId]: { ...v, turns } } };
 }
 
 export const rpc = makeClient("main");
@@ -178,24 +237,24 @@ function codexUsed(): boolean {
   }
 }
 
-/** Which backend a thread lives on. */
+/** Which backend serves a conversation now (its latest session's; for most, its own). */
 export function backendOf(threadId: string): BackendId {
-  return getState().threadBackend[threadId] ?? backendOfThreadId(threadId) ?? "main";
+  return currentSegment(getState(), threadId).backend;
 }
 
-const clientFor = (threadId: string) => clients[backendOf(threadId)];
+/** The backend serving the session of the conversation that ran this turn. */
+export function turnBackend(threadId: string, turn: TurnView): BackendId {
+  return segmentOfTurn(getState(), threadId, turn).backend;
+}
 
-/**
- * Where a message on `model` goes. A tier thread stays with the orchestrator it was started with
- * (the stock harness on "main", or the orchestrator backend); a new tier thread follows the
- * composer's orchestrator choice.
- */
+/** Sending on `model` would move this conversation to another backend session. */
+export function switchesBackend(threadId: string, model: string): boolean {
+  return movesConversation(getState(), threadId, model);
+}
+
+/** Where a message on `model` goes (segments.ts). */
 function targetBackend(model: string, threadId: string | null): BackendId {
-  const b = backendOfModel(model);
-  if (b !== "main") return b;
-  const cur = threadId ? backendOf(threadId) : null;
-  if (cur === "main" || cur === "orchestrator") return cur;
-  return getState().settings.orchestrator === "provenance" ? "main" : "orchestrator";
+  return targetOf(getState(), model, threadId);
 }
 
 /** Called on first connect and whenever a backend restarts. */
@@ -208,11 +267,13 @@ async function onReady(id: BackendId, reconnected: boolean): Promise<void> {
   void refreshThreads();
   // After a reconnect/restart app-server may not have the thread loaded: re-attach.
   const sel = getState().selectedThreadId;
-  if (sel && backendOf(sel) === id)
+  if (sel && segmentsOf(getState(), sel).some((x) => x.backend === id))
     void openThread(sel, { force: reconnected || getState().views[sel]?.load !== "ready" });
 }
 
 export async function boot(): Promise<void> {
+  // Which conversations moved between backends: before any list, so their sessions stay hidden.
+  await refreshLinks();
   const [info, tiers] = await Promise.all([
     fetch("/api/info").then((r) => r.json()) as Promise<{
       defaultCwd: string;
@@ -235,6 +296,35 @@ export async function boot(): Promise<void> {
   if (getState().settings.fallbacks.codex === "provenance" || codexUsed()) connect("codex");
   void refreshSources(); // once, so a pinned source shows its label; the picker refreshes it
   void refreshFallbacks();
+}
+
+/** The conversations that moved between backends (GET /api/links). */
+async function refreshLinks(): Promise<void> {
+  try {
+    const body = (await (await fetch("/api/links")).json()) as { links?: ThreadLinks };
+    if (body?.links && typeof body.links === "object") {
+      const links = body.links;
+      setState((s) => ({ ...s, links }));
+    }
+  } catch {
+    // none known: every thread stands alone
+  }
+}
+
+/** Store a conversation's sessions (null: forget them); the page's copy changes with it. */
+async function saveLinks(id: string, segments: LinkSegment[] | null): Promise<void> {
+  const r = await fetch(`/api/links/${encodeURIComponent(id)}`, {
+    method: segments ? "PUT" : "DELETE",
+    headers: { "content-type": "application/json" },
+    body: segments ? JSON.stringify({ segments }) : undefined,
+  });
+  if (!r.ok) throw new Error(`Couldn't keep the conversation's link (${r.status})`);
+  setState((s) => {
+    const links = { ...s.links };
+    if (segments) links[id] = segments;
+    else delete links[id];
+    return { ...s, links };
+  });
 }
 
 /** Claude Code / Codex health and models (GET /api/fallbacks); `force` checks again now. */
@@ -370,10 +460,32 @@ export async function refreshThreads(): Promise<void> {
       const b = threadBackend[t.id] ?? "main";
       if (!fetched.has(b) && !all.some((x) => x.id === t.id)) all.push(t);
     }
-    all.sort((a, b) => b.updatedAt - a.updatedAt);
-    return { ...s, threads: all, threadBackend, threadsLoading: false };
+    const threads = stitchList(all, s.links);
+    threads.sort((a, b) => b.updatedAt - a.updatedAt);
+    return { ...s, threads, threadBackend, threadsLoading: false };
   });
   if (mainError) notify("error", `Couldn't list threads: ${errText(mainError)}`);
+}
+
+/**
+ * One entry per conversation: a moved conversation's later sessions are left out, and its entry
+ * shows when it was last active and whether its current session is working.
+ */
+function stitchList(all: Thread[], links: ThreadLinks): Thread[] {
+  const byId = new Map(all.map((t) => [t.id, t]));
+  const hidden = new Set(
+    Object.values(links).flatMap((segs) => segs.slice(1).map((x) => x.threadId)),
+  );
+  return all
+    .filter((t) => !hidden.has(t.id))
+    .map((t) => {
+      const segs = links[t.id];
+      if (!segs) return t;
+      const later = segs.slice(1).map((x) => byId.get(x.threadId));
+      const cur = byId.get(segs[segs.length - 1].threadId);
+      const updatedAt = Math.max(t.updatedAt, ...later.map((x) => x?.updatedAt ?? 0));
+      return { ...t, updatedAt, ...(cur ? { status: cur.status } : {}) };
+    });
 }
 
 export function newThread(): void {
@@ -398,46 +510,75 @@ export async function openThread(threadId: string, opts: { force?: boolean } = {
           : blankView({ id: threadId } as Thread, "loading"),
     },
   }));
-  const backend = backendOf(threadId);
-  const client = clients[backend];
+  const segs = segmentsOf(getState(), threadId);
   try {
-    if (backend !== "main") await ensureBackend(backend);
-    // Resume subscribes this connection to the thread's live events.
-    const resumed = await client.request("thread/resume", { threadId, excludeTurns: true });
-    const history = await client.request("thread/turns/list", {
-      threadId,
-      limit: HISTORY_TURNS,
-      sortDirection: "desc",
-      itemsView: "full",
-    });
-    const turns = history.data.slice().reverse().map(turnFromProtocol);
-    const model = modelKeyFor(backend, resumed.model);
+    // Each session the conversation had, oldest first, stitched into one list of turns.
+    const loaded = await Promise.all(
+      segs.map((seg, i) =>
+        loadSegment(seg).then(
+          (r) => ({ ...r, error: null as unknown }),
+          (error: unknown) => {
+            // The session serving it now must load; an earlier one that doesn't is said, and left out.
+            if (i === segs.length - 1) throw error;
+            return { resumed: null, turns: [] as TurnView[], model: null, error };
+          },
+        ),
+      ),
+    );
+    const failed = loaded.find((x) => x.error);
+    if (failed)
+      notify(
+        "warn",
+        `Couldn't load an earlier part of this conversation: ${errText(failed.error)}`,
+      );
+    const turns = loaded.flatMap((x, i) =>
+      x.turns.map((t) => ({
+        ...t,
+        model: t.model ?? x.model,
+        ...(segs.length > 1 ? { segment: i } : {}),
+      })),
+    );
+    const first = loaded[0].resumed;
+    const last = loaded[loaded.length - 1];
+    const model = last.model;
     setState((s) => {
       const prev = s.views[threadId];
+      const thread = first?.thread ?? prev?.thread ?? listed ?? ({ id: threadId } as Thread);
       // Keep any turn that streamed in while we were fetching history.
       const live = (prev?.turns ?? []).filter((t) => !turns.some((h) => h.id === t.id));
       const view: ThreadView = {
-        ...(prev ?? blankView(resumed.thread, "ready")),
-        thread: resumed.thread,
+        ...(prev ?? blankView(thread, "ready")),
+        thread,
         load: "ready",
         turns: [...turns, ...live],
         model,
-        cwd: resumed.cwd,
+        cwd: last.resumed!.cwd,
       };
-      return {
-        ...upsertThreadInList(s, resumed.thread, false),
-        views: { ...s.views, [threadId]: view },
-        threadBackend: { ...s.threadBackend, [threadId]: backend },
-      };
+      let next: AppState = s;
+      if (first) {
+        // The conversation's entry: its own thread, as active and as recent as its latest session.
+        const entry = s.threads.find((t) => t.id === threadId);
+        const cur = last.resumed!.thread;
+        next = upsertThreadInList(
+          s,
+          segs.length > 1
+            ? {
+                ...first.thread,
+                status: cur.status,
+                updatedAt: Math.max(first.thread.updatedAt, cur.updatedAt, entry?.updatedAt ?? 0),
+              }
+            : first.thread,
+          false,
+        );
+      }
+      const threadBackend = { ...next.threadBackend };
+      segs.forEach((x) => (threadBackend[x.threadId] = x.backend));
+      return { ...next, views: { ...next.views, [threadId]: view }, threadBackend };
     });
     // A thread stays on what it runs on: opening one that lives elsewhere (Claude Code, Codex)
     // points the picker at its model, so the next message continues it there.
     const cur = getState().settings.model;
-    if (
-      model &&
-      getState().selectedThreadId === threadId &&
-      targetBackend(cur, threadId) !== backend
-    )
+    if (model && getState().selectedThreadId === threadId && switchesBackend(threadId, cur))
       updateSettings({ model });
   } catch (e) {
     setState((s) => {
@@ -452,9 +593,30 @@ export async function openThread(threadId: string, opts: { force?: boolean } = {
   }
 }
 
+/** One session of a conversation: resumed (so its live events come here) and its turns. */
+async function loadSegment(seg: Segment) {
+  const client = clients[seg.backend];
+  if (seg.backend !== "main") await ensureBackend(seg.backend);
+  // Resume subscribes this connection to the thread's live events.
+  const resumed = await client.request("thread/resume", {
+    threadId: seg.threadId,
+    excludeTurns: true,
+  });
+  const history = await client.request("thread/turns/list", {
+    threadId: seg.threadId,
+    limit: HISTORY_TURNS,
+    sortDirection: "desc",
+    itemsView: "full",
+  });
+  const turns = history.data.slice().reverse().map(turnFromProtocol);
+  return { resumed, turns, model: modelKeyFor(seg.backend, resumed.model) ?? seg.model };
+}
+
+/** Archive a conversation: every session it had, so nothing of it comes back as its own thread. */
 export async function archiveThread(threadId: string): Promise<void> {
+  const segs = segmentsOf(getState(), threadId);
   try {
-    await clientFor(threadId).request("thread/archive", { threadId });
+    await clients[segs[0].backend].request("thread/archive", { threadId });
     setState((s) => ({
       ...s,
       threads: s.threads.filter((t) => t.id !== threadId),
@@ -462,30 +624,71 @@ export async function archiveThread(threadId: string): Promise<void> {
     }));
   } catch (e) {
     notify("error", `Archive failed: ${errText(e)}`);
+    return;
   }
+  if (segs.length < 2) return;
+  const later = await Promise.allSettled(
+    segs.slice(1).map(async (x) => {
+      if (x.backend !== "main") await ensureBackend(x.backend);
+      await clients[x.backend].request("thread/archive", { threadId: x.threadId });
+    }),
+  );
+  // Forgotten once all of it is archived; otherwise kept, so what is left stays hidden.
+  if (later.every((r) => r.status === "fulfilled")) await saveLinks(threadId, null).catch(() => {});
 }
 
 // ---- turns -----------------------------------------------------------------
 
+/** What a send can pin instead of the composer's settings (the token pool's setup assistant). */
+export interface SendOptions {
+  /** Send to this thread (null: start a new one), whatever is selected. */
+  threadId?: string | null;
+  model?: string;
+  approvalPolicy?: Settings["approvalPolicy"];
+  sandbox?: SandboxMode;
+  /** A new thread's name. */
+  name?: string;
+  /** Moving the conversation with no message of its own: the model carries on with the work. */
+  carryOn?: boolean;
+}
+
+/** The setup assistant's thread: read only, in its own scratch folder, on its own fallback. */
+const ASSIST_PRESET = { approvalPolicy: "on-request", sandbox: "read-only" } as const;
+
+/** Key of the hand-over in turn/start's additionalContext (the model sees it, the thread doesn't). */
+const HANDOVER_KEY = "provenance_handover";
+
+/** Backends of ours: they take the whole brief with the turn (app-servers cap additionalContext). */
+const takesBriefWithTurn = (b: BackendId) => b === "fallback" || b === "orchestrator";
+
 /**
  * Send a message: starts a new thread first when on the "new thread" screen. When the picker
- * points at another backend than the open thread's (a tier thread, Claude Code picked), the
- * message starts a new thread there instead, with a brief of this one first.
+ * points at another backend than the one serving the open conversation (a tier thread, Claude
+ * Code picked), the conversation moves there and stays one thread (handOver). The token pool's
+ * setup assistant's thread always stays where it is, read only, in its scratch folder.
  */
-export async function sendMessage(text: string, cwdInput?: string): Promise<void> {
-  const { settings } = getState();
-  let threadId = getState().selectedThreadId;
-  const target = targetBackend(settings.model, threadId);
-  let prompt = text;
-  let carriedFrom: string | null = null;
-  if (threadId && backendOf(threadId) !== target) {
-    const view = getState().views[threadId];
-    if (view) {
-      prompt = `${threadBrief(view)}\n\n${text}`;
-      carriedFrom = view.thread.name || view.thread.preview?.split("\n")[0] || null;
-    }
-    threadId = null;
+export async function sendMessage(
+  text: string,
+  cwdInput?: string,
+  opts: SendOptions = {},
+): Promise<void> {
+  let settings: Settings = {
+    ...getState().settings,
+    ...(opts.model ? { model: opts.model } : {}),
+    ...(opts.approvalPolicy ? { approvalPolicy: opts.approvalPolicy } : {}),
+    ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
+  };
+  let threadId = opts.threadId !== undefined ? opts.threadId : getState().selectedThreadId;
+  const pinned = threadId ? getState().views[threadId] : undefined;
+  const assist = !!pinned && isAssistView(pinned);
+  if (pinned && assist) {
+    settings = { ...settings, ...ASSIST_PRESET, model: pinned.model ?? settings.model };
+    cwdInput = pinned.cwd ?? cwdInput;
   }
+  if (threadId && !assist && switchesBackend(threadId, settings.model))
+    return handOver(threadId, settings, text, cwdInput, !!opts.carryOn);
+  if (!text.trim()) return;
+  const target = threadId ? backendOf(threadId) : targetBackend(settings.model, null);
   const cwd = (cwdInput ?? settings.cwd).trim();
   // Only override an existing thread's cwd when the user changed it.
   const cwdOverride = threadId && cwd === getState().views[threadId]?.cwd ? null : cwd || null;
@@ -497,35 +700,23 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
     if (target !== "main") await ensureBackend(target);
     if (!threadId) {
       threadId = await startThread(target, settings, cwd);
-      // A carried-over thread is named after the one it continues, not after its brief.
-      if (carriedFrom) void nameThread(threadId, `${carriedFrom.slice(0, 80)} (continued)`);
+      if (opts.name) void nameThread(threadId, opts.name);
     }
+    const segs = segmentsOf(getState(), threadId);
+    const segment = segs.length - 1;
+    const raw = segs[segment].threadId;
     const res = await client.request("turn/start", {
-      threadId,
-      input: [{ type: "text", text: prompt, text_elements: [] }],
+      threadId: raw,
+      input: [{ type: "text", text, text_elements: [] }],
       // Per-turn overrides: these stick for subsequent turns too.
       model: wireModel(settings.model),
       cwd: cwdOverride,
       approvalPolicy: settings.approvalPolicy,
       sandboxPolicy: sandboxPolicyFor(settings.sandbox),
       ...(effort ? { effort } : {}),
+      ...briefAgain(threadId, segment, target),
     });
-    const tid = threadId;
-    setState((s) => {
-      const v = s.views[tid];
-      if (!v) return s;
-      const model = settings.model;
-      const turns = v.turns.some((t) => t.id === res.turn.id)
-        ? v.turns.map((t) => (t.id === res.turn.id ? { ...t, model } : t))
-        : [...v.turns, { ...turnFromProtocol(res.turn), model }];
-      return {
-        ...s,
-        views: {
-          ...s.views,
-          [tid]: { ...v, turns, cwd: cwdOverride ?? v.cwd, model: settings.model },
-        },
-      };
-    });
+    addTurn(threadId, res.turn, settings.model, segment, cwdOverride);
   } catch (e) {
     notify("error", errText(e));
   } finally {
@@ -533,9 +724,162 @@ export async function sendMessage(text: string, cwdInput?: string): Promise<void
   }
 }
 
+/**
+ * A session of ours that a conversation moved to and that hasn't finished a turn yet (its first
+ * one failed, or was stopped): the brief goes with the next one too. The backend leaves it out
+ * once the CLI has a session (server/fallback/backend.ts).
+ */
+function briefAgain(threadId: string, segment: number, target: BackendId) {
+  if (segment === 0 || !takesBriefWithTurn(target)) return {};
+  const v = getState().views[threadId];
+  if (!v || v.turns.some((t) => (t.segment ?? 0) === segment && t.status === "completed"))
+    return {};
+  const before = { ...v, turns: v.turns.filter((t) => (t.segment ?? 0) < segment) };
+  return {
+    additionalContext: {
+      [HANDOVER_KEY]: { value: threadBrief(before), kind: "application" as const },
+    },
+  };
+}
+
+/** Put a turn that turn/start answered into the conversation, with its model and session. */
+function addTurn(
+  threadId: string,
+  turn: Turn,
+  model: string,
+  segment: number,
+  cwd: string | null,
+): void {
+  setState((s) => {
+    const v = s.views[threadId];
+    if (!v) return s;
+    const tag = segment > 0 ? { segment } : {};
+    const turns = v.turns.some((t) => t.id === turn.id)
+      ? v.turns.map((t) => (t.id === turn.id ? { ...t, model, ...tag } : t))
+      : [...v.turns, { ...turnFromProtocol(turn), model, ...tag }];
+    return {
+      ...s,
+      views: { ...s.views, [threadId]: { ...v, turns, cwd: cwd ?? v.cwd, model } },
+    };
+  });
+}
+
+/**
+ * Move a conversation to another backend and go on there, in the same thread: a new session on
+ * the target whose model gets a brief of the conversation (never shown), linked to the
+ * conversation, then the person's message exactly as typed (or, with `carryOn`, none: the model
+ * carries on with the work). A turn still running where it was is stopped first: two models never
+ * work on one conversation at once.
+ */
+async function handOver(
+  threadId: string,
+  settings: Settings,
+  text: string,
+  cwdInput: string | undefined,
+  carryOn: boolean,
+): Promise<void> {
+  const target = targetBackend(settings.model, threadId);
+  const effort = chosenEffort(settings, getState().fallbackInfo);
+  setState((s) => ({ ...s, sending: true }));
+  try {
+    await stopRunningTurn(threadId);
+    if (target !== "main") await ensureBackend(target);
+    const view = getState().views[threadId];
+    if (!view) throw new Error("The conversation isn't loaded");
+    const cwd = (cwdInput ?? view.cwd ?? settings.cwd).trim();
+    // Everything so far, as the model taking over needs it.
+    const brief = threadBrief(view);
+    const appServer = !takesBriefWithTurn(target);
+    // Until it is linked, the new session's thread/started is not a new thread in the list.
+    startingSegment.set(target, threadId);
+    let raw: string;
+    let segs: Segment[];
+    try {
+      const started = await clients[target].request("thread/start", {
+        model: wireModel(settings.model),
+        cwd: cwd || null,
+        approvalPolicy: settings.approvalPolicy,
+        sandbox: settings.sandbox,
+        // An app-server takes the brief as the new thread's developer instructions: whole, kept
+        // through compaction, never an item of the thread.
+        ...(appServer ? { developerInstructions: brief } : {}),
+        ...(target === "orchestrator" ? { config: { orchestrator: settings.orchestrator } } : {}),
+      });
+      raw = started.thread.id;
+      if (target === "codex") markCodexUsed();
+      segs = [
+        ...segmentsOf(getState(), threadId),
+        {
+          backend: target,
+          threadId: raw,
+          model: settings.model,
+          at: Math.floor(Date.now() / 1000),
+        },
+      ];
+      // Linked before the first turn, so a restart from here on finds it one conversation.
+      await saveLinks(threadId, segs);
+    } finally {
+      startingSegment.delete(target);
+    }
+    const rawId = raw;
+    setState((s) => ({
+      ...s,
+      threads: s.threads.filter((t) => t.id !== rawId),
+      threadBackend: { ...s.threadBackend, [rawId]: target },
+    }));
+    const handover = carryOn ? `${brief}\n\n${CARRY_ON}` : brief;
+    const context = appServer
+      ? carryOn
+        ? { [HANDOVER_KEY]: { value: CARRY_ON, kind: "application" as const } }
+        : null
+      : { [HANDOVER_KEY]: { value: handover, kind: "application" as const } };
+    const typed = carryOn ? "" : text;
+    const res = await clients[target].request("turn/start", {
+      threadId: raw,
+      input: typed.trim() ? [{ type: "text", text: typed, text_elements: [] }] : [],
+      model: wireModel(settings.model),
+      cwd: cwd || null,
+      approvalPolicy: settings.approvalPolicy,
+      sandboxPolicy: sandboxPolicyFor(settings.sandbox),
+      ...(effort ? { effort } : {}),
+      ...(context ? { additionalContext: context } : {}),
+    });
+    addTurn(threadId, res.turn, settings.model, segs.length - 1, cwd || null);
+  } catch (e) {
+    notify("error", errText(e));
+  } finally {
+    setState((s) => ({ ...s, sending: false }));
+  }
+}
+
+/** Stop the conversation's running turn, if any, and wait until it has stopped. */
+async function stopRunningTurn(threadId: string, timeoutMs = 20_000): Promise<void> {
+  const running = () =>
+    getState().views[threadId]?.turns.some((t) => t.status === "inProgress") ?? false;
+  if (!running()) return;
+  await interrupt(threadId);
+  const t0 = Date.now();
+  while (running()) {
+    if (Date.now() - t0 > timeoutMs)
+      throw new Error("The running turn didn't stop, so the conversation stayed where it was");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/**
+ * Start the token pool's setup assistant: a new thread on a fallback (`model`), read only, in an
+ * empty scratch folder of the app's, whose first message is the brief (setup/assist-text.ts).
+ */
+export async function startAssistThread(model: string, cwd: string, brief: string, name: string) {
+  updateSettings({ model }); // the picker shows what the thread runs on, as opening it would
+  setState((s) => ({ ...s, selectedThreadId: null }));
+  await sendMessage(brief, cwd, { threadId: null, model, ...ASSIST_PRESET, name });
+}
+
+/** Rename a conversation: its own (first) thread holds the name. */
 async function nameThread(threadId: string, name: string): Promise<void> {
   try {
-    await clientFor(threadId).request("thread/name/set", { threadId, name });
+    await clients[homeOf(getState(), threadId)].request("thread/name/set", { threadId, name });
     setState((s) => ({
       ...s,
       threads: s.threads.map((t) => (t.id === threadId ? { ...t, name } : t)),
@@ -551,6 +895,16 @@ async function nameThread(threadId: string, name: string): Promise<void> {
   }
 }
 
+export { nameThread as renameThread };
+
+function markCodexUsed(): void {
+  try {
+    localStorage.setItem(CODEX_USED_KEY, "1"); // keep listing these threads if the mode goes off
+  } catch {
+    // fine
+  }
+}
+
 async function startThread(target: BackendId, settings: Settings, cwd: string): Promise<string> {
   const started = await clients[target].request("thread/start", {
     model: wireModel(settings.model),
@@ -561,13 +915,7 @@ async function startThread(target: BackendId, settings: Settings, cwd: string): 
     ...(target === "orchestrator" ? { config: { orchestrator: settings.orchestrator } } : {}),
   });
   const threadId = started.thread.id;
-  if (target === "codex") {
-    try {
-      localStorage.setItem(CODEX_USED_KEY, "1"); // keep listing these threads if the mode goes off
-    } catch {
-      // fine
-    }
-  }
+  if (target === "codex") markCodexUsed();
   const view: ThreadView = {
     ...blankView(started.thread, "ready"),
     model: settings.model,
@@ -583,23 +931,28 @@ async function startThread(target: BackendId, settings: Settings, cwd: string): 
 }
 
 /**
- * Carry a thread over to a fallback (the "too large" suggestion): a new thread on `model` whose
- * first message is a brief of this one, so the fallback can continue the work.
+ * Move a conversation to a fallback without a new message (the "too large" suggestion): the same
+ * thread goes on there, and the model carries on with the work in progress.
  */
 export async function continueElsewhere(threadId: string, model: string): Promise<void> {
   const view = getState().views[threadId];
   if (!view) return;
   updateSettings({ model });
   setState((s) => ({ ...s, selectedThreadId: threadId }));
-  await sendMessage("Continue the task from where it stands.", view.cwd ?? undefined);
+  await sendMessage("", view.cwd ?? undefined, { carryOn: true });
 }
 
 export async function interrupt(threadId: string): Promise<void> {
   const v = getState().views[threadId];
   const turn = v?.turns.findLast((t) => t.status === "inProgress");
   if (!turn) return;
+  // The session that runs the turn.
+  const seg = segmentOfTurn(getState(), threadId, turn);
   try {
-    await clientFor(threadId).request("turn/interrupt", { threadId, turnId: turn.id });
+    await clients[seg.backend].request("turn/interrupt", {
+      threadId: seg.threadId,
+      turnId: turn.id,
+    });
   } catch (e) {
     notify("error", `Interrupt failed: ${errText(e)}`);
   }
@@ -618,12 +971,14 @@ const usageInFlight = new Set<string>();
  */
 export async function loadTurnUsage(threadId: string, turn: TurnView, retry = true): Promise<void> {
   // The router knows the tiers' turns and Codex-through-Provenance ones (its pass-through), not the CLIs'.
-  const where = backendOf(threadId);
+  const seg = segmentOfTurn(getState(), threadId, turn);
+  const where = seg.backend;
   // (nor an orchestrator's: its calls aren't made under the visible thread's id)
   if (usageInFlight.has(turn.id) || where === "fallback" || where === "orchestrator") return;
 
   usageInFlight.add(turn.id);
-  const q = new URLSearchParams({ key: threadId, turn: turn.id });
+  // Its requests carry the id of the session that ran it.
+  const q = new URLSearchParams({ key: seg.threadId, turn: turn.id });
   if (turn.startedAt) q.set("since", String(turn.startedAt - 2));
   if (turn.completedAt) q.set("until", String(turn.completedAt + 5));
   let usage: TurnUsage = { requests: 0, input_tokens: 0, output_tokens: 0, models: [] };
@@ -721,6 +1076,33 @@ function sandboxPolicyFor(mode: SandboxMode): SandboxPolicy {
 
 export function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+export async function projectMove(params: {
+  projectId: string;
+  beforeProjectId?: string;
+}): Promise<void> {
+  setState((s) => ({ ...s, threadsLoading: true }));
+  try {
+    await rpc.request("project/move", params);
+    await refreshThreads();
+  } catch (e) {
+    notify("error", `Couldn't move project: ${errText(e)}`);
+  } finally {
+    setState((s) => ({ ...s, threadsLoading: false }));
+  }
+}
+
+export async function projectDelete(projectId: string): Promise<void> {
+  setState((s) => ({ ...s, threadsLoading: true }));
+  try {
+    await rpc.request("project/delete", { projectId });
+    await refreshThreads();
+  } catch (e) {
+    notify("error", `Couldn't delete project: ${errText(e)}`);
+  } finally {
+    setState((s) => ({ ...s, threadsLoading: false }));
+  }
 }
 
 export type { AppState };

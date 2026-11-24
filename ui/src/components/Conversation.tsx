@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { backendOf, loadTurnUsage, openThread } from "../store/actions";
+import { loadTurnUsage, openThread, turnBackend } from "../store/actions";
 import type { TurnUsage, TurnView } from "../store/state";
 import { useAppState } from "../store/store";
 import { Approvals } from "./Approvals";
@@ -13,7 +13,7 @@ import { tierOf } from "../theme/tiers";
 import { TierBadge } from "./TierBadge";
 import { TurnModels } from "./TurnModels";
 import { StrainNote } from "../fallback/StrainNote";
-import { fallbackOf } from "../fallback/model";
+import { fallbackOf, servedByName } from "../fallback/model";
 
 /** Centered, scrolling transcript of one thread. */
 export function Conversation({ threadId }: { threadId: string }) {
@@ -59,13 +59,15 @@ export function Conversation({ threadId }: { threadId: string }) {
             </button>
           </div>
         )}
-        {view.turns.map((turn) => (
+        {view.turns.map((turn, i) => (
           <Turn
             key={turn.id}
             threadId={threadId}
             turn={turn}
             model={turn.model ?? view.model}
             waiting={pending > 0}
+            // The conversation moved to another backend here (store/segments.ts).
+            moved={(turn.segment ?? 0) > (view.turns[i - 1]?.segment ?? 0)}
           />
         ))}
         <StrainNote threadId={threadId} />
@@ -80,11 +82,13 @@ function Turn({
   turn,
   model,
   waiting,
+  moved,
 }: {
   threadId: string;
   turn: TurnView;
   model: string | null;
   waiting: boolean;
+  moved: boolean;
 }) {
   const running = turn.status === "inProgress";
   const usage = useAppState((s) => s.usage[turn.id]);
@@ -102,6 +106,16 @@ function Turn({
       data-tier={tierOf(model)?.id}
       data-fallback={fallbackOf(model) ?? undefined}
     >
+      {moved && (
+        <p
+          className="carry-line"
+          // Over the person's message, on its side; over the reply when the move had none.
+          data-side={turn.items[0]?.type === "userMessage" ? "user" : "agent"}
+        >
+          Continued {fallbackOf(model) ? "in" : "on"} {servedByName(model)} from the conversation
+          above
+        </p>
+      )}
       {groups.map((g, i) =>
         Array.isArray(g) ? (
           <ToolGroup key={g[0].id} items={g} collapsed={!running || textAfter(groups, i)} />
@@ -145,7 +159,7 @@ function Turn({
       {showFooter && (
         <div className="turn-footer">
           <TierBadge model={model} />
-          {usage && usage.models.length > 0 && backendOf(threadId) === "main" && (
+          {usage && usage.models.length > 0 && turnBackend(threadId, turn) === "main" && (
             <TurnModels usage={usage} />
           )}
           {usage?.pruned && <TurnSaved pruned={usage.pruned} />}

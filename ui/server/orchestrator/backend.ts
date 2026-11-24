@@ -23,6 +23,12 @@
 // summary and the request it has not finished. A turn that ends early (no model after the
 // retries, a guard, an interrupt) leaves them as they stand, so "continue" picks the work up.
 //
+// A conversation moved here from another backend (shared/thread-links.ts) starts with a hand-over
+// brief in its first turn/start's `additionalContext` ({key: {value, kind}}, app-server's field).
+// It seeds the context the thread carries, within that context's own bound: Hyperexperimental's
+// summary, Experimental's goal (the notes' first request). It never becomes an item: the turn's
+// user message is what the person typed, and a turn with no message of its own shows none.
+//
 // A plain model call that the router can't serve is retried inside the turn (Run.model): the
 // waits are Caps.retryDelaysMs, a status line in the thread says so, and turn/interrupt ends the
 // wait at once. Guards and timeouts read the monotonic clock (clock.ts).
@@ -44,13 +50,16 @@ import {
   isOrchestrator,
   type Orchestrator,
 } from "../../shared/orchestrator-api.ts";
-import { agentMessage, userMessage, type Item } from "../fallback/items.ts";
+import { agentMessage, contextText, userMessage, type Item } from "../fallback/items.ts";
 import type { AppServer } from "./appserver.ts";
 import { mono } from "./clock.ts";
 import { runExperimental } from "./experimental.ts";
 import { runHyper } from "./hyper.ts";
 import { clipMiddle, emptyNotes, notesText, type Notes } from "./notes.ts";
-import { PROMPT_BUDGET, type Prompt } from "./prompts.ts";
+import { PROMPT_BUDGET, SUMMARY_LIMIT, type Prompt } from "./prompts.ts";
+
+/** How much of a hand-over brief Experimental keeps as its goal (its notes stay bounded). */
+const HANDOVER_GOAL_CHARS = 1500;
 import {
   CALL_TIMEOUT_MS,
   RouterError,
@@ -83,6 +92,12 @@ export interface Caps {
   /** One RUN action. */
   commandMs: number;
   /**
+   * The whole turn, in time: what a worker or a step may still take is cut to what is left of it,
+   * and when too little is left for another task the turn ends with what it has (a partial
+   * result that says so), not at a wall.
+   */
+  turnMs: number;
+  /**
    * The waits before each retry of a model call the router couldn't serve (429, 5xx, no answer,
    * a timeout, an empty reply), and of a worker whose own request failed for good. When they are
    * used up the turn ends with the plain message. [] means no retries.
@@ -98,6 +113,7 @@ export const RETRY_DELAYS_MS = [5_000, 20_000, 60_000, 120_000];
  */
 export const WORKER_CALLS = 24;
 export const WORKER_MINUTES = 10;
+export const TURN_MINUTES = 22;
 
 export const DEFAULT_CAPS: Caps = {
   tasks: 10,
@@ -109,13 +125,14 @@ export const DEFAULT_CAPS: Caps = {
   workerMs: WORKER_MINUTES * 60_000,
   workerIdleMs: 5 * 60_000,
   commandMs: 120_000,
+  turnMs: TURN_MINUTES * 60_000,
   retryDelaysMs: RETRY_DELAYS_MS,
 };
 
 /**
  * Caps set from the environment (the app passes its own): PROVENANCE_ORC_RETRY_S="5,20,60,120"
  * (seconds before each retry; "0" or "off" for none), PROVENANCE_ORC_WORKER_CALLS,
- * PROVENANCE_ORC_WORKER_MINUTES. Anything unreadable is ignored.
+ * PROVENANCE_ORC_WORKER_MINUTES, PROVENANCE_ORC_TURN_MINUTES. Anything unreadable is ignored.
  */
 export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const out: Partial<Caps> = {};
@@ -133,10 +150,12 @@ export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const minutes = Number(env.PROVENANCE_ORC_WORKER_MINUTES);
   if (Number.isFinite(minutes) && minutes >= 0.5 && minutes <= 240)
     out.workerMs = Math.round(minutes * 60_000);
+  const turn = Number(env.PROVENANCE_ORC_TURN_MINUTES);
+  if (Number.isFinite(turn) && turn >= 1 && turn <= 600) out.turnMs = Math.round(turn * 60_000);
   return out;
 }
 
-export type Role = "planner" | "revise" | "final" | "think" | "translate" | "summarize";
+export type Role = "planner" | "revise" | "final" | "review" | "think" | "translate" | "summarize";
 
 /** What a turn cost; kept on the turn (`orchestration`) and readable from the thread file. */
 export interface Stats {
@@ -152,6 +171,13 @@ export interface Stats {
   workerMaxInputTokens: number;
   steps: number;
   stopped: string | null;
+  /**
+   * The finish check of a turn that changed something: how many requirements the reviewer
+   * listed, how many it found not shown or violated, what code found on its own (a missing or
+   * misnamed file, a path outside the folder, a failed last check), and how many follow-up tasks
+   * (Experimental) or steps (Hyperexperimental) were run for them. Absent when no check ran.
+   */
+  finish?: { requirements: number; open: number; code: number; followUps: number };
 }
 
 export type TraceEvent =
@@ -229,6 +255,11 @@ export interface ThreadRecord {
   summary: string;
   /** Hyperexperimental: the request a turn ended without finishing ("continue" takes it up). */
   openGoal?: string | null;
+  /**
+   * Hyperexperimental: the request being worked on, word for word, with what code read out of it
+   * when it arrived: the exact names (request.ts) and the files it names that were not there.
+   */
+  job?: { original: string; exact: string[]; deliverables: string[] } | null;
   archived?: boolean;
 }
 
@@ -481,8 +512,15 @@ export class OrchestratorBackend {
   private startTurn(p: Json): unknown {
     const t = this.get(p.threadId);
     if (this.running.has(t.thread.id)) throw new Error("A turn is already running in this thread");
-    const text = inputText(p.input);
-    if (!text.trim()) throw new Error("Nothing to send");
+    const typed = inputText(p.input);
+    const context = t.turns.length ? "" : contextText(p.additionalContext);
+    if (!typed.trim() && !context.trim()) throw new Error("Nothing to send");
+    if (context) {
+      if (t.orchestrator === "hyperexperimental") t.summary = clipMiddle(context, SUMMARY_LIMIT);
+      else t.notes.requests = [clipMiddle(context, HANDOVER_GOAL_CHARS)];
+    }
+    // A turn that only carries on asks the orchestrator to go on.
+    const text = typed.trim() ? typed : "continue";
     if (typeof p.model === "string" && p.model) {
       if (p.model.includes(":")) throw new Error("This thread runs on the tiers");
       t.model = p.model;
@@ -508,7 +546,7 @@ export class OrchestratorBackend {
       durationMs: null,
     };
     t.turns.push(turn);
-    if (!t.thread.preview) t.thread.preview = text.slice(0, 400);
+    if (!t.thread.preview && typed.trim()) t.thread.preview = typed.slice(0, 400);
     t.thread.updatedAt = now;
     const run = new Run(this, t, turn, text);
     this.running.set(t.thread.id, run);
@@ -520,11 +558,11 @@ export class OrchestratorBackend {
       status: { type: "active", activeFlags: [] },
     });
     this.broadcast("turn/started", { threadId, turn: { ...turn, items: [] } });
-    const user = userMessage(`${turn.id}-user`, text);
-    run.complete(user, true);
+    const user = typed.trim() ? userMessage(`${turn.id}-user`, typed) : null;
+    if (user) run.complete(user, true);
     // Answer turn/start first, then run.
     setImmediate(() => void this.runTurn(t, run));
-    return { turn: { ...turn, items: [user] } };
+    return { turn: { ...turn, items: user ? [user] : [] } };
   }
 
   private async runTurn(t: ThreadRecord, run: Run): Promise<void> {
@@ -672,6 +710,8 @@ export class Run {
   readonly text: string;
   readonly stats: Stats;
   interrupted = false;
+  /** When the turn began (monotonic). */
+  readonly t0 = mono.now();
   private ac = new AbortController();
   private open = new Set<() => void>();
   private seq = 0;
@@ -819,6 +859,14 @@ export class Run {
   }
 
   // ---- spending --------------------------------------------------------------------
+
+  /** What the turn may still spend: model calls and time. */
+  left(): { calls: number; ms: number } {
+    return {
+      calls: this.caps.modelCalls - this.stats.modelCalls,
+      ms: this.caps.turnMs - (mono.now() - this.t0),
+    };
+  }
 
   /** Count model calls against the turn's cap; throws StopTurn("cap") when it is used up. */
   spend(n = 1, worker = false): void {

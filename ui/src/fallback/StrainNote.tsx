@@ -1,6 +1,7 @@
 // Under a tier thread whose history has outgrown the free models (strain.ts): one line, with a
-// button per ready fallback that carries the thread over (a new thread there, with a brief of
-// this one), or a link to set one up. Dismissible; once per thread unless it gets clearly worse.
+// button per ready fallback that moves the conversation there (the same thread goes on, its model
+// handed a brief it never shows, and carries on with the work), or a link to set one up.
+// Dismissible; once per thread unless it gets clearly worse.
 
 import { useState } from "react";
 import { openSetup } from "../setup/open";

@@ -4,7 +4,8 @@ import { App } from "./App";
 import { applyShell, appShell } from "./app-shell";
 import { PresenceReporter } from "./presence";
 import { maybeOpenWelcome, openSetup, openWelcome } from "./setup/open";
-import { boot, newThread, updateSettings } from "./store/actions";
+import { boot, newThread, renameThread, updateSettings } from "./store/actions";
+import { getState } from "./store/store";
 import "./styles.css";
 import { applyTheme } from "./theme/theme";
 
@@ -19,6 +20,11 @@ appShell?.onSetCwd((cwd) => {
 appShell?.onNewThread(() => newThread());
 appShell?.onOpenAccounts?.(() => openSetup());
 appShell?.onOpenWelcome?.(() => openWelcome());
+
+// Headless checks read the whole store, and rename a thread (no control for it yet), with
+// `?statecheck` (scripts/carry-e2e.ts).
+if (new URLSearchParams(location.search).has("statecheck"))
+  Object.assign(window, { __provenanceState: getState, __provenanceRename: renameThread });
 
 void boot();
 // Something not set up yet (a site, an API key, a fallback) -> the welcome, once.

@@ -17,12 +17,16 @@ import {
   welcomeToSetup,
   type WelcomeStep,
 } from "../setup/open";
+import { AssistNote, GeminiKeyPrompt } from "../setup/PoolAssist";
 import { PoolStatus } from "../setup/SiteSteps";
 import {
   anySignedIn,
   getAccounts,
+  getPoolHelp,
   getPoolKeys,
+  inUse,
   shownProviders,
+  type PoolHelpData,
   type PoolProvider,
   type WebAccounts,
 } from "../setup/web";
@@ -44,14 +48,16 @@ export function WelcomeDialog() {
   const [step, setStep] = useState<WelcomeStep>("intro");
   const [data, setData] = useState<WebAccounts | null>(null);
   const [pool, setPool] = useState<PoolProvider[] | null>(null);
+  const [help, setHelp] = useState<PoolHelpData | null>(null);
   const [down, setDown] = useState(false);
   const prefs = useAppState((s) => s.settings.fallbacks);
 
   const reload = useCallback(async () => {
-    const [a, p] = await Promise.all([getAccounts(), getPoolKeys()]);
+    const [a, p, h] = await Promise.all([getAccounts(), getPoolKeys(), getPoolHelp()]);
     setData(a.ok ? a.value : null);
     setDown(!a.ok && a.why === "down");
     setPool(p.ok ? p.value : null);
+    setHelp(h);
     if (a.ok) noteSetup(a.value, p.ok ? p.value : null);
   }, []);
 
@@ -84,7 +90,14 @@ export function WelcomeDialog() {
   if (step === "intro") body = <Intro onNext={() => go("models")} onSkip={closeWelcome} />;
   else if (step === "models")
     body = (
-      <Models data={data} pool={pool} down={down} onRetry={reload} onNext={() => go("fallbacks")} />
+      <Models
+        data={data}
+        pool={pool}
+        help={help}
+        down={down}
+        onRetry={reload}
+        onNext={() => go("fallbacks")}
+      />
     );
   else if (step === "fallbacks")
     body = (
@@ -180,12 +193,14 @@ function Intro({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
 function Models({
   data,
   pool,
+  help,
   down,
   onRetry,
   onNext,
 }: {
   data: WebAccounts | null;
   pool: PoolProvider[] | null;
+  help: PoolHelpData | null;
   down: boolean;
   onRetry: () => void;
   onNext: () => void;
@@ -244,6 +259,13 @@ function Models({
           )}
         </ul>
       )}
+      <GeminiKeyPrompt
+        accounts={data}
+        pool={pool}
+        help={help}
+        onGet={() => welcomeToSetup("google", "keys")}
+      />
+      {pool && help && <AssistNote help={help} pool={pool} onFallbacks={onNext} />}
       <div className="setup-actions welcome-actions">
         <button className="btn-primary setup-cta" onClick={onNext}>
           Next
@@ -266,7 +288,7 @@ function Done({
   const info = useAppState((s) => s.fallbackInfo);
   const sites = data
     ? shownProviders(data)
-        .filter((p) => p.enabled && p.accounts.some((a) => a.signed_in === true))
+        .filter((p) => p.enabled && p.accounts.some(inUse))
         .map((p) => p.name)
     : [];
   const models = [...sites, ...(keyed(pool) ? ["Token pool"] : [])];

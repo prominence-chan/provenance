@@ -23,7 +23,7 @@ export function setState(update: (s: AppState) => AppState): void {
   for (const l of listeners) l();
 }
 
-function subscribe(l: () => void): () => void {
+export function subscribe(l: () => void): () => void {
   listeners.add(l);
   return () => listeners.delete(l);
 }

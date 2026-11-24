@@ -630,6 +630,8 @@ select {
 
 .hero {
   flex: 1;
+  position: relative;
+  isolation: isolate; /* the nebula's canvas sits behind the heading, inside the hero */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -648,6 +650,28 @@ select {
   display: block;
   margin-bottom: -18px;
   pointer-events: none;
+}
+/* Nova's nebula: the whole hero, behind the heading; it fades out before every edge. */
+.hero-nebula {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+/* Without WebGL2: the mark, or the remnant's for nova, cross-faded in place. */
+.hero-sun-static {
+  position: relative;
+}
+.hero-sun-static > span {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.6s var(--ease-out);
+}
+.hero-sun-static > span[data-on] {
+  opacity: 1;
 }
 @media (max-height: 560px) {
   .hero-sun {
@@ -686,6 +710,22 @@ select {
   max-width: 82%;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* Where a conversation moved to another model (Conversation.tsx), or the first message of a
+   thread carried over before conversations stayed one (UserMessage.tsx): one faint line, close
+   over the message it marks. Nothing opens from it. */
+.carry-line {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--faint);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.carry-line[data-side="agent"] {
+  text-align: left;
+}
+.carry-line + .user-message {
+  margin-top: -4px;
 }
 .chip {
   font-family: var(--font-mono);
@@ -1393,8 +1433,10 @@ button.turn-models-list:hover .turn-models-more {
 .btn-small:active {
   transform: scale(0.97);
 }
+/* A gradient under a transparent border: drawn from the border box (border-box), or it is
+   sized to the padding box and repeats under the border, a sliver of its far end round the rim. */
 .btn-primary {
-  background: var(--accent-grad);
+  background: var(--accent-grad) border-box;
   color: var(--accent-fg);
   border-color: transparent;
   font-weight: 600;
@@ -2104,6 +2146,11 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   place-items: center;
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
+  /* The inherited 1.55 line box (16px) is taller than the 14px inside the ring, and an
+     overflowing grid item is not centred: the digit hung 1.3px low. A line box of one cap
+     height centres the digit's ink, like the check beside it. */
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
   border: 1px solid var(--border-strong);
 }
 .setup-rail li.done {
@@ -2122,7 +2169,7 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   font-weight: 500;
 }
 .setup-rail li.current .setup-rail-num {
-  background: var(--accent-grad);
+  background: var(--accent-grad) border-box; /* see .btn-primary */
   color: var(--accent-fg);
   border-color: transparent;
   font-weight: 600;
@@ -2447,7 +2494,7 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
     background var(--dur-fast) var(--ease);
 }
 .switch:checked {
-  background: var(--accent-grad);
+  background: var(--accent-grad) border-box; /* see .btn-primary */
   border-color: transparent;
 }
 .switch:checked::after {
@@ -2849,4 +2896,822 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .user-brief[open] {
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
+}
+
+/* ---- saved sign-in, paid plans (src/setup/SavedSignIn.tsx, PaidPlan.tsx) ---------------- */
+/* The account's plan, small beside its name. */
+.setup-plan {
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text-2);
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.setup-plan[data-plan="paid"] {
+  color: var(--warn);
+  border-color: var(--warn-border);
+}
+/* Under an account row: the offer, the saved sign-in, the site's reason it can't. */
+.autologin-offer {
+  margin: -6px 0 8px;
+  padding: 2px 0;
+  font-size: var(--fs-sm);
+}
+.autologin-unsupported {
+  margin: -4px 0 10px;
+  white-space: normal;
+}
+.setup-accounts + .autologin-unsupported {
+  margin: 8px 0 0;
+}
+.autologin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: -4px 0 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+}
+.autologin-text {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.autologin-who {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.autologin-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+}
+.autologin-status .setup-status {
+  white-space: normal;
+  font-size: var(--fs-xs);
+}
+.autologin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.autologin-err {
+  flex-basis: 100%;
+  margin: 0;
+}
+.autologin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: -2px 0 12px;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  text-align: left;
+}
+.autologin-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.autologin-lead {
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+.autologin-terms {
+  margin: 0 0 2px;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.autologin-terms li + li {
+  margin-top: 2px;
+}
+.autologin-agree {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+.autologin-agree input {
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+/* Right after a sign-in: "Keep this account signed in?" (optional). */
+.keep-offer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 420px;
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  text-align: left;
+}
+.keep-offer-open {
+  display: block;
+  padding: 0;
+  background: none;
+}
+.keep-offer-open .autologin-form {
+  margin: 0;
+}
+.keep-offer-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.keep-offer-text .meta {
+  white-space: normal;
+}
+.keep-offer-title {
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.keep-offer-done {
+  margin: 16px 0 0;
+}
+/* A paid plan waiting for the person's choice: calm, on the account, blocking its use. */
+.paid-confirm {
+  margin: -4px 0 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  border-left: 2px solid var(--warn);
+}
+.paid-confirm-centered {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.paid-title {
+  margin: 0 0 2px;
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.paid-text {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+.paid-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* ---- the token pool's instructions and setup assistant (KeyGuide.tsx, PoolAssist.tsx) ---- */
+.setup-keys li[data-open] .setup-account {
+  padding-bottom: 6px;
+}
+.key-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 0 14px;
+}
+.key-guide .setup-key-form {
+  margin: 2px 0 0;
+}
+.key-guide-get {
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+.key-guide-facts {
+  margin: 0;
+  white-space: normal;
+}
+.key-steps {
+  margin: 2px 0 0;
+  padding-left: 20px;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.key-steps li + li {
+  margin-top: 3px;
+}
+.key-steps li::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.key-gotchas {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-gotchas li {
+  position: relative;
+  padding-left: 14px;
+}
+.key-gotchas li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.6em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.key-gotchas li + li {
+  margin-top: 2px;
+}
+.key-open {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: inherit;
+  text-decoration: none;
+  line-height: 24px;
+}
+.key-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.key-hint {
+  white-space: normal;
+  margin-top: -2px;
+}
+.key-misfit,
+.key-warn {
+  font-size: var(--fs-sm);
+  color: var(--warn);
+}
+.key-warn {
+  margin: -2px 0 0;
+}
+.key-terms {
+  margin: 0;
+  white-space: normal;
+}
+/* "Claude Code can walk you through these": one line and its button. */
+.assist-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.welcome-dialog .assist-note {
+  margin: 14px 0 0;
+}
+.assist-note-text {
+  flex: 1;
+  min-width: 0;
+  text-wrap: pretty;
+}
+.assist-note[data-assist="claude"] .btn {
+  --tier-color: var(--fallback-claude);
+}
+.assist-note[data-assist="codex"] .btn {
+  --tier-color: var(--fallback-codex);
+}
+.assist-note[data-assist="claude"] .btn,
+.assist-note[data-assist="codex"] .btn {
+  border-color: color-mix(in srgb, var(--tier-color) 45%, var(--border-strong));
+}
+/* In the assistant's thread: the key card a marker line becomes. */
+.key-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 460px;
+  margin: 10px 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--card-shadow, 0 6px 20px rgba(0, 0, 0, 0.22), 0 1px 3px rgba(0, 0, 0, 0.2));
+}
+.key-card[aria-busy] {
+  min-height: 120px;
+}
+.key-card .setup-key-form {
+  margin: 0;
+}
+.key-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.key-card-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.key-card-sub {
+  white-space: normal;
+}
+.key-card-steps > summary {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-card-steps[open] > summary {
+  margin-bottom: 6px;
+}
+.key-card-steps .key-guide-facts {
+  margin-bottom: 4px;
+}
+.key-card-closed {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 12px;
+}
+.key-card-closed .setup-status {
+  white-space: normal;
+}
+/* What the app sent the assistant (a key saved, skipped): a quiet line, not a bubble. */
+.assist-sent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+/* A key caught in the composer of the assistant's thread. */
+.key-intercept {
+  margin: 4px 4px 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  border-left: 2px solid var(--warn);
+}
+.key-intercept-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.key-intercept-text {
+  margin: 2px 0 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-intercept-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.key-intercept-to {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.assist-perms {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+/* Lists inside an account or key row: no row hairlines between their items. */
+.setup-accounts li li + li {
+  border-top: none;
+}
+.setup-key-field .autologin-input {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+}
+/* /pool/help's richer entries: the free tier's badge, what happens to prompts, the confidence
+   note, the rest folded, the signed-in window, the providers not worth it. */
+.key-badge[data-free="anonymous"],
+.key-badge[data-free="free"] {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 40%, var(--border-strong));
+}
+.key-badge[data-free="trial"] {
+  color: var(--warn);
+  border-color: var(--warn-border);
+}
+.key-badge[data-person] {
+  color: var(--text-2);
+}
+/* Why a provider needs the person: first in its open guide. */
+.key-person {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-wrap: pretty;
+}
+.key-badge[data-free="none"] {
+  color: var(--muted);
+}
+.key-row-meta {
+  white-space: normal;
+}
+.key-guide code,
+.key-card code,
+.key-hint code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--panel-3);
+}
+.key-guide strong,
+.key-card strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.key-guide a,
+.key-card .key-datause a {
+  color: var(--link);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.key-datause {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border-left: 2px solid var(--warn);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-datause-title {
+  margin: 0 0 2px;
+  font-weight: 500;
+  color: var(--text);
+}
+.key-datause ul {
+  margin: 0;
+  padding-left: 16px;
+}
+.key-datause li + li {
+  margin-top: 3px;
+}
+.key-confidence {
+  margin: -2px 0 0;
+  white-space: normal;
+}
+.key-more > summary {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-more[open] > summary {
+  margin-bottom: 6px;
+}
+.key-open-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+.key-signed-note {
+  flex-basis: 100%;
+  white-space: normal;
+}
+.key-signed-open {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.key-signed-open .meta {
+  white-space: normal;
+}
+.key-open-row .setup-row-msg {
+  flex-basis: 100%;
+  margin: 0;
+}
+.gemini-prompt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.welcome-dialog .gemini-prompt {
+  margin: 14px 0 0;
+}
+.gemini-prompt-text {
+  flex: 1;
+  min-width: 0;
+  text-wrap: pretty;
+}
+.key-notworth-toggle {
+  margin-top: 10px;
+  font-size: var(--fs-sm);
+}
+.key-notworth-toggle svg {
+  transition: transform var(--dur-fast) var(--ease);
+}
+.key-notworth {
+  border-top: 1px solid var(--border);
+}
+/* Several keys per provider (KeysStep.tsx): the open provider's keys as hairline rows, Add
+   another key, the terms' note on a second account, the name and plan of a new key. */
+.key-manage {
+  gap: 6px;
+}
+.key-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.key-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 34px;
+  padding: 3px 0;
+}
+.setup-accounts .key-list li + li {
+  border-top: 1px solid var(--border);
+}
+.key-item-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.key-item-main .setup-plan {
+  margin-left: 0;
+}
+.key-item-label {
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: var(--fs-md);
+  color: var(--text);
+  text-align: left;
+  cursor: text;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--dur-fast) var(--ease);
+}
+.key-item-label:hover,
+.key-item-label:focus-visible {
+  text-decoration-color: var(--muted);
+}
+.key-item-input {
+  width: 180px;
+  height: 24px;
+}
+.key-item-last4 {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.key-item-state {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+.key-item-state .setup-status {
+  white-space: normal;
+}
+.key-item-state .setup-remove {
+  padding: 4px;
+}
+.key-item .setup-confirm {
+  margin-left: auto;
+}
+/* On/off, quiet until the row is pointed at (or it is off). */
+.key-item-switch {
+  margin-left: 4px;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.key-item-switch:checked {
+  background: color-mix(in srgb, var(--good) 45%, var(--panel-3));
+  border-color: transparent;
+}
+.key-item:hover .key-item-switch,
+.key-item-switch:focus-visible,
+.key-item-switch:not(:checked) {
+  opacity: 1;
+}
+@media (hover: none) {
+  .key-item-switch {
+    opacity: 1;
+  }
+}
+.key-item[data-off] .key-item-label,
+.key-item[data-off] .key-item-last4 {
+  color: var(--muted);
+}
+.key-item-retry {
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--fs-sm);
+}
+.key-item-env {
+  white-space: nowrap;
+}
+.key-item-name {
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+.key-item-msg {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+}
+.key-add-another {
+  margin-top: 0;
+  padding: 4px 0;
+  font-size: var(--fs-sm);
+}
+.key-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.key-add .setup-key-form {
+  margin: 0;
+}
+.key-terms-note {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border-left: 2px solid var(--warn);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-wrap: pretty;
+}
+.key-terms-note[data-allowed="check_terms"] {
+  border-left-color: var(--border-strong);
+}
+.key-terms-note p {
+  margin: 0;
+}
+.key-terms-note .meta {
+  margin-top: 2px;
+  white-space: normal;
+}
+.key-add-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px 12px;
+}
+.key-add-label {
+  flex: 1 1 180px;
+}
+.key-add-label .setup-input {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+}
+.key-add-tier {
+  flex: 0 0 auto;
+}
+.key-add-hint {
+  flex-basis: 100%;
+  white-space: normal;
+}
+.key-tier-seg {
+  display: inline-flex;
+  height: 26px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.key-tier-seg button {
+  min-width: 52px;
+  padding: 0 10px;
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  background: none;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.key-tier-seg button[aria-checked="true"] {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+/* Where earlier setups got stuck, under that step. */
+.key-trouble {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--fs-sm);
+  color: var(--warn);
+  text-wrap: pretty;
+}
+p.key-trouble {
+  margin: -2px 0 0;
+}
+.key-until {
+  white-space: nowrap;
+}
+/* "No longer in the pool: …": one folded line at the bottom. */
+.key-removed {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.key-removed > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.key-removed > summary::-webkit-details-marker {
+  display: none;
+}
+.key-removed > summary svg {
+  flex-shrink: 0;
+  transition: transform var(--dur-fast) var(--ease);
+}
+.key-removed[open] > summary svg {
+  transform: rotate(90deg);
+}
+.key-removed-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-removed-list {
+  margin: 0 0 0 17px;
+  padding: 0;
+  list-style: none;
+}
+.key-removed-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 0;
+}
+.key-removed-list li + li {
+  border-top: 1px solid var(--border);
+}
+.key-removed-text {
+  flex: 1 1 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--text);
+}
+.key-removed-text .meta {
+  white-space: normal;
 }

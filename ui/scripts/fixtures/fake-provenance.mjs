@@ -4,7 +4,9 @@
 // app-server on stdio with two canned tier threads (one whose history has clearly outgrown
 // the free models, one calm) and turns that answer at once. Run with `-c model_provider="openai"`
 // it plays the "through Provenance" app-server (provider openai, no canned threads). Appends
-// {argv, home, turns} to $FAKE_CLI_LOG.
+// {argv, home, turns} to $FAKE_CLI_LOG, with thread/start's developerInstructions and turn/start's
+// additionalContext whole (a hand-over brief, shared/thread-links.ts). A turn with no input shows
+// no user message; one whose text has "[slow]" runs until turn/interrupt.
 import { appendFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -150,6 +152,8 @@ const turn = (id, items, t) => ({
 
 const threads = new Map();
 const turns = new Map();
+/** Thread id -> how to end its running turn. */
+const running = new Map();
 if (!openai) {
   threads.set(
     "thr-strained",
@@ -225,6 +229,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       });
     case "thread/start": {
       const id = randomUUID();
+      logRun({ method: "thread/start", developerInstructions: p.developerInstructions ?? null });
       const model = p.model ?? (openai ? "gpt-fake-sol" : "solstice");
       const t = thread(id, "", model, Math.floor(Date.now() / 1000));
       threads.set(id, t);
@@ -241,6 +246,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         text: text.slice(0, 200),
         hasEffort: "effort" in p,
         effort: p.effort ?? null,
+        additionalContext: p.additionalContext ?? null,
+        threadId: p.threadId,
+        t: Date.now(),
       });
       if (t && !t.preview) t.preview = text.slice(0, 200);
       const tid = randomUUID();
@@ -248,24 +256,27 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       tr.status = "inProgress";
       reply(m.id, { turn: tr });
       out({ method: "turn/started", params: { threadId: p.threadId, turn: tr } });
-      const u = user(`${tid}-u`, text);
-      out({ method: "item/completed", params: { threadId: p.threadId, turnId: tid, item: u } });
+      const u = (p.input ?? []).length ? user(`${tid}-u`, text) : null;
+      if (u)
+        out({ method: "item/completed", params: { threadId: p.threadId, turnId: tid, item: u } });
       const a = agent(`${tid}-a`, `ok from ${provider} on ${p.model ?? t?.model}`);
-      setTimeout(() => {
-        out({ method: "item/completed", params: { threadId: p.threadId, turnId: tid, item: a } });
-        const done = {
-          ...tr,
-          status: "completed",
-          items: [u, a],
-          completedAt: tr.startedAt + 1,
-          durationMs: 800,
-        };
+      const finish = (status) => {
+        if (!running.delete(p.threadId)) return;
+        logRun({ method: "turn/ended", status, threadId: p.threadId, t: Date.now() });
+        if (status === "completed")
+          out({ method: "item/completed", params: { threadId: p.threadId, turnId: tid, item: a } });
+        const items = [u, status === "completed" ? a : null].filter(Boolean);
+        const done = { ...tr, status, items, completedAt: tr.startedAt + 1, durationMs: 800 };
         turns.get(p.threadId)?.push(done);
         out({ method: "turn/completed", params: { threadId: p.threadId, turn: done } });
-      }, 300);
+      };
+      running.set(p.threadId, finish);
+      if (!text.includes("[slow]")) setTimeout(() => finish("completed"), 300);
       return;
     }
     case "turn/interrupt":
+      logRun({ method: "turn/interrupt", threadId: p.threadId, t: Date.now() });
+      setTimeout(() => running.get(p.threadId)?.("interrupted"), 200);
       return reply(m.id, {});
     case "thread/name/set": {
       const t = threads.get(p.threadId);

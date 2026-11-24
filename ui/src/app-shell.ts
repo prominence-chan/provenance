@@ -20,6 +20,8 @@ export interface AppShell {
 export interface PresenceReport {
   /** The selected tier (spark, ember, solstice, nova) or fallback (claude, codex); else null. */
   kind: string | null;
+  /** The orchestrator of the running (else the selected) thread on a tier; else null. */
+  orchestrator: string | null;
   working: boolean;
   /** When the running turn started, ms since epoch. */
   since: number | null;

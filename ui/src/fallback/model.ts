@@ -61,6 +61,15 @@ export function fallbackLabel(
   return { name: MODE_NAME[f.mode], model: label, mode: f.mode };
 }
 
+/** What serves a model, in a few words: "Claude Code", "Codex", or the tier ("solstice"). */
+export function servedByName(model: string | null | undefined): string {
+  const f = parseFallbackModel(model);
+  if (f) return MODE_NAME[f.mode];
+  if (!model) return "another model";
+  const i = model.lastIndexOf("/");
+  return i < 0 ? model : model.slice(i + 1);
+}
+
 /** What the server reports as a thread's model, as the page's model key. */
 export function modelKeyFor(backend: BackendId, model: string | null): string | null {
   if (backend === "codex") return `codex-pv:${model ?? ""}`;

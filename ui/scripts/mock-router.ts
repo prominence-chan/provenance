@@ -19,6 +19,21 @@
 //   POST /mock/usage    {"turn", "context": {"trimmed": 2}}  what /v1/pcore/usage says of a turn
 //                       ({"pruned": {before, after}} alone: what it says of every turn's pruning)
 //   GET  /mock/state    the whole state, for assertions
+//   GET  /mock/requests every /web/* and /pool/* request as it arrived {method, url, body}, for
+//                       checking where a password or key went (POST /mock/requests clears it)
+//   POST /mock/older    {"older": true}  a router from before saved sign-ins, plans and /pool/help:
+//                       those fields are left out and their routes 404 (the rest works);
+//                       {"older": false, "noWebOpen": true}: everything but POST/GET /web/open;
+//                       {"older": false, "noMultiKey": true}: /pool/help but one key per provider
+//                       (no `keys`, `multiple_keys`, `until`, `removed`, `experience`, no check,
+//                       and POST /pool/keys/{id}, …/{key_id} and …/outcome 404)
+//   GET  /mock/state    also `keys` (variables set), `poolKeys` (each provider's keys as /pool/keys
+//                       shows them) and `outcomes` (each POST /pool/help/{id}/outcome taken)
+//   POST /mock/envkey   {"provider"}  its first key comes from the router's environment (keys.env)
+//   POST /mock/leftover {"provider"}  a removed provider whose key is still saved
+//   POST /mock/plan     {"provider", "account", "plan", "plan_label"?, "needs_confirmation"?}
+//   POST /mock/autologin {"result": "ok" | "wrong_password" | "needs_person" | "error", "detail"?}
+//                       what the next try (POST …/autologin/try) comes to
 //
 // The router API it mirrors (provenance-core's server.py; shapes in shared/router-api.ts):
 //   GET  /web/accounts, POST /web/accounts {account}, DELETE /web/accounts/{id}
@@ -28,7 +43,12 @@
 //   POST /web/login/cancel {provider, account} -> {state:"idle"}
 //   POST /web/login/show {provider, account}   -> {state, shown}
 //   POST /web/browser/prepare
-//   GET  /pool/keys, PUT /pool/keys/{id} {values}, DELETE /pool/keys/{id}
+//   /pool/keys, /pool/keys/{id}, /pool/keys/{id}/{key_id}, /pool/help, /pool/help/{id}/outcome:
+//                       scripts/mock-pool.ts, mirroring provenance-core's own (shapes, ids, codes)
+//   PUT/PATCH/DELETE /web/accounts/{provider}/{account}/autologin, POST …/autologin/try
+//   POST /web/accounts/{provider}/{account}/confirm {confirm: "paid_plan"}
+//   POST /web/open {provider, account, url}, GET /web/open: a key page in a signed-in account's
+//                       window (closed by POST /web/login/cancel for that account)
 //   GET  /health, /v1/models, /v1/sources, /v1/pcore/usage
 //   GET  /codex-sub/open/_health  the Codex pass-through is there (this mock has no token: key "open")
 // Everything a real router has that matters to the screen; what a real one does beyond it
@@ -36,16 +56,27 @@
 
 import http from "node:http";
 import type {
+  AccountPlan,
+  AutologinResult,
   LoginState,
   WindowBounds,
   WireAccount,
   WireBrowser,
   WireHealth,
-  WirePoolProvider,
   WireProvider,
   WireSource,
   WireWebAccounts,
 } from "../shared/router-api.ts";
+import {
+  handlePool,
+  keyPages,
+  poolControl,
+  poolCount,
+  poolState,
+  poolUsable,
+  resetPool,
+  setPoolFlags,
+} from "./mock-pool.ts";
 
 type Account = Omit<WireAccount, "id">;
 
@@ -71,27 +102,21 @@ interface Settings {
   daily_cap: number;
 }
 
-/** The token pool's providers: one with a key from the router's setup, one anonymous, one without. */
-const POOL: Omit<WirePoolProvider, "usable">[] = [
-  {
-    id: "google",
-    anonymous: false,
-    vars: [{ name: "GEMINI_API_KEY", set: false, from: null }],
-    models: 7,
-    tiers: ["solstice", "ember"],
-  },
-  { id: "kilo", anonymous: true, vars: [], models: 10, tiers: ["solstice", "ember", "spark"] },
-  {
-    id: "cloudflare",
-    anonymous: false,
-    vars: [
-      { name: "CLOUDFLARE_API_TOKEN", set: false, from: null },
-      { name: "CLOUDFLARE_ACCOUNT_ID", set: false, from: null },
-    ],
-    models: 4,
-    tiers: ["solstice", "ember"],
-  },
-];
+/** Sites whose accounts can be signed back in with a saved password, and why the others can't. */
+const AUTOLOGIN: Record<string, string | null> = {
+  "chatgpt-web": null,
+  "qwen-web": null,
+  "gemini-web":
+    "Google accounts can't be signed back in by Provenance: Google asks for more than a password.",
+};
+
+interface Autologin {
+  enabled: boolean;
+  saved: boolean;
+  username: string | null;
+  attempts_today: number;
+  last_try: { at: number; result: AutologinResult; detail: string | null } | null;
+}
 
 const PROVIDERS: Provider[] = [
   {
@@ -172,13 +197,31 @@ interface State {
   /** provider id -> account id -> account */
   accounts: Record<string, Record<string, Account>>;
   settings: Record<string, Settings>;
-  /** Variable name -> set (values are not kept, as the real router never sends them back). */
-  keys: Record<string, boolean>;
+  /** A router with /pool/help but one key per provider (before several keys). */
+  noMultiKey: boolean;
   /** The bounds the last POST /web/login asked for. */
   lastBounds: WindowBounds | null;
   down: boolean;
   /** An older router without the /web API (every /web route 404s). */
   legacy: boolean;
+  /** A router from before saved sign-ins, plans and /pool/help. */
+  older: boolean;
+  /** provider id -> account id -> its plan */
+  plans: Record<
+    string,
+    Record<
+      string,
+      { plan: AccountPlan; plan_label: string | null; needs_confirmation: "paid_plan" | null }
+    >
+  >;
+  /** provider id -> account id -> saved sign-in (the password itself is never kept here) */
+  autologin: Record<string, Record<string, Autologin>>;
+  /** What the next POST …/autologin/try comes to. */
+  nextTry: { result: AutologinResult; detail: string | null };
+  /** A key page open in a signed-in web account's window (POST /web/open). */
+  webOpen: { provider: string; account: string; url: string } | null;
+  /** A router with /pool/help but without /web/open. */
+  noWebOpen: boolean;
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -216,10 +259,16 @@ function scenario(name: string): State {
     accountIds: ["main"],
     accounts: {},
     settings: {},
-    keys: {},
+    noMultiKey: false,
     lastBounds: null,
     down: false,
     legacy: false,
+    older: false,
+    plans: {},
+    autologin: {},
+    nextTry: { result: "ok", detail: null },
+    webOpen: null,
+    noWebOpen: false,
   };
   for (const p of PROVIDERS) {
     st.accounts[p.id] = { main: blank(p.cap) };
@@ -236,6 +285,10 @@ function scenario(name: string): State {
       email: "ada@example.com",
       today: 38,
     });
+    st.plans["chatgpt-web"] = {
+      main: { plan: "free", plan_label: null, needs_confirmation: null },
+      b: { plan: "paid", plan_label: "plus", needs_confirmation: null },
+    };
     Object.assign(st.accounts["chatgpt-web"].b, {
       signed_in: true,
       checked_at: t - 5400,
@@ -251,7 +304,6 @@ function scenario(name: string): State {
     });
     Object.assign(st.accounts["gemini-web"].main, { signed_in: false, checked_at: t - 86400 });
     Object.assign(st.accounts["gemini-web"].b, { signed_in: true, checked_at: t - 900, today: 7 });
-    st.keys.GEMINI_API_KEY = true;
   }
   return st;
 }
@@ -332,6 +384,31 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
   return true;
 }
 
+function autologinBody(provider: string, account: string) {
+  const reason = AUTOLOGIN[provider];
+  const al = state.autologin[provider]?.[account];
+  return {
+    supported: reason === null,
+    reason: reason ?? null,
+    enabled: al?.enabled ?? false,
+    saved: al?.saved ?? false,
+    username: al?.username ?? null,
+    attempts_today: al?.attempts_today ?? 0,
+    last_try: al?.last_try ?? null,
+  };
+}
+
+function newer(provider: string, account: string) {
+  if (state.older) return {};
+  const plan = state.plans[provider]?.[account];
+  return {
+    plan: plan?.plan ?? ("unknown" as const),
+    plan_label: plan?.plan_label ?? null,
+    needs_confirmation: plan?.needs_confirmation ?? null,
+    autologin: autologinBody(provider, account),
+  };
+}
+
 function providerBody(p: Provider): WireProvider {
   const set = state.settings[p.id];
   return {
@@ -350,6 +427,7 @@ function providerBody(p: Provider): WireProvider {
         ...a,
         daily_cap: set.daily_cap,
         signing_in: ["preparing", "open", "verifying"].includes(a.login.state),
+        ...newer(p.id, id),
       };
     }),
   };
@@ -365,19 +443,8 @@ function accountsBody(): WireWebAccounts {
   };
 }
 
-function poolBody(): WirePoolProvider[] {
-  return POOL.map((p) => {
-    const vars = p.vars.map((v) => ({
-      ...v,
-      set: !!state.keys[v.name],
-      from: state.keys[v.name] ? ("app" as const) : null,
-    }));
-    return { ...p, vars, usable: p.anonymous || (vars.length > 0 && vars.every((v) => v.set)) };
-  });
-}
-
 function sourcesBody() {
-  const keyed = poolBody().some((p) => p.usable && !p.anonymous);
+  const keyed = poolUsable().some((p) => p.usable && !p.anonymous);
   const tiers = ["nova", "solstice", "ember", "spark"].map((tier) => {
     // nova has no API models (as in the real catalog); the others need a key here
     const sources: WireSource[] =
@@ -430,7 +497,7 @@ function healthBody(): WireHealth {
     pid: process.pid,
     home: "(mock)",
     uptime_s: Math.round((Date.now() - started) / 1000),
-    api: { providers: POOL.length, usable: poolBody().filter((p) => p.usable).length, models: 0 },
+    api: { providers: poolCount(), usable: poolUsable().filter((p) => p.usable).length, models: 0 },
     web: {
       providers: PROVIDERS.length,
       enabled: PROVIDERS.filter((p) => state.settings[p.id].enabled).map((p) => p.id),
@@ -444,9 +511,21 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+const raws = new WeakMap<http.IncomingMessage, string>();
+async function rawBody(req: http.IncomingMessage): Promise<string> {
+  const had = raws.get(req);
+  if (had !== undefined) return had;
   let raw = "";
   for await (const chunk of req) raw += chunk;
+  raws.set(req, raw);
+  return raw;
+}
+
+/** Every /web/* and /pool/* request as it arrived (GET /mock/requests). */
+let requests: { method: string; url: string; body: string }[] = [];
+
+async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await rawBody(req);
   try {
     const v = JSON.parse(raw || "{}");
     return v && typeof v === "object" ? v : {};
@@ -471,6 +550,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (p === "/mock/reset") {
       epoch++;
       state = scenario(String(body.scenario ?? "fresh"));
+      resetPool(String(body.scenario ?? "fresh"));
+      setPoolFlags({ older: false, noMultiKey: false });
       return send(res, 200, { ok: true });
     }
     if (p === "/mock/legacy") {
@@ -484,6 +565,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (p === "/mock/finish") {
       const { provider, account } = target(body);
       const ok = finish(provider, account, body.ok !== false, body.reason as string | undefined);
+      if (ok && typeof body.plan === "string")
+        (state.plans[provider] ??= {})[account] = {
+          plan: body.plan as AccountPlan,
+          plan_label: (body.plan_label as string) ?? null,
+          needs_confirmation:
+            body.plan === "paid" && provider === "chatgpt-web" ? "paid_plan" : null,
+        };
       return send(res, ok ? 200 : 409, { ok });
     }
     if (p === "/mock/usage") {
@@ -492,7 +580,42 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (body.turn) usage[String(body.turn)] = (body.context ?? {}) as Record<string, number>;
       return send(res, 200, { ok: true });
     }
-    if (p === "/mock/state") return send(res, 200, state);
+    if (p === "/mock/state") return send(res, 200, { ...state, ...poolState() });
+    if (p === "/mock/envkey" || p === "/mock/leftover") {
+      poolControl(p === "/mock/envkey" ? "envkey" : "leftover", String(body.provider ?? ""));
+      return send(res, 200, { ok: true });
+    }
+    if (p === "/mock/requests") {
+      if (m === "POST") requests = [];
+      return send(res, 200, requests);
+    }
+    if (p === "/mock/older") {
+      state.older = body.older !== false;
+      state.noWebOpen = body.noWebOpen === true;
+      state.noMultiKey = body.noMultiKey === true;
+      setPoolFlags({ older: state.older, noMultiKey: state.noMultiKey });
+      return send(res, 200, {
+        older: state.older,
+        noWebOpen: state.noWebOpen,
+        noMultiKey: state.noMultiKey,
+      });
+    }
+    if (p === "/mock/plan") {
+      const { provider, account } = target(body);
+      (state.plans[provider] ??= {})[account] = {
+        plan: (body.plan as AccountPlan) ?? "unknown",
+        plan_label: (body.plan_label as string) ?? null,
+        needs_confirmation: body.needs_confirmation === "paid_plan" ? "paid_plan" : null,
+      };
+      return send(res, 200, { ok: true });
+    }
+    if (p === "/mock/autologin") {
+      state.nextTry = {
+        result: (body.result as AutologinResult) ?? "ok",
+        detail: (body.detail as string) ?? null,
+      };
+      return send(res, 200, { ok: true });
+    }
     return send(res, 404, { detail: "Not Found" });
   }
 
@@ -501,8 +624,72 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return;
   }
 
+  if (p.startsWith("/web/") || p.startsWith("/pool/"))
+    requests.push({ method: m, url: req.url ?? p, body: m === "GET" ? "" : await rawBody(req) });
   if (state.legacy && (p.startsWith("/web/") || p.startsWith("/pool/") || p === "/health"))
     return send(res, 404, { detail: "Not Found" });
+  const acct = /^\/web\/accounts\/([^/]+)\/([^/]+)\/(autologin|autologin\/try|confirm)$/.exec(p);
+  if (acct) {
+    if (state.older) return send(res, 404, { detail: "Not Found" });
+    const [provider, account, what] = [
+      decodeURIComponent(acct[1]),
+      decodeURIComponent(acct[2]),
+      acct[3],
+    ];
+    const a = state.accounts[provider]?.[account];
+    if (!a) return send(res, 404, { detail: "No such site or account." });
+    if (what === "confirm" && m === "POST") {
+      const body = await readJson(req);
+      if (body.confirm !== "paid_plan") return send(res, 409, { detail: "Nothing to confirm." });
+      const plan = state.plans[provider]?.[account];
+      if (plan) plan.needs_confirmation = null;
+      return send(res, 200, { ...a, id: account, ...newer(provider, account) });
+    }
+    if (AUTOLOGIN[provider] !== null)
+      return send(res, 409, { detail: AUTOLOGIN[provider] ?? "Not supported here." });
+    const al = ((state.autologin[provider] ??= {})[account] ??= {
+      enabled: false,
+      saved: false,
+      username: null,
+      attempts_today: 0,
+      last_try: null,
+    });
+    if (what === "autologin" && m === "PUT") {
+      const body = await readJson(req);
+      if (body.agree !== true)
+        return send(res, 409, { detail: "Saving a sign-in needs the person's agreement." });
+      const username = typeof body.username === "string" ? body.username.trim() : "";
+      if (!username || typeof body.password !== "string" || !body.password)
+        return send(res, 409, { detail: "Both the username and the password are needed." });
+      // The real router puts the password in the keychain; the mock keeps nothing of it.
+      Object.assign(al, { saved: true, enabled: true, username, last_try: null });
+      return send(res, 200, autologinBody(provider, account));
+    }
+    if (what === "autologin" && m === "PATCH") {
+      const body = await readJson(req);
+      if (typeof body.enabled !== "boolean")
+        return send(res, 409, { detail: "enabled is true or false." });
+      if (!al.saved) return send(res, 409, { detail: "No sign-in is saved for this account." });
+      al.enabled = body.enabled;
+      if (al.enabled && al.last_try?.result === "wrong_password") al.last_try = null;
+      return send(res, 200, autologinBody(provider, account));
+    }
+    if (what === "autologin" && m === "DELETE") {
+      delete state.autologin[provider][account];
+      return send(res, 200, autologinBody(provider, account));
+    }
+    if (what === "autologin/try" && m === "POST") {
+      await readJson(req);
+      if (!al.saved || !al.enabled)
+        return send(res, 409, { detail: "Saved sign-in is off for this account." });
+      al.attempts_today++;
+      al.last_try = { at: now(), ...state.nextTry };
+      if (state.nextTry.result === "wrong_password") al.enabled = false;
+      if (state.nextTry.result === "ok") Object.assign(a, { signed_in: true, checked_at: now() });
+      return send(res, 200, autologinBody(provider, account));
+    }
+    return send(res, 404, { detail: "Not Found" });
+  }
   if (p === "/health" && m === "GET") return send(res, 200, healthBody());
   if (p === "/v1/models" && m === "GET") {
     return send(res, 200, {
@@ -587,27 +774,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     return send(res, 200, { ...providerBody(pr), enabled_by: "app" });
   }
-  if (p === "/pool/keys" && m === "GET") return send(res, 200, { providers: poolBody() });
-  const key = /^\/pool\/keys\/([^/]+)$/.exec(p);
-  if (key && (m === "PUT" || m === "DELETE")) {
-    const pp = POOL.find((x) => x.id === decodeURIComponent(key[1]));
-    if (!pp) return send(res, 404, { detail: "There is no API provider called that." });
-    if (m === "DELETE") for (const v of pp.vars) delete state.keys[v.name];
-    else {
-      const values = ((await readJson(req)).values ?? {}) as Record<string, unknown>;
-      for (const [k, v] of Object.entries(values)) {
-        if (!pp.vars.some((x) => x.name === k))
-          return send(res, 409, { detail: `${pp.id} does not use ${k}.` });
-        if (typeof v !== "string" || !v.trim())
-          return send(res, 409, { detail: `${k} must be one line of text.` });
-        state.keys[k] = true;
-      }
-    }
-    return send(
-      res,
-      200,
-      poolBody().find((x) => x.id === pp.id),
-    );
+  if (p.startsWith("/pool/")) {
+    const r = handlePool(m, p, m === "GET" || m === "DELETE" ? {} : await readJson(req));
+    if (r) return send(res, r.status, r.body);
   }
   if (p === "/web/login/show" && m === "POST") {
     const { a } = target(await readJson(req));
@@ -647,9 +816,36 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     return send(res, 200, { state: a.login.state });
   }
+  if (p === "/web/open") {
+    if (state.older || state.noWebOpen) return send(res, 404, { detail: "Not Found" });
+    if (m === "GET")
+      return send(
+        res,
+        200,
+        state.webOpen ? { state: "open", ...state.webOpen } : { state: "idle" },
+      );
+    if (m === "POST") {
+      const body = await readJson(req);
+      const { provider, account, a } = target(body);
+      const url = String(body.url ?? "");
+      if (!a || a.signed_in !== true)
+        return send(res, 409, { detail: "That account isn't signed in." });
+      const ok = keyPages().some(
+        (h) =>
+          (h.keys_url === url || h.signup_url === url) &&
+          h.open_with?.some((o) => o.provider === provider && o.account === account),
+      );
+      if (!ok)
+        return send(res, 409, { detail: "That page can't be opened in this account's window." });
+      state.webOpen = { provider, account, url };
+      return send(res, 200, { state: "open", ...state.webOpen });
+    }
+  }
   if (p === "/web/login/cancel" && m === "POST") {
-    const { a } = target(await readJson(req));
+    const { provider, account, a } = target(await readJson(req));
     if (!a) return send(res, 404, { detail: "No such site or account." });
+    if (state.webOpen?.provider === provider && state.webOpen.account === account)
+      state.webOpen = null;
     a.login = { state: "idle", reason: null };
     return send(res, 200, { state: "idle" });
   }

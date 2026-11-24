@@ -15,10 +15,13 @@ import {
   IconTrash,
   ModelLine,
   Monogram,
+  PlanLabel,
   RouterNote,
   SiteStatus,
   Status,
 } from "./parts";
+import { PaidPlanConfirm } from "./PaidPlan";
+import { SavedSignIn } from "./SavedSignIn";
 import {
   accountName,
   shownProviders,
@@ -150,22 +153,33 @@ export function SiteStep({
   onRemove,
   onPrepare,
   onChanged,
+  onReload,
 }: {
   provider: WebProvider;
   browser: BrowserStatus;
   busy: string | null;
   rowMsg: RowMsg | null;
   note: string | null;
-  onSignIn: (account: string) => void;
+  /** `switching`: signing in again to put another account in this slot (a paid plan's way out). */
+  onSignIn: (account: string, switching?: boolean) => void;
   onAdd: () => void;
   onRemove: (account: string) => void;
   onPrepare: () => void;
   /** After a setting changed: the site as the router now has it. */
   onChanged: (p: WebProvider) => void;
+  /** Read the accounts again (a saved sign-in or a plan changed). */
+  onReload: () => void;
 }) {
   const [confirm, setConfirm] = useState<string | null>(null);
+  const [keepOpen, setKeepOpen] = useState<string | null>(null);
+  // A site that can't sign back in by itself (a Google account) says why once, not per account.
+  const reasons = new Set(
+    provider.accounts.map((a) => (a.autologin && !a.autologin.supported ? a.autologin.reason : "")),
+  );
+  const siteReason = reasons.size === 1 && !reasons.has("") ? [...reasons][0] : null;
   // One primary action: Sign in on the first account that needs it.
   const primary = provider.accounts.find((a) => a.signed_in !== true)?.id ?? null;
+
   return (
     <div className="setup-step">
       <div className="setup-site-head">
@@ -200,7 +214,10 @@ export function SiteStep({
           <li key={a.id} data-account={a.id}>
             <div className="setup-account">
               <div className="setup-account-text">
-                <span className="setup-account-name">{accountName(a.id)}</span>
+                <span className="setup-account-name">
+                  {accountName(a.id)}
+                  <PlanLabel account={a} />
+                </span>
                 <AccountStatus account={a} />
               </div>
               {confirm === a.id ? (
@@ -232,20 +249,44 @@ export function SiteStep({
                       <IconTrash />
                     </button>
                   )}
-                  <button
-                    className={a.id === primary ? "btn-primary" : "btn"}
-                    disabled={busy !== null && busy.startsWith("signin:")}
-                    onClick={() => onSignIn(a.id)}
-                  >
-                    {busy === `signin:${a.id}`
-                      ? "Opening…"
-                      : a.signed_in === true
-                        ? "Sign in again"
-                        : "Sign in"}
-                  </button>
+                  {/* A paid plan waiting for an answer has its own two ways on, below. */}
+                  {!a.needs_confirmation && (
+                    <button
+                      className={a.id === primary ? "btn-primary" : "btn"}
+                      disabled={busy !== null && busy.startsWith("signin:")}
+                      onClick={() => onSignIn(a.id)}
+                    >
+                      {busy === `signin:${a.id}`
+                        ? "Opening…"
+                        : a.signed_in === true
+                          ? "Sign in again"
+                          : "Sign in"}
+                    </button>
+                  )}
                 </span>
               )}
             </div>
+            {a.signed_in === true && a.needs_confirmation ? (
+              <PaidPlanConfirm
+                provider={provider}
+                account={a}
+                busy={busy !== null && busy.startsWith("signin:")}
+                onDifferent={() => onSignIn(a.id, true)}
+                onConfirmed={onReload}
+              />
+            ) : (
+              <SavedSignIn
+                provider={provider}
+                account={a}
+                open={keepOpen === a.id}
+                onOpen={() => setKeepOpen(a.id)}
+                onClose={() => setKeepOpen(null)}
+                onChanged={onReload}
+              />
+            )}
+            {a.autologin && !a.autologin.supported && a.autologin.reason && !siteReason && (
+              <p className="meta autologin-unsupported">{a.autologin.reason}</p>
+            )}
             {rowMsg?.account === a.id && (
               <p className="setup-row-msg" role="alert">
                 {rowMsg.text}
@@ -254,6 +295,7 @@ export function SiteStep({
           </li>
         ))}
       </ul>
+      {siteReason && <p className="meta autologin-unsupported">{siteReason}</p>}
       <button className="setup-add" onClick={onAdd} disabled={busy === "add"}>
         <IconPlusSmall />
         {busy === "add" ? "Adding…" : "Add another account"}

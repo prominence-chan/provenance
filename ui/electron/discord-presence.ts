@@ -30,10 +30,10 @@ export const PRESENCE = {
    * overrides it.
    */
   clientId: "1574288835871772732",
-  /** The state line, under the tier. */
-  credit: "by SkyeNXT · coming soon",
+  /** The state line, under the tier and orchestrator. */
+  credit: "Harness by SkyeNXT · coming soon",
   /** Hover text of the app icon. */
-  largeText: "Provenance · made by Yufan at SkyeNXT",
+  largeText: "Provenance · harness by SkyeNXT · made by Yufan",
   /** Clicking the app icon (newer Discord clients) opens this. */
   largeUrl: REPO_URL,
   /** Up to two; Discord shows them to everyone but you. Label 1-32 chars, https URL. */
@@ -56,6 +56,14 @@ const KINDS = {
   codex: { name: "Codex", image: "fallback-codex", hover: "Codex fallback" },
 } as const;
 const LARGE_IMAGE = "provenance";
+/** A tier thread's orchestrator -> its name on the first line ("Solstice · Provenance Orchestrator"). */
+const ORCHESTRATORS = {
+  provenance: "Provenance",
+  experimental: "Experimental",
+  hyperexperimental: "Hyperexperimental",
+} as const;
+export type PresenceOrchestrator = keyof typeof ORCHESTRATORS;
+const TIERS: ReadonlySet<string> = new Set(["spark", "ember", "solstice", "nova"]);
 
 export type PresenceKind = keyof typeof KINDS;
 
@@ -63,6 +71,8 @@ export type PresenceKind = keyof typeof KINDS;
 export interface PresenceState {
   /** Selected tier or fallback; null when it is neither (a custom model). */
   kind: PresenceKind | null;
+  /** The orchestrator of the running (else the selected) tier thread; null on a fallback. */
+  orchestrator: PresenceOrchestrator | null;
   working: boolean;
   /** When the running turn started (ms since epoch); null when idle or unknown. */
   since: number | null;
@@ -73,6 +83,12 @@ export function sanitizePresence(raw: unknown): PresenceState {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const kind =
     typeof r.kind === "string" && Object.hasOwn(KINDS, r.kind) ? (r.kind as PresenceKind) : null;
+  const orchestrator =
+    kind && TIERS.has(kind)
+      ? typeof r.orchestrator === "string" && Object.hasOwn(ORCHESTRATORS, r.orchestrator)
+        ? (r.orchestrator as PresenceOrchestrator)
+        : "provenance"
+      : null;
   const working = r.working === true;
   const now = Date.now();
   const since =
@@ -83,7 +99,7 @@ export function sanitizePresence(raw: unknown): PresenceState {
     r.since <= now + 60e3
       ? Math.floor(r.since)
       : null;
-  return { kind, working, since };
+  return { kind, orchestrator, working, since };
 }
 
 function image(key: string): string {
@@ -93,7 +109,12 @@ function image(key: string): string {
 /** The activity for a state (lean: without the fields older Discord clients reject). */
 export function buildActivity(s: PresenceState, lean = false): Record<string, unknown> {
   const k = s.kind ? KINDS[s.kind] : null;
-  const verb = s.working ? "Working" : "Idle";
+  // "Solstice · Provenance Orchestrator"; a fallback has no orchestrator; a running turn shows by its timer.
+  const details = !k
+    ? "Provenance"
+    : s.orchestrator
+      ? `${k.name} · ${ORCHESTRATORS[s.orchestrator]} Orchestrator`
+      : `${k.name} · Fallback`;
   const assets: Record<string, string> = {
     large_image: image(LARGE_IMAGE),
     large_text: PRESENCE.largeText,
@@ -105,7 +126,7 @@ export function buildActivity(s: PresenceState, lean = false): Record<string, un
   }
   const a: Record<string, unknown> = {
     type: 0,
-    details: k ? `${verb} · ${k.name}` : verb,
+    details,
     state: PRESENCE.credit,
     assets,
     instance: false,

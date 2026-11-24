@@ -2,8 +2,9 @@
 // A stand-in for the `claude` CLI (scripts/fallback-check.ts, scripts/welcome-e2e.ts): answers the
 // health checks and prints a short `-p --output-format stream-json` turn shaped like Claude Code
 // 2.1's. Each run appends {argv, stdin} to $FAKE_CLI_LOG. FAKE_SLOW=1: waits 30 s mid-turn (for
-// interrupts); FAKE_FAIL=1: the turn ends with an error result.
-import { appendFileSync } from "node:fs";
+// interrupts); FAKE_FAIL=1: the turn ends with an error result; FAKE_REPLY_FILE: the last message
+// is that file's text, while it exists.
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 const argv = process.argv.slice(2);
@@ -138,7 +139,12 @@ process.stdin.on("end", async () => {
     session_id: session,
     parent_tool_use_id: "toolu_task",
   });
-  const answer = `Done (${r >= 0 ? "resumed" : "new"} session).`;
+  // FAKE_REPLY_FILE: the turn's last message is that file's text (a test scripts the replies).
+  const scripted = process.env.FAKE_REPLY_FILE;
+  const answer =
+    scripted && existsSync(scripted)
+      ? readFileSync(scripted, "utf8")
+      : `Done (${r >= 0 ? "resumed" : "new"} session).`;
   out({
     type: "assistant",
     message: { id: "msg_4", role: "assistant", content: [{ type: "text", text: answer }] },

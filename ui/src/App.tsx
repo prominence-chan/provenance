@@ -10,6 +10,7 @@ import { ThreadHeader } from "./components/ThreadHeader";
 import { WelcomeDialog } from "./fallback/WelcomeDialog";
 import { SetupDialog } from "./setup/SetupDialog";
 import { useAppState } from "./store/store";
+import type { TierId } from "./theme/tiers";
 import { useSidebar } from "./theme/ui";
 
 export function App() {
@@ -27,7 +28,11 @@ export function App() {
         <FlameFx fx={fx} />
         <ThreadHeader />
         <HealthBanner />
-        {selected ? <Conversation threadId={selected} /> : <NewThreadHero />}
+        {selected ? (
+          <Conversation threadId={selected} />
+        ) : (
+          <NewThreadHero tier={fx.tier?.id ?? null} />
+        )}
         <Composer />
       </main>
       <Notices />
@@ -37,10 +42,11 @@ export function App() {
   );
 }
 
-function NewThreadHero() {
+/** The sun reacts to the selected tier (HeroSun.tsx); a fallback shows the plain sun. */
+function NewThreadHero({ tier }: { tier: TierId | null }) {
   return (
     <div className="hero">
-      <HeroSun size={200} />
+      <HeroSun size={200} tier={tier} />
       <h1>What should we build?</h1>
     </div>
   );

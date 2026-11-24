@@ -4,6 +4,7 @@
 import { memo } from "react";
 import type { ThreadItem } from "../../protocol";
 import { Markdown } from "../Markdown";
+import { AgentMessage } from "./AgentMessage";
 import { CommandCard } from "./CommandCard";
 import { FileChangeCard } from "./FileChangeCard";
 import { GenericItem } from "./GenericItem";
@@ -30,11 +31,7 @@ export const ItemView = memo(function ItemView({ item }: { item: ThreadItem }) {
     case "userMessage":
       return <UserMessage item={item} />;
     case "agentMessage":
-      return (
-        <div className="agent-message">
-          <Markdown text={item.text} />
-        </div>
-      );
+      return <AgentMessage item={item} />;
     case "reasoning":
       return <Reasoning item={item} />;
     case "commandExecution":

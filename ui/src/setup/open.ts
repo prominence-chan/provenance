@@ -60,6 +60,15 @@ export function closeSetup(): void {
   void refreshSetupKnown();
 }
 
+/** Close Models & accounts and the welcome, going back to neither (a thread opens instead). */
+export function closeSetupDialogs(): void {
+  const hadWelcome = welcome.open || state.returnTo === "welcome";
+  state = { open: false, provider: null, firstRun: false };
+  if (hadWelcome) closeWelcome();
+  else emit();
+  void refreshSetupKnown();
+}
+
 const subscribe = (l: () => void) => {
   listeners.add(l);
   return () => listeners.delete(l);

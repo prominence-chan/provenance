@@ -36,6 +36,7 @@ Other scripts:
 | `npm run mock:router`         | `scripts/mock-router.ts` on :4199, a stand-in for provenance-core's setup API                 |
 | `npm run check:fallback`      | Claude Code / Codex fallbacks, server side, against stand-in CLIs (no browser)                |
 | `npm run e2e:welcome`         | Welcome, fallbacks, picker, "too large" suggestion, headless (needs `npm run build`)          |
+| `npm run e2e:carry`           | One conversation moving between tiers, Claude Code and Codex, headless (needs `npm run build`) |
 | `npm run check:orchestrator`  | The two experimental orchestrators, server side, against a stand-in router and app-server     |
 | `npm run check:presence`      | Discord Rich Presence against a stand-in Discord socket, plus the page's reports (below)      |
 
@@ -484,21 +485,42 @@ provenance binary's catalog through Provenance), and for Codex the two modes. Of
 a muted row that opens the Fallbacks page. The model key says where a thread runs:
 `solstice` / `luna/solstice` (tiers, `/rpc`), `claude:<m>` and `codex:<m>` (`/rpc/fallback`),
 `codex-pv:<m>` (`/rpc/codex`); the store keeps all three backends' threads in one list. A thread
-stays on its backend: opening one points the picker at its model; sending with another backend
-picked starts a new thread there, its first message a brief of the old one (`fallback/brief.ts`,
-folded in the bubble), named "… (continued)".
+stays on its backend: opening one points the picker at its model.
+
+**Moving a conversation** (`shared/thread-links.ts`, `store/segments.ts`, `actions.ts`
+`handOver`): sending with another backend picked moves the conversation there and it stays one
+thread: same sidebar entry and title, the earlier turns where they were. Behind it each backend
+that served it has its own session ("segment"): a new thread on the target, linked to the
+conversation in `<data>/thread-links.json` (`GET /api/links`, `PUT`/`DELETE /api/links/<id>`), its
+model handed a brief of everything so far (`fallback/brief.ts`: the goal, requests since, what the
+agent reported, files, commands, the plan, where it stands, the latest request verbatim; 16,000
+characters at most). The brief never shows and is never stored as an item: Claude Code, Codex in
+the background and the orchestrators get it in turn/start's `additionalContext` (the CLI reads it
+on stdin before the message, once, until it has a session), an app-server (Codex through
+Provenance, or back on the tiers) in thread/start's `developerInstructions`. The page lists one
+entry per conversation, shows a later session's events in it, sends each message to the latest
+session, and stitches all sessions' turns into one view; one faint line marks where it moved
+("Continued in Claude Code from the conversation above"). Back on a tier is a new tier session
+(the old one is the history that outgrew the free models, and it would need the brief as a visible
+message). A turn still running is stopped first. Archive archives every session; a rename names
+the conversation's own thread. Threads carried over before this (two threads, the brief as the new
+one's first message) show only what the person wrote, under "This was continued from another
+conversation", titled "… (continued)".
 
 **"Too large" suggestion** (`fallback/strain.ts`, `StrainNote.tsx`): under a tier thread, when
 its history has outgrown the free models. Per finished turn: provenance-core's context flags
 (`/api/usage` → `context`: `over` 3, `trimmed` 2, `restarted` 2; `compacted` alone is normal and
 counts 0), a context-window error 3, app-server compacting twice in the turn 2 (once 1), the same
 command with the same result 3+ times 2. Shown when the last three turns add to 4+ with the latest
-at 2+, or one of the last two at 3. One line, a button per ready fallback (a new thread there
-with a brief), or "Set up Codex or Claude Code…"; dismissed, it comes back for that thread only
+at 2+, or one of the last two at 3. One line, a button per ready fallback (the conversation moves there
+and the model carries on with the work, no message of the person's), or "Set up Codex or Claude
+Code…"; dismissed, it comes back for that thread only
 when the score rises by 4.
 
 Checks: `npm run check:fallback` (server side against stand-in CLIs), `npm run e2e:welcome` (the
-page end to end, stand-in claude / codex / provenance; needs `npm run build`),
+page end to end, stand-in claude / codex / provenance; needs `npm run build`), `npm run e2e:carry`
+(a conversation moved tier → Claude Code → restart → tier → Codex mid-turn → archive, and the brief
+nowhere in the page, the store or the thread files),
 `node scripts/fallback-real-check.ts` (one tiny real turn each through the real CLIs and your
 Codex sign-in; spends a little usage).
 
@@ -516,33 +538,57 @@ empty folder) that only the backend talks to, and call the router directly for p
 call, so each lands in a new chat). Every prompt is in `prompts.ts`; a plain call is held to 8,000
 characters.
 
-- **Experimental** (`experimental.ts`): a planner call returns a short list of mini tasks in plain
-  text (`parse.ts` reads it leniently); each task runs as a worker, a fresh ephemeral thread of
-  the stock harness with the thread's sandbox and approval preset, given a brief (goal, task,
-  done-criteria, notes); its commands, edits and approval requests show in the visible thread;
-  its last message is its report. The notes (`notes.ts`, at most 2,400 characters, oldest folded
-  first) are the only thing carried between tasks and turns: files and commands as recorded,
-  one line per task as reported, and the tasks still to do (so "continue" after a turn that
-  ended early runs what was left, without planning again). A blocked task, or a worker that used
-  up its own budget (24 requests, 10 minutes), sends the remaining list back to the planner. A
-  plan that only looks around gets a last task that makes what the request asks for; a file the
-  request named that is still missing at the end, or a last recorded command that failed, is
-  stated first in the reply. A planner reply that declines ("I can't run commands…") is asked for
-  once more.
+- **Experimental** (`experimental.ts`): a planner call decides between one worker for the whole
+  job (`ONE`, the normal case, and the outcome for any request that fits a brief unless the
+  planner says why the job is `LARGE`) and a short list of tasks in plain text (`parse.ts` reads
+  it leniently). A worker is a fresh ephemeral thread of the stock harness with the thread's
+  sandbox and approval preset, given a brief; its commands, edits and approval requests show in
+  the visible thread; its last message is its report. The notes (`notes.ts`, at most 2,400
+  characters, oldest folded first) are the only thing carried between tasks and turns: files and
+  commands as recorded, one line per task as reported, and the tasks still to do (so "continue"
+  after a turn that ended early runs what was left, without planning again). A blocked task, or
+  a worker that used up its own budget (24 requests and 10 minutes for a task, half as much
+  again for an unsplit job, and never more than the turn has left), sends the remaining list
+  back to the planner. An approval that is declined is not a reason to plan again: it is recorded
+  once, the task is run once more without that command, and after a second refusal the job goes
+  on and the reply names the command. A planner reply that declines ("I can't run commands…") is
+  asked for once more.
 - **Hyperexperimental** (`hyper.ts`): per step, three new chats (think in plain words → translate
   into `RUN / READ / LIST / SEARCH / WRITE / REPLACE` → summarize) and one execution through
   app-server's `command/exec` under the thread's sandbox as an explicit policy (reads always
   read-only; "Ask every time" shows each command and file change for approval first). Only the
-  summary (2,500 characters) and the last step's results are carried. File bodies are written
-  once: the think step gives a file in a ` ```file:<path> ` block, which is lifted out and attached
-  to the translated `WRITE` verbatim (the translator sees a marker); a `WRITE` with no content or
-  a `cat >` with no heredoc is refused before it runs and fed back. A `RUN` sees the environment
+  summary (2,500 characters) and the last step's results are carried. Nothing exact passes
+  through the translate step: a file the think step gives in a ` ```file:<path> ` block and a
+  shell block (` ```bash `) are lifted out and attached to the translated `WRITE` / `RUN`
+  verbatim (the translator sees a marker), and a one-line command or path it did retype is set
+  back to the think step's spelling where characters were lost; a `WRITE` with no content or a
+  `cat >` with no heredoc is refused before it runs and fed back. A `RUN` sees the environment
   the harness's shell tool gives a command (the login shell plus the rc file, captured once, then
   a non-login shell), not a bare `zsh -lc`.
 
+Both carry **the request word for word** (`request.ts`): every worker brief and every think
+prompt quotes the person's own text (whole when it fits; otherwise the pieces a task needs, which
+the planner names by number, with the gaps marked and the path of a temp file that holds all of
+it), together with a "must match exactly" list that code copies out of the request: paths, file
+names, quoted strings, flags, calls, numbers with their units. No model restates them on the way.
+
+Both end a turn that changed something with **a finish check**: by code, every file the request
+names as output exists under exactly that name and place (a file of nearly that name is reported
+as a near miss), nothing was written outside the folder to a path the request does not name, and
+the last recorded check did not fail; then one plain call, a fresh reader given the request and
+what was recorded (files with their first lines, commands with how they ended), answers per
+requirement `MET` / `NOT SHOWN` / `VIOLATED` with the cheapest check for what is not shown. What
+is open becomes one more task (Experimental; written by code, not replanned) or at most two more
+steps (Hyperexperimental), and the reply states first what code found and then what stayed not
+verified. The briefs and the think prompt carry three rules of checking: run the result the way
+the request says it will be used, failure cases included; copy an input before a tool that may
+change it opens it; hold the result to every size, count or shape the request states.
+
 Loop guards are `Caps` in `backend.ts` (tasks, tries per task, plan revisions, steps, model calls
-per turn, requests and minutes per worker); one that stops the work ends the turn with a plain
-message. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
+and minutes per turn, requests and minutes per worker); one that stops the work ends the turn with
+a plain message. Experimental spends by what the turn has left (a reserve is kept for the finish
+check): a worker gets no more than is left, a revision is made only when it and one more task
+still fit, and otherwise the turn stops with what it has and says what is not done. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
 retried inside the turn after 5, 20, 60 and 120 s (`PROVENANCE_ORC_RETRY_S`), with a status line
 in the thread; a worker whose own request failed is run again on the same schedule; interrupt ends
 a wait at once. Only then does the turn fail with the router's message, and what was done stays

@@ -187,11 +187,11 @@ await step("activity: the literal lines, images, hover texts and button", () => 
   const a = buildActivity(sanitizePresence({ kind: "solstice", working: true, since }));
   assert.deepEqual(a, {
     type: 0,
-    details: "Working · Solstice",
-    state: "by SkyeNXT · coming soon",
+    details: "Solstice · Provenance Orchestrator",
+    state: "Harness by SkyeNXT · coming soon",
     assets: {
       large_image: img("provenance"),
-      large_text: "Provenance · made by Yufan at SkyeNXT",
+      large_text: "Provenance · harness by SkyeNXT · made by Yufan",
       large_url: "https://github.com/prominence-chan/provenance",
       small_image: img("tier-solstice"),
       small_text: "Solstice tier · frontier",
@@ -203,15 +203,30 @@ await step("activity: the literal lines, images, hover texts and button", () => 
     ],
   });
   const idle = buildActivity(sanitizePresence({ kind: "claude", working: false, since }));
-  assert.equal(idle.details, "Idle · Claude Code");
+  assert.equal(idle.details, "Claude Code · Fallback");
   assert.equal(idle.timestamps, undefined, "no timer while idle");
   assert.equal((idle.assets as Record<string, string>).small_text, "Claude Code fallback");
-  const none = buildActivity(sanitizePresence({ kind: null, working: false, since: null }));
-  assert.equal(none.details, "Idle");
+  const none = buildActivity(sanitizePresence({ kind: null, orchestrator: null, working: false, since: null }));
+  assert.equal(none.details, "Provenance");
+  const hyper = buildActivity(
+    sanitizePresence({ kind: "nova", orchestrator: "hyperexperimental", working: false }),
+  );
+  assert.equal(hyper.details, "Nova · Hyperexperimental Orchestrator");
+  assert.equal(
+    sanitizePresence({ kind: "nova", orchestrator: "SECRET" }).orchestrator,
+    "provenance",
+  );
+  assert.equal(
+    sanitizePresence({ kind: "codex", orchestrator: "experimental" }).orchestrator,
+    null,
+  );
   assert.equal((none.assets as Record<string, string>).small_image, undefined);
   for (const kind of ["spark", "ember", "nova", "codex"]) {
     const x = buildActivity(sanitizePresence({ kind, working: true, since }));
-    assert.match(String(x.details), /^Working · (Spark|Ember|Nova|Codex)$/);
+    assert.match(
+      String(x.details),
+      /^(Spark|Ember|Nova) · Provenance Orchestrator$|^Codex · Fallback$/,
+    );
   }
   // Discord's limits: details/state 2-128 chars, button labels 1-32, at most two buttons.
   for (const s of [a.details, a.state, idle.details])
@@ -235,7 +250,7 @@ await step("sanitizePresence keeps only kind / working / since", () => {
     account: "secret@example.com",
   };
   const s = sanitizePresence(raw);
-  assert.deepEqual(Object.keys(s).sort(), ["kind", "since", "working"]);
+  assert.deepEqual(Object.keys(s).sort(), ["kind", "orchestrator", "since", "working"]);
   assert.ok(!JSON.stringify(buildActivity(s)).includes("SECRET"));
   assert.equal(sanitizePresence({ kind: "SECRET-model-name", working: true }).kind, null);
   assert.equal(sanitizePresence({ kind: "toString" }).kind, null);
@@ -247,7 +262,7 @@ await step("sanitizePresence keeps only kind / working / since", () => {
     "absurd start",
   );
   assert.equal(sanitizePresence({ kind: "spark", working: false, since: Date.now() }).since, null);
-  assert.deepEqual(sanitizePresence(null), { kind: null, working: false, since: null });
+  assert.deepEqual(sanitizePresence(null), { kind: null, orchestrator: null, working: false, since: null });
 });
 
 await step("no client id: nothing connects, nothing is logged", async () => {
@@ -381,7 +396,7 @@ await step("coalescing: one update per interval, the latest state wins; no repea
     const second = fake.sets[1];
     assert.ok(second.at - t0 >= interval - 15, `gap ${second.at - t0} ms`);
     const act = (second.data.args as { activity: Record<string, unknown> }).activity;
-    assert.equal(act.details, "Idle · Claude Code");
+    assert.equal(act.details, "Claude Code · Fallback");
     // The same state again sends nothing.
     p.update(sanitizePresence({ kind: "claude", working: false }));
     await sleep(interval + 100);
@@ -428,7 +443,7 @@ await step(
       p.configure(CLIENT_ID, true);
       await until("activity again", () => fake.sets.length === 3, 7000);
       const act = (fake.sets[2].data.args as { activity: Record<string, unknown> }).activity;
-      assert.equal(act.details, "Working · Spark");
+      assert.equal(act.details, "Spark · Provenance Orchestrator");
       await p.shutdown();
     } finally {
       await fake.stop();
@@ -491,7 +506,7 @@ await step("Discord restarts: reconnects quietly and shows the current state", a
     await until("a reconnect + SET_ACTIVITY", () => fake.sets.length === 2, 3000);
     assert.equal(fake.connections, 2);
     const act = (fake.sets[1].data.args as { activity: Record<string, unknown> }).activity;
-    assert.equal(act.details, "Idle · Nova");
+    assert.equal(act.details, "Nova · Provenance Orchestrator");
     assert.ok(
       logs.every((l) => l === "discord presence: connected"),
       logs.join("\n"),
@@ -643,7 +658,12 @@ if (process.env.PAGE === "0" || !existsSync(path.join(root, "dist/index.html")))
         const last = async () => (await reports()).at(-1);
         await page.goto(ui.url);
         await page.waitForSelector(".conn .dot-ok", { timeout: 30_000 });
-        assert.deepEqual(await last(), { kind: "solstice", working: false, since: null });
+        assert.deepEqual(await last(), {
+          kind: "solstice",
+          orchestrator: "provenance",
+          working: false,
+          since: null,
+        });
         await page.getByRole("button", { name: "New thread" }).click();
         const t0 = Date.now();
         await page.fill(".composer textarea", "SECRET prompt about SECRET-project");
@@ -660,9 +680,15 @@ if (process.env.PAGE === "0" || !existsSync(path.join(root, "dist/index.html")))
         for (let i = 0; i < 6; i++) await release(); // the scripted turn, to its end
         await page.locator(".turn .turn-footer").waitFor({ timeout: 5_000 });
         await sleep(300);
-        assert.deepEqual(await last(), { kind: "solstice", working: false, since: null });
+        assert.deepEqual(await last(), {
+          kind: "solstice",
+          orchestrator: "provenance",
+          working: false,
+          since: null,
+        });
         const all = await reports();
-        for (const r of all) assert.deepEqual(Object.keys(r).sort(), ["kind", "since", "working"]);
+        for (const r of all)
+          assert.deepEqual(Object.keys(r).sort(), ["kind", "orchestrator", "since", "working"]);
         assert.ok(!JSON.stringify(all).includes("SECRET"), "the prompt reached a report");
         assert.ok(all.length <= 8, `${all.length} reports: only on change`);
         assert.deepEqual(errors, []);
