@@ -75,6 +75,9 @@ import {
   reportSections,
 } from "../server/orchestrator/notes.ts";
 import {
+  balanceFences,
+  looksLikeShell,
+  tidyFences,
   isContinue,
   liftCommands,
   liftFiles,
@@ -957,6 +960,136 @@ log("hyperexperimental: commands are lifted too, and a retyped name is set back"
       mixed.commands[0].script === "python3 lifted.py" &&
       /\[file block: here\.txt[^\n]*\n\[command block C1/.test(mixed.plan),
     "a block that holds a file and a command gives a marker for each",
+  );
+}
+
+// ---- fences a chat page left out of order (a real Luna reply of 2026-11-23) ----------------------
+{
+  log("fences: a stray fence, an echoed prompt line, an unmarked file body");
+  const F = "```";
+  const reply1 = [
+    "Create the requested file.",
+    "",
+    `${F}file:/w/app/run.py`,
+    "import asyncio",
+    "",
+    "async def run_tasks(tasks, n):",
+    "    pass",
+    F,
+    "",
+    "Run the following commands to verify the implementation and its import path:",
+    "",
+    `${F}bash`,
+    "cd /w/app",
+    "python3 -c 'from run import run_tasks'",
+    F,
+    "",
+    "Then test it:",
+    "",
+    `${F}bash`,
+    "python3 - <<'PY'",
+    "import run",
+    "PY",
+    F,
+    "",
+    F,
+    "",
+    F,
+  ].join("\n");
+  const t1 = tidyFences(reply1);
+  check(
+    !/```\s*\n\s*```\s*$/.test(t1) && (t1.match(/```/g) ?? []).length === 6,
+    "an empty block at the end is dropped",
+  );
+  const l1 = liftFiles(t1);
+  const c1 = liftCommands(l1.plan);
+  check(
+    l1.files.length === 1 &&
+      l1.files[0].content === "import asyncio\n\nasync def run_tasks(tasks, n):\n    pass" &&
+      c1.commands.length === 2 &&
+      c1.commands[0].script === "cd /w/app\npython3 -c 'from run import run_tasks'",
+    "the file body and both command blocks come out whole, none taking a line of another",
+  );
+  const tail = "This is step 3; 11 steps left after it.";
+  const reply3 = `Run the import check:\n\n${F}bash\ncd /w/app\npython3 -c 'import run'\n\n${tail}\n\n${F}\n\n${F}`;
+  const c3 = liftCommands(liftFiles(tidyFences(reply3, ["LAST STEP RESULTS: …", tail])).plan);
+  check(
+    c3.commands.length === 1 && c3.commands[0].script === "cd /w/app\npython3 -c 'import run'",
+    "a line that repeats the end of the prompt is never inside a command block",
+  );
+  const open = tidyFences(`Run this:\n\n${F}bash\nls -la`);
+  check(
+    liftCommands(open).commands[0]?.script === "ls -la",
+    "a command block left open is closed at the end of the reply",
+  );
+  const half = liftFiles(tidyFences(`${F}file:a.py\nimport os\nx = 1`));
+  check(half.files.length === 0, "a file block left open is still not written (half a file)");
+  const reply4 = [
+    "Replace the entire `run.py` file with the following implementation. `asyncio.TaskGroup` ensures that children are awaited.",
+    "",
+    F,
+    "import asyncio",
+    "from collections.abc import Awaitable, Callable",
+    F,
+    "",
+    "Next, run the following verification script.",
+    "",
+    `${F}bash`,
+    "python3 -c 'import run'",
+    F,
+  ].join("\n");
+  const l4 = liftFiles(tidyFences(reply4));
+  const c4 = liftCommands(l4.plan);
+  check(
+    l4.files.length === 1 &&
+      l4.files[0].path === "run.py" &&
+      l4.files[0].content.startsWith("import asyncio") &&
+      c4.commands.length === 1 &&
+      c4.commands[0].script === "python3 -c 'import run'",
+    "an unmarked block under a sentence that assigns it to one named file is that file's body, not a command",
+  );
+  const py = liftCommands(`Run the following:\n\n${F}\nimport asyncio\nprint(1)\n${F}`);
+  check(
+    py.commands.length === 0 &&
+      py.skipped.length === 1 &&
+      /does not read as shell/.test(py.skipped[0]),
+    "an unmarked block that is not shell is not run under 'run the following': the next step is asked",
+  );
+  check(
+    liftCommands(`Run the following:\n\n${F}\nls -la\nFOO=$(pwd) make test\n${F}`).commands
+      .length === 1,
+    "an unmarked block of shell under 'run' is still a command",
+  );
+  check(
+    liftCommands(`Replace \`run.py\` now:\n\n${F}\nls\n${F}`).commands.length === 0,
+    "a file called run.py in the sentence is not the word run",
+  );
+  check(
+    looksLikeShell("cd /w/app\nls") &&
+      looksLikeShell("python3 - <<'PY'\nimport os\nPY") &&
+      looksLikeShell("# note\nFOO=1 ./run.sh") &&
+      !looksLikeShell("import asyncio\nprint(1)") &&
+      !looksLikeShell('{"a": 1}') &&
+      !looksLikeShell("PREFIX uni: <http://x/>\nSELECT ?a WHERE {}") &&
+      !looksLikeShell("x = compute(3)") &&
+      !looksLikeShell("def main():\n    pass"),
+    "what reads as shell and what does not (Python, JSON, a query)",
+  );
+  const bad = liftFiles(`${F}file:/w/app/run.py\nimport asyncio\nx = 1\ncd /w/app\n${F}`);
+  check(
+    bad.files.length === 0 &&
+      bad.flagged.length === 1 &&
+      /ends with the line `cd \/w\/app`/.test(bad.flagged[0]),
+    "a file body that ends with a shell command is flagged, not written",
+  );
+  check(
+    liftFiles(`${F}file:/w/app/go.sh\necho hi\ncd /w/app\n${F}`).files.length === 1,
+    "a shell script may end with a shell command",
+  );
+  check(
+    balanceFences(`Did it.\n\n${F}bash\ncd /w/app`) === `Did it.\n\n${F}bash\ncd /w/app\n${F}` &&
+      balanceFences(`a\n${F}\nb\n${F}`) === `a\n${F}\nb\n${F}`,
+    "a text that leaves a fence open is closed at its end; a balanced one is left alone",
   );
 }
 

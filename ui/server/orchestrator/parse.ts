@@ -269,6 +269,8 @@ export interface LiftedFile {
 
 export interface Lifted {
   files: LiftedFile[];
+  /** Blocks that looked like a file's body and were not taken, each with why (told to the next Think). */
+  flagged: string[];
   /** The Think text with each lifted body replaced by a one-line marker. */
   plan: string;
 }
@@ -289,6 +291,86 @@ function fileMarker(path: string, content: string): string {
 function cleanPath(p: string): string {
   return unquote(p.trim().replace(/[,;:]+$/, "")).replace(/[,;:]+$/, "");
 }
+
+const FENCE_LINE = /^\s*(`{3,}|~{3,})\s*(.*?)\s*$/;
+const NAMED_FILE_INFO = /^(?:[\w+#.-]+[\s,]+)?(?:file|path|filename)\s*[:=]\s*\S/i;
+
+/**
+ * A model's text with its fences put in order, before anything is lifted out of it. A chat page
+ * (or the bridge that reads it) can leave a stray fence behind, and one stray fence shifts every
+ * pair after it: a file body then swallows the next block's first line, and prose lands in a
+ * command. So:
+ *   - lines that only repeat the prompt's own last lines (`promptTail`) are dropped: they are
+ *     ours, never the model's, and must not end up inside a block;
+ *   - a fenced block with nothing in it is dropped, fences and all;
+ *   - a fence still open at the end is closed there, unless it is a block named for a file
+ *     (a reply cut off mid-file: half a file is not written, see liftFiles).
+ */
+export function tidyFences(text: string, promptTail: string[] = []): string {
+  const echo = new Set(promptTail.map((l) => l.trim()).filter((l) => l.length >= 12));
+  const out: string[] = [];
+  let open: { at: number; mark: string; info: string } | null = null;
+  for (const line of text.replace(/\r/g, "").split("\n")) {
+    if (echo.has(line.trim())) continue;
+    const f = FENCE_LINE.exec(line);
+    if (!f) {
+      out.push(line);
+      continue;
+    }
+    if (!open) {
+      open = { at: out.length, mark: f[1], info: f[2] };
+      out.push(line);
+      continue;
+    }
+    const closes = f[2] === "" && f[1][0] === open.mark[0] && f[1].length >= open.mark.length;
+    if (!closes) {
+      out.push(line); // a fence of another kind inside a block is the block's own text
+      continue;
+    }
+    if (out.slice(open.at + 1).some((l) => l.trim())) out.push(line);
+    else out.length = open.at; // an empty block: gone
+    open = null;
+  }
+  if (open) {
+    if (!out.slice(open.at + 1).some((l) => l.trim())) out.length = open.at;
+    else if (!NAMED_FILE_INFO.test(open.info)) out.push(open.mark);
+  }
+  while (out.length && !out[out.length - 1].trim()) out.pop();
+  return out.join("\n");
+}
+
+/** The text with a fence it leaves open closed at its end (a summary or a cut output must not hand one on). */
+export function balanceFences(text: string): string {
+  let open: string | null = null;
+  for (const line of text.split("\n")) {
+    const f = FENCE_LINE.exec(line);
+    if (!f) continue;
+    if (!open) open = f[1];
+    else if (f[2] === "" && f[1][0] === open[0] && f[1].length >= open.length) open = null;
+  }
+  return open ? `${text.replace(/\s+$/, "")}\n${open}` : text;
+}
+
+const NOT_SHELL_RE =
+  /^(?:import\s+[\w.]+|from\s+[\w.]+\s+import\b|def\s+\w+\s*\(|class\s+\w+|async\s+def\b|@\w+|[{\[<]|#include\b|package\s+\w+|fn\s+\w+|(?:const|let|var|function)\s+\w+|SELECT\b|PREFIX\b|"""|\w+\s+=\s+\S|[\w.]+\([^)]*\)\s*$)/;
+
+/** Do these lines read as shell (not Python, JSON, a query or prose)? Judged on the first line that says something. */
+export function looksLikeShell(script: string): boolean {
+  const first = script
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !l.startsWith("#"));
+  if (!first) return false;
+  if (NOT_SHELL_RE.test(first)) return false;
+  // prose: several plain words and a full stop, no shell punctuation
+  if (/^[A-Z][a-z]+(?:\s+[a-z]+){3,}[.:]?$/.test(first)) return false;
+  return /^(?:\$\s+)?(?:[A-Za-z_][\w]*=\S*\s+)*[\w./~$-]+(?:\s|$)/.test(first);
+}
+
+const CODE_EXT_RE =
+  /\.(?:py|js|mjs|cjs|ts|tsx|jsx|json|jsonl|c|h|cc|cpp|hpp|rs|go|java|kt|rb|php|sql|csv|tsv|ya?ml|toml|ini|cfg|xml|html?|css|sparql|ttl|ics|vim)$/i;
+const SHELL_TAIL_RE =
+  /^(?:\$\s+)?(?:cd\s+[\w./~$"'-]+\s*$|(?:python3?|pip3?|node|npm|npx|pytest|bash|sh|zsh|chmod|mkdir|git|gcc|make)\s+\S)/;
 
 /** `cat > path <<'EOF'` or `cat <<'EOF' > path` (or tee): the path, the delimiter, quoted or not. */
 function heredocWrite(
@@ -320,7 +402,24 @@ export function liftFiles(text: string): Lifted {
   const lines = text.replace(/\r/g, "").split("\n");
   const out: string[] = [];
   const files = new Map<string, string>();
+  const flagged: string[] = [];
   const put = (path: string, content: string) => {
+    // A body whose last line is plainly a shell command (in a file that is not a script) has
+    // taken a line of the next block with it: it is not written as it stands.
+    const last =
+      content
+        .split("\n")
+        .filter((l) => l.trim())
+        .pop() ?? "";
+    if (CODE_EXT_RE.test(path) && SHELL_TAIL_RE.test(last.trim()) && !/^\s/.test(last)) {
+      flagged.push(
+        `the block for ${path} ends with the line \`${clip(last.trim(), 120)}\`, a shell command and not part of the file: nothing was written for it. Give the file again alone in its own \`\`\`file:${path} block, and commands in a separate \`\`\`bash block.`,
+      );
+      out.push(
+        `[the block for ${path} was not taken: it ends with a shell command; nothing is written for it]`,
+      );
+      return;
+    }
     files.delete(path);
     files.set(path, content);
     out.push(fileMarker(path, content));
@@ -339,14 +438,26 @@ export function liftFiles(text: string): Lifted {
     // "Create `fix.py` with this content:" or "Action 1 - Create probe.py" (a line that says a
     // file is made and names exactly one); never a line about running something or its output.
     const saysContent =
-      /\bcontents?\b|\bfollowing code\b|\bcode below\b/i.test(label) && /[:：]\s*$/.test(label);
+      /\bcontents?\b|\bfollowing (?:code|implementation)\b|\bcode below\b/i.test(label) &&
+      /[:：]\s*$/.test(label);
+    // (a name on the line is not a word about running: `run.py`, `output.json`)
+    const words = label.replace(/`[^`]*`/g, " ").replace(/\b[\w/-]+\.[A-Za-z]\w*\b/g, " ");
     const saysMake =
-      /\b(?:create|write|save|add|put|make)\b/i.test(label) &&
-      !/\b(?:run|execute|output|prints?|expected|result|shows?)\b/i.test(label);
+      /\b(?:create|write|save|add|put|make|replace|rewrite|overwrite)\b/i.test(words) &&
+      !/\b(?:run|execute|output|prints?|expected|result|shows?)\b/i.test(words);
     if (!saysContent && !saysMake) return null;
     const found = new Set<string>();
     for (const m of label.matchAll(FILE_TOKEN)) found.add(cleanPath(m[1] ?? m[2]));
-    return found.size === 1 ? [...found][0] : null;
+    if (found.size === 1) return [...found][0];
+    // Several names on the line: the one in the sentence that says a file is made ("Replace the
+    // entire `run.py` file with the following implementation. `asyncio.TaskGroup` ensures …").
+    const making = label
+      .split(/(?<=[.!?])\s+/)
+      .filter((p) => /\b(?:create|write|save|replace|rewrite|overwrite)\b/i.test(p));
+    if (making.length !== 1) return null;
+    const inIt = new Set<string>();
+    for (const m of making[0].matchAll(FILE_TOKEN)) inIt.add(cleanPath(m[1] ?? m[2]));
+    return inIt.size === 1 ? [...inIt][0] : null;
   };
   let i = 0;
   while (i < lines.length) {
@@ -402,6 +513,7 @@ export function liftFiles(text: string): Lifted {
   }
   return {
     files: [...files].map(([path, content]) => ({ path, content })),
+    flagged,
     plan: out.join("\n"),
   };
 }
@@ -425,10 +537,16 @@ function commandMarker(id: string, script: string): string {
  * under a line that says to run it. The block runs as one script, so a `cd` in it holds for the
  * lines after it. A block that holds a file marker is left for the translator.
  */
-export function liftCommands(plan: string): { plan: string; commands: LiftedCommand[] } {
+export function liftCommands(plan: string): {
+  plan: string;
+  commands: LiftedCommand[];
+  /** Unmarked blocks the text said to run that do not read as shell: not run, told to the next Think. */
+  skipped: string[];
+} {
   const lines = plan.split("\n");
   const out: string[] = [];
   const commands: LiftedCommand[] = [];
+  const skipped: string[] = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
@@ -450,17 +568,30 @@ export function liftCommands(plan: string): { plan: string; commands: LiftedComm
     let k = out.length - 1;
     while (k >= 0 && !out[k].trim()) k--;
     const label = k >= 0 && out.length - 1 - k <= 1 ? strip(out[k]) : "";
-    const shell =
-      SHELL_LANGS.test(lang) ||
-      (fence[2] === "" &&
-        /\b(?:run|execute|command|commands|shell|terminal)\b/i.test(label) &&
-        !/\b(?:output|prints?|expected|shows?)\b[^:]*[:：]\s*$/i.test(label));
+    // (names in the label are not words about running: "Replace `run.py` with …" does not say run)
+    const words = label.replace(/`[^`]*`/g, " ").replace(/\b[\w/-]+\.[A-Za-z]\w*\b/g, " ");
+    const saysRun =
+      fence[2] === "" &&
+      /\b(?:run|execute|command|commands|shell|terminal)\b/i.test(words) &&
+      !/\b(?:output|prints?|expected|shows?)\b[^:]*[:：]\s*$/i.test(label);
     const body = close === -1 ? [] : lines.slice(i + 1, close);
     // (a console transcript's "$ " prompts come off; its output lines are not there to tell apart)
     const script = body
       .map((l) => l.replace(/^\s*\$\s+/, ""))
       .join("\n")
       .replace(/^\n+|\s+$/g, "");
+    // An unmarked block is a command only when its lines read as shell: a file's body or a query
+    // under "run the following" is not run as a script; the next Think is asked to say what it is.
+    const shell = SHELL_LANGS.test(lang) || (saysRun && looksLikeShell(script));
+    if (saysRun && !shell && close !== -1 && script.trim()) {
+      const first = script.split("\n").find((l) => l.trim()) ?? "";
+      skipped.push(
+        `an unmarked block that starts \`${clip(first.trim(), 80)}\` does not read as shell and names no file: it was not run and not written. Put a file in a \`\`\`file:<path> block and commands in a \`\`\`bash block.`,
+      );
+      out.push("[an unmarked block was not taken: it is neither a named file nor shell]");
+      i = close + 1;
+      continue;
+    }
     if (!shell || close === -1 || !script.trim()) {
       // not ours: copy the block through untouched
       const end = close === -1 ? i : close;
@@ -488,7 +619,7 @@ export function liftCommands(plan: string): { plan: string; commands: LiftedComm
     flush();
     i = close + 1;
   }
-  return { plan: out.join("\n"), commands };
+  return { plan: out.join("\n"), commands, skipped };
 }
 
 /** What a model's retyping changes without meaning to: emphasis marks, braces, quotes, spacing. */
