@@ -604,8 +604,8 @@ try {
   check(
     orchRows.length === 3 &&
       /Provenance\s+One thread/.test(orchRows[0]) &&
-      /Experimental\s+Splits the task/.test(orchRows[1]) &&
-      /Hyperexperimental\s+Every step/.test(orchRows[2]),
+      /Experimental\s+A fresh worker per job/.test(orchRows[1]) &&
+      /Hyperexperimental\s+A plain chat per step/.test(orchRows[2]),
     "three choices, each with its one line",
   );
   await page.hover('.slot-menu-orchestrator [data-value="experimental"]');

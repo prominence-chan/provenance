@@ -1128,6 +1128,8 @@ export interface Thought {
   final: string | null;
   /** What to do next, in free form (when not finished). */
   next: string;
+  /** The work cannot go on: what is missing ("BLOCKED: …"), as said to the user. */
+  blocked: string | null;
 }
 
 /**
@@ -1143,9 +1145,171 @@ export function parseThought(text: string): Thought {
       .slice(m.index + m[0].length)
       .replace(/^[\s*_:]+/, "")
       .trim();
-    if (final) return { final, next: "" };
+    if (final) return { final, next: "", blocked: null };
   }
   if (/^\W{0,4}(?:finished|done)\W{0,4}$/im.test(t) && t.length < 40)
-    return { final: "Done.", next: "" };
-  return { final: null, next: t };
+    return { final: "Done.", next: "", blocked: null };
+  // "BLOCKED: <what is missing>", in capitals at the start of a line, in a reply that gives
+  // nothing to run: the step says the job cannot go on.
+  const b = /^\W{0,4}BLOCKED\W{0,4}\s*[:\-–—]\s*/m.exec(t);
+  if (b && !/^\s*(?:`{3,}|~{3,})/m.test(t)) {
+    const blocked = t
+      .slice(b.index + b[0].length)
+      .replace(/^[\s*_:]+/, "")
+      .trim();
+    if (blocked) return { final: null, next: "", blocked };
+  }
+  return { final: null, next: t, blocked: null };
+}
+
+/**
+ * The facts a Think reply asks to have kept ("KEEP: the table is called words(word, value)"): its
+ * own lines, in capitals at the start of a line, outside code blocks. They go into the working
+ * memory as written (memory.ts); no model restates them.
+ */
+export function keepLines(text: string, max = 6): string[] {
+  const out: string[] = [];
+  let fenced = false;
+  for (const raw of text.replace(/\r/g, "").split("\n")) {
+    if (FENCE_LINE.test(raw)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const m = /^\s*(?:[-*•>]+\s+)?(?:\*\*)?KEEP(?:\*\*)?\s*:\s*(?:\*\*)?\s*(\S.*)$/.exec(raw);
+    if (!m) continue;
+    const v = clip(m[1].replace(/\s+/g, " ").trim(), 240);
+    if (v && !out.includes(v)) out.push(v);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+// ---- what a command is: a look, or more ------------------------------------------------------------
+
+const LOOK_WORDS = new Set(
+  "ls cat find sed head tail pwd rg grep egrep fgrep wc echo printf cd tree which file stat test [ [[ nl od xxd hexdump strings du df env type command true false set export unset sort uniq cut tr column basename dirname realpath readlink date id whoami uname diff cmp md5 md5sum shasum sha256sum : less more awk jq exit return".split(
+    " ",
+  ),
+);
+
+/** The script without the bodies of its heredocs (they are data, or another language). */
+function withoutHeredocs(script: string): string {
+  const out: string[] = [];
+  let until: { delim: string; dash: boolean } | null = null;
+  for (const line of script.split("\n")) {
+    if (until) {
+      if ((until.dash ? line.trim() : line.replace(/\s+$/, "")) === until.delim) until = null;
+      continue;
+    }
+    out.push(line);
+    const h = /<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/.exec(line);
+    if (h) until = { delim: h[3], dash: h[1] === "-" };
+  }
+  return out.join("\n");
+}
+
+/**
+ * Does this command (or script) only look: every command in it reads, lists, searches or prints,
+ * and nothing is redirected into a file? Judged on each command of the script, not on its first
+ * word: `cd /app && python3 test.py` runs a test, and `cat > f <<EOF` writes a file. A command
+ * that only looks is not a check of anything and changes nothing.
+ */
+export function lookOnly(script: string): boolean {
+  const flat = withoutHeredocs(script)
+    .replace(/\\\n/g, " ")
+    .replace(/'[^']*'/g, "Q")
+    .replace(/"(?:\\.|[^"\\])*"/g, "Q");
+  // a redirect into a file (not 2>&1, not /dev/null)
+  if (/(?:^|[^<>&])(?:\d?)>{1,2}(?!\s*(?:&\d|\/dev\/null|>))/.test(flat.replace(/[<>]\(/g, "(")))
+    return false;
+  let seen = 0;
+  for (const seg of flat.split(/\n|&&|\|\||;|\||&(?!\d)|\$\(|`|[(){}]/)) {
+    let t = seg.trim();
+    if (!t || t.startsWith("#")) continue;
+    // shell keywords in front of a command, and the lines that are only structure
+    for (let n = 0; n < 4; n++)
+      t = t.replace(/^(?:if|then|else|elif|do|while|until|!|time)\s+/, "");
+    if (/^(?:fi|done|esac|then|else|do|for\s|case\s|in\s|\w+\))/.test(`${t} `)) continue;
+    // assignments: alone on the line, or in front of the command they are for
+    while (/^[A-Za-z_]\w*=\S*(?:\s+|$)/.test(t)) t = t.replace(/^[A-Za-z_]\w*=\S*\s*/, "");
+    if (!t) continue;
+    const word = (t.split(/\s+/)[0] ?? "").replace(/^.*\//, "");
+    if (!LOOK_WORDS.has(word)) return false;
+    if (word === "sed" && /\s-[a-zA-Z]*i/.test(t)) return false;
+    if (word === "find" && /\s-(?:delete|exec|execdir|ok)\b/.test(t)) return false;
+    if (word === "awk" && /-i\s+inplace/.test(t)) return false;
+    seen++;
+  }
+  return seen > 0;
+}
+
+// ---- actions straight from the Think text ---------------------------------------------------------
+
+/**
+ * The Think text (after liftFiles and liftCommands) as an action list, when it holds nothing but
+ * lifted blocks and plain action lines: each marker becomes the WRITE or RUN it stands for, in
+ * the order written, and a line in the vocabulary's own capitals (READ: / LIST: / SEARCH: /
+ * REPLACE: with its <<< === >>> block) is kept as it is. `sure` is false when something in the
+ * text may be an instruction this cannot read (a block that was not lifted, a sentence that
+ * says to run something with no command block after it, no action at all): then the translate
+ * call is made, as before.
+ */
+export function directPlan(plan: string): { text: string; sure: boolean } {
+  const out: string[] = [];
+  let unsure = false;
+  const lines = plan.replace(/\r/g, "").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const line = raw.trim();
+    const file = /^\[file block: (\S+) \(\d+ lines?\) is held by the executor/.exec(line);
+    if (file) {
+      out.push(`WRITE: ${file[1]}`);
+      continue;
+    }
+    const cmd = /^\[command block (C\d+) \(\d+ lines?\) is held by the executor/.exec(line);
+    if (cmd) {
+      out.push(`RUN: ${cmd[1]}`);
+      continue;
+    }
+    const bare = line.replace(/^(?:[-*•]+\s+|\d+[.)]\s+)/, "").replace(/\*\*/g, "");
+    if (/^(?:READ|LIST|SEARCH):\s*\S/.test(bare)) {
+      out.push(bare);
+      continue;
+    }
+    if (/^REPLACE:\s*\S/.test(bare)) {
+      let end = -1;
+      for (let k = i + 1; k < Math.min(lines.length, i + 400); k++)
+        if (/^\s*>{3,}\s*$/.test(lines[k])) {
+          end = k;
+          break;
+        }
+      const open = lines.slice(i + 1, i + 4).findIndex((l) => /^\s*<{3,}/.test(l));
+      if (end === -1 || open === -1) {
+        unsure = true;
+        continue;
+      }
+      out.push(bare, ...lines.slice(i + 1, end + 1));
+      i = end;
+      continue;
+    }
+    // A block nobody lifted, or an action in the vocabulary that needs what this cannot give.
+    if (FENCE_LINE.test(raw) || /^\s*<{3,}/.test(raw)) unsure = true;
+    else if (/^(?:RUN|WRITE)\s*:/.test(bare)) unsure = true;
+    // A command with its arguments given inside a sentence ("then run `python3 x.py 3`").
+    else if (/\b(?:run|rerun|running|execute)\b[^\n]*`[^`\n]*\S\s+\S[^`\n]*`/i.test(line))
+      unsure = true;
+    // A sentence that says to run something is the label of a command block further down
+    // ("Run:", "then run it"); with no block after it, it is an instruction in prose
+    // ("Then run it with python3."), and prose is the translator's.
+    else if (
+      /\b(?:run|rerun|running|execute|executing)\b/i.test(line) &&
+      !/\b(?:do not|don't|never|without|instead of|rather than|before|not)\b[^.\n]{0,40}\b(?:run|rerun|running|execut)/i.test(
+        line,
+      ) &&
+      !lines.slice(i + 1).some((l) => /^\s*\[command block C\d+ /.test(l))
+    )
+      unsure = true;
+  }
+  return { text: out.join("\n"), sure: !unsure && out.length > 0 };
 }

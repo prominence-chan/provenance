@@ -536,7 +536,8 @@ JSON files in `<data>/orchestrator/threads`. Both use a third `provenance app-se
 empty folder) that only the backend talks to, and call the router directly for plain model calls
 (`router.ts`: `POST /v1/responses`, one user message, streamed, not stored, a session key per
 call, so each lands in a new chat). Every prompt is in `prompts.ts`; a plain call is held to 8,000
-characters.
+characters, Hyperexperimental's think call to 12,000 (it carries the working memory), a worker's
+brief to 4,800, and every role's instructions to under 3,000.
 
 - **Experimental** (`experimental.ts`): a planner call decides between one worker for the whole
   job (`ONE`, the normal case, and the outcome for any request that fits a brief unless the
@@ -549,22 +550,55 @@ characters.
   after a turn that ended early runs what was left, without planning again). A blocked task, or
   a worker that used up its own budget (24 requests and 10 minutes for a task, half as much
   again for an unsplit job, and never more than the turn has left), sends the remaining list
-  back to the planner. An approval that is declined is not a reason to plan again: it is recorded
-  once, the task is run once more without that command, and after a second refusal the job goes
-  on and the reply names the command. A planner reply that declines ("I can't run commands…") is
-  asked for once more.
-- **Hyperexperimental** (`hyper.ts`): per step, three new chats (think in plain words → translate
-  into `RUN / READ / LIST / SEARCH / WRITE / REPLACE` → summarize) and one execution through
-  app-server's `command/exec` under the thread's sandbox as an explicit policy (reads always
-  read-only; "Ask every time" shows each command and file change for approval first). Only the
-  summary (2,500 characters) and the last step's results are carried. Nothing exact passes
-  through the translate step: a file the think step gives in a ` ```file:<path> ` block and a
-  shell block (` ```bash `) are lifted out and attached to the translated `WRITE` / `RUN`
-  verbatim (the translator sees a marker), and a one-line command or path it did retype is set
-  back to the think step's spelling where characters were lost; a `WRITE` with no content or a
-  `cat >` with no heredoc is refused before it runs and fed back. A `RUN` sees the environment
-  the harness's shell tool gives a command (the login shell plus the rc file, captured once, then
-  a non-login shell), not a bare `zsh -lc`.
+  back to the planner. Three things do not: an approval that is declined (recorded once, the
+  task run once more without that command, then the job goes on and the reply names the
+  command); a last task that made the work and reports only that something cannot be run or
+  installed here (a missing tool, no network: the reply says "not verified"); and a plan that
+  was already revised and whose tasks since changed nothing. A planner reply that declines ("I
+  can't run commands…") is asked for once more.
+  **A worker's context has a budget** (`Caps.workerContextTokens`, 11,000 input tokens in one
+  request as the router reports them, `PROVENANCE_ORC_WORKER_TOKENS`; the web chat behind the
+  bridge takes about 15,000): a worker whose requests reach it is stopped and asked, on the same
+  thread, for a hand-over (what is done, what is left, what it learned), and a fresh worker goes
+  on with the same task from that and the notes. No planner call is spent on it; only a context
+  that fills up twice with nothing changed, or more than four times in a turn, sends what is
+  left to the planner to split. So a job that starts as one worker and grows is carried by
+  hand-overs, not by the harness's own compaction.
+- **Hyperexperimental** (`hyper.ts`, `memory.ts`, `exec.ts`): no tool calls. Per step one new
+  chat (think) that says what to do next in plain text: commands in ` ```bash ` blocks, a file
+  once and whole in a ` ```file:<path> ` block, looks and small changes as `READ:` / `LIST:` /
+  `SEARCH:` / `REPLACE:` lines, several actions a step when they do not depend on each other.
+  The blocks are lifted out verbatim; when the reply holds nothing else that could be an
+  instruction the actions are read straight from it, and only a reply that says what to do in
+  prose goes to a second chat (translate; nine in ten did not need it in the benchmark). Actions
+  run through app-server's `command/exec` under the thread's sandbox as an explicit policy (reads
+  always read-only; "Ask every time" shows each command and file change for approval first), in
+  order, stopped at the first that fails. Before one runs, code checks it: paths are relative to
+  the thread's folder, a file the request names in a subfolder is written there even when the
+  step gave its bare name, a write (or a listing, a search) outside the folder that the request
+  does not name is refused with the reason, a leading `cd <the folder>` is dropped (every
+  command starts there), and an action that repeats an earlier one with nothing changed since
+  is answered from memory instead of being run. **The memory is kept by code**, not by a model
+  summarizing each step: a log (one line per step: what was meant, each action and how it
+  ended), facts the think step asks to keep (`KEEP:` lines, as written), the one or two files
+  being worked on pinned and re-read from disk before every think (with line numbers; a third
+  file replaces the oldest), and long outputs shown once as their first and last lines with the
+  whole saved to a temp file whose path and line range the result names. All of it is bounded
+  (3,000 characters of memory, the pins and results in what the think budget leaves); when the
+  log outgrows its share its oldest half is folded into a digest by one model call (the only
+  "summarize" left). **There is no fixed number of steps**: a turn goes on while it advances,
+  until its model calls or minutes are spent (40 steps is a backstop); after three steps that
+  only look the next must change or run something or say `BLOCKED:`, and five steps in a row
+  that change no file and run nothing new end the turn with what it has. A `RUN` sees the
+  environment the harness's shell tool gives a command (the login shell plus the rc file,
+  captured once, then a non-login shell), not a bare `zsh -lc`.
+  *What it is for:* every request stays small however long the job runs, and nothing depends on
+  the model calling tools, so it can drive a chat model that only answers in prose. That is
+  all it has over Experimental so far: in the second benchmark round (Luna, ten tasks) it
+  finished 4 against Experimental's 8, at 2.7 times the calls, and nothing measured yet shows it
+  ahead on any task. The redesign above cuts its calls to about a third (offline: 8 → 5 for a
+  three-step job, 38 → 15 for a twelve-step one; a small real job: 12 → 4); whether that turns
+  into finished tasks is for the next round to show.
 
 Both carry **the request word for word** (`request.ts`): every worker brief and every think
 prompt quotes the person's own text (whole when it fits; otherwise the pieces a task needs, which
@@ -572,29 +606,45 @@ the planner names by number, with the gaps marked and the path of a temp file th
 it), together with a "must match exactly" list that code copies out of the request: paths, file
 names, quoted strings, flags, calls, numbers with their units. No model restates them on the way.
 
-Both end a turn that changed something with **a finish check**: by code, every file the request
-names as output exists under exactly that name and place (a file of nearly that name is reported
-as a near miss), nothing was written outside the folder to a path the request does not name, and
-the last recorded check did not fail; then one plain call, a fresh reader given the request and
-what was recorded (files with their first lines, commands with how they ended), answers per
-requirement `MET` / `NOT SHOWN` / `VIOLATED` with the cheapest check for what is not shown. What
-is open becomes one more task (Experimental; written by code, not replanned) or at most two more
-steps (Hyperexperimental), and the reply states first what code found and then what stayed not
-verified. The briefs and the think prompt carry three rules of checking: run the result the way
-the request says it will be used, failure cases included; copy an input before a tool that may
-change it opens it; hold the result to every size, count or shape the request states.
+Both end a turn that changed something with **a finish check** (`finish.ts`). By code, always:
+every file the request names as output exists under exactly that name and place (a file of
+nearly that name is reported as a near miss), nothing was written outside the folder to a path
+the request does not name, and the last recorded check (a command that was more than a look)
+did not fail. A reviewer (one plain call) is asked only when it can add something: the job was
+split among workers, the work itself names something as not checked, or no recorded command ran
+the result. A job one worker did whole, ran, and reports nothing unchecked about gets none. The
+reviewer is given the evidence (the files with excerpts, every command with its exit code and
+the end of its output, what code settled) and names at most three things the evidence does not
+show, each with one command that settles it; a placeholder in an example is not a requirement.
+Those commands are run by code under the thread's sandbox and approval preset (one that would
+delete, install or write outside the folder is not run), so a check that passes costs no model
+call. Only a check that fails, or what code found, buys a fix: one bounded task (Experimental;
+written by code from the failing command and its output, not replanned) or up to four more
+steps (Hyperexperimental), after which the failing commands are run again by code. With too
+little budget left no fix is started. The reply states first what code found, then which checks
+passed, which failed and which could not be run ("not verified"). The briefs and the think
+prompt carry three rules of checking: run the result the way the request says it will be used,
+each failure case it names for real (an interrupt as a real SIGINT while work is queued), with
+test inputs that vary what the request leaves open; copy an input before a tool that may change
+it opens it; hold the result to every size, count or shape the request states. A worker is also
+told to stay in its folder: not to search the machine for tools, to try what is there, and to
+report `cannot execute: <tool> missing` rather than hunt.
 
-Loop guards are `Caps` in `backend.ts` (tasks, tries per task, plan revisions, steps, model calls
-and minutes per turn, requests and minutes per worker); one that stops the work ends the turn with
-a plain message. Experimental spends by what the turn has left (a reserve is kept for the finish
-check): a worker gets no more than is left, a revision is made only when it and one more task
-still fit, and otherwise the turn stops with what it has and says what is not done. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
+Loop guards are `Caps` in `backend.ts` (tasks, tries per task, plan revisions, hand-overs, model
+calls and minutes per turn, requests, minutes and context per worker; steps without progress and
+look-only steps for Hyperexperimental); one that stops the work ends the turn with a plain
+message and where things stand. Experimental spends by what the turn has left (a reserve is kept
+for the finish check): a worker gets no more than is left, a revision is made only when it and
+one more task still fit, and otherwise the turn stops with what it has and says what is not
+done. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
 retried inside the turn after 5, 20, 60 and 120 s (`PROVENANCE_ORC_RETRY_S`), with a status line
 in the thread; a worker whose own request failed is run again on the same schedule; interrupt ends
 a wait at once. Only then does the turn fail with the router's message, and what was done stays
-in the notes / summary for "continue". Guards read the monotonic clock (`clock.ts`).
-`npm run check:orchestrator` checks all of it against
-a stand-in router and app-server; `node scripts/orchestrator-real-check.ts sandbox` runs the
+in the notes / memory for "continue". Guards read the monotonic clock (`clock.ts`).
+`npm run check:orchestrator` checks all of it against a stand-in router and app-server, long
+jobs included (a twelve-step Hyperexperimental job with long outputs and a worker whose context
+fills up three times: the largest prompt of every role and the largest request of every worker
+stay within budget for the whole run); `node scripts/orchestrator-real-check.ts sandbox` runs the
 execute step against the real binary's sandbox (no model), and `… experimental | hyperexperimental
 | stock [model]` one small real job each (they spend the free allowance).
 

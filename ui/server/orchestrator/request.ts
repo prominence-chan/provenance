@@ -16,9 +16,9 @@
 //     is, a near miss), and nothing was written to a path outside the folder that the request did
 //     not name (nearMiss, strayPaths).
 //
-// The reviewer's reply (one plain call at the end of a turn that changed something; prompts.ts
-// reviewPrompt) is read here too: per requirement MET / NOT SHOWN / VIOLATED, and the cheapest
-// check that would settle what is not shown (parseReview).
+// The reviewer's reply (one plain call at the end of some turns; prompts.ts reviewPrompt, finish.ts)
+// is read here too: at most three things the evidence does not show, each with the one command
+// that settles it (parseChecks).
 
 import path from "node:path";
 
@@ -382,63 +382,84 @@ export function strayPaths(
 
 // ---- the reviewer's reply ---------------------------------------------------------------------------
 
-export interface ReviewItem {
-  requirement: string;
-  verdict: "met" | "not-shown" | "violated";
-  /** The evidence (met), what is wrong (violated), or the check that would settle it (not shown). */
-  note: string;
+export interface ParsedChecks {
+  /** At most `max` things the evidence does not show, each with the one command that settles it. */
+  checks: { requirement: string; command: string }[];
+  /** The reviewer said the evidence shows everything that matters. */
+  allShown: boolean;
 }
-
-export interface Review {
-  items: ReviewItem[];
-  /** Items that are not met, in the reviewer's order. */
-  open: ReviewItem[];
-}
-
-const VERDICT_RE =
-  /\b(NOT[ _-]?SHOWN|NOT[ _-]?VERIFIED|UNVERIFIED|UNKNOWN|UNCLEAR|VIOLATED|NOT[ _-]?MET|UNMET|FAILED|FAILS|MISSING|MET|SATISFIED|PASS(?:ED|ES)?|OK)\b/;
 
 /**
- * "R1: <requirement> | MET | <evidence>" lines in whatever shape they came back: numbered or
- * bulleted, with | or - or : between the parts, the verdict in any case, the check on the same
- * line ("CHECK: …") or the next, or as the rows of a table. Lines without a verdict are ignored.
- * At most 12 items.
+ * The reviewer's reply (prompts.ts reviewPrompt): "CHECK 1: <requirement>" followed by its
+ * command in a code block, in whatever shape it came back: numbered or bulleted, bold, "R1:" for
+ * "CHECK 1:", the command on a "RUN:" line or inline in backticks instead of a block, the rows of
+ * a table. A check without a command is not a check (nothing could be run for it). "ALL SHOWN"
+ * (or "nothing to check") with no checks means there is nothing to run.
  */
-export function parseReview(text: string): Review {
-  const items: ReviewItem[] = [];
+export function parseChecks(text: string, max = 3): ParsedChecks {
   const lines = text.replace(/\r/g, "").split("\n");
-  for (const raw of lines) {
-    const line = raw
-      // (a chat page can hand the lines back as a table: "| R1: … | MET | … |" under "| --- |")
+  const checks: { requirement: string; command: string }[] = [];
+  let cur: { requirement: string; command: string } | null = null;
+  const done = () => {
+    if (cur && cur.command.trim() && cur.requirement.trim()) checks.push(cur);
+    cur = null;
+  };
+  const clean = (l: string) =>
+    l
       .replace(/^\s*\|\s*/, "")
       .replace(/\s*\|\s*$/, "")
       .replace(/^\s*(?:[-*•>]+\s+|#{1,6}\s*)*/, "")
       .replace(/\*\*/g, "")
       .trim();
-    if (!line) continue;
-    const cont = /^(?:cheapest\s+)?check\s*[:\-–—]\s*(.+)$/i.exec(line);
-    if (cont && items.length && items.at(-1)!.verdict !== "met") {
-      const cur = items.at(-1)!;
-      if (!/check\s*:/i.test(cur.note)) cur.note = `${cur.note} CHECK: ${cont[1].trim()}`.trim();
+  for (let i = 0; i < lines.length; i++) {
+    const fence = /^\s*(`{3,}|~{3,})/.exec(lines[i]);
+    if (fence) {
+      const body: string[] = [];
+      let k = i + 1;
+      for (; k < lines.length; k++) {
+        if (lines[k].trim().startsWith(fence[1]) && lines[k].trim().replace(/[`~]/g, "") === "")
+          break;
+        body.push(lines[k]);
+      }
+      // (the first block under a check is its command; a console transcript's "$ " comes off)
+      if (cur && !cur.command.trim())
+        cur.command = body
+          .map((l) => l.replace(/^\s*\$\s+/, ""))
+          .join("\n")
+          .replace(/^\n+|\s+$/g, "");
+      i = k;
       continue;
     }
-    if (!/^(?:R|req(?:uirement)?\s*)?#?\d+\s*[:.)\-–—|]/i.test(line)) continue;
-    const body = line.replace(/^(?:R|req(?:uirement)?\s*)?#?\d+\s*[:.)\-–—|]+\s*/i, "");
-    // The verdict is looked for in capitals first (a requirement's own words may say "missing").
-    const m = VERDICT_RE.exec(body) ?? new RegExp(VERDICT_RE.source, "i").exec(body);
-    if (!m) continue;
-    const word = m[1].toUpperCase().replace(/[ _-]/g, "");
-    const verdict: ReviewItem["verdict"] = /^(MET|SATISFIED|PASS|PASSED|PASSES|OK)$/.test(word)
-      ? "met"
-      : /^(VIOLATED|NOTMET|UNMET|FAILED|FAILS|MISSING)$/.test(word)
-        ? "violated"
-        : "not-shown";
-    const clean = (s: string) => s.replace(/^[\s|:\-–—]+|[\s|:\-–—]+$/g, "");
-    const requirement = clean(body.slice(0, m.index));
-    const note = clean(body.slice(m.index + m[0].length));
-    if (!requirement && !note) continue;
-    items.push({ requirement: requirement || note, verdict, note: requirement ? note : "" });
-    if (items.length >= 12) break;
+    const line = clean(lines[i]);
+    if (!line) continue;
+    const head = /^(?:(?:check|requirement|req|r)\s*#?\d+|\d+)\s*[:.)\-–—|]+\s*(.*)$/i.exec(line);
+    if (head) {
+      done();
+      if (checks.length >= max) break;
+      let requirement = head[1].trim();
+      let command = "";
+      // "… | RUN: `cmd`" or "… — CHECK: `cmd`" on the same line
+      const inline = /\s*(?:\||—|–|-)?\s*\b(?:run|command|cmd|check)\s*:\s*(.+)$/i.exec(
+        requirement,
+      );
+      if (inline && inline.index > 0) {
+        command = inline[1].trim().replace(/^`+|`+$/g, "");
+        requirement = requirement.slice(0, inline.index).trim();
+      }
+      cur = { requirement: requirement.replace(/[\s|:\-–—]+$/g, ""), command };
+      continue;
+    }
+    const runs = /^(?:run|command|cmd)\s*:\s*(.*)$/i.exec(line);
+    if (runs && cur && !cur.command.trim()) {
+      cur.command = runs[1].trim().replace(/^`+|`+$/g, "");
+      continue;
+    }
+    // a wrapped requirement line (before its command)
+    if (cur && !cur.command.trim() && cur.requirement.length + line.length < 400)
+      cur.requirement = `${cur.requirement} ${line}`.trim();
   }
-  return { items, open: items.filter((i) => i.verdict !== "met") };
+  done();
+  const allShown =
+    !checks.length && /\ball\s+(?:is\s+)?shown\b|\bnothing (?:more )?to check\b/i.test(text);
+  return { checks: checks.slice(0, max), allShown };
 }

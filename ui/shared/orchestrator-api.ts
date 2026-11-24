@@ -3,12 +3,20 @@
 //
 //   provenance         the Codex harness as it is (provenance app-server): one thread, one growing
 //                      history, pruned and compacted by the router. The default.
-//   experimental       a custom orchestrator on the same harness: the task is split into small
-//                      tasks, each run by a worker in a fresh thread with a short brief, so no
-//                      single chat has to hold the whole job.
-//   hyperexperimental  the extreme version: every step is three fresh chats (say what to do next
-//                      in plain words -> turn that into harness actions -> run them), and the only
-//                      thing carried from step to step is a summary.
+//   experimental       a custom orchestrator on the same harness: a worker in a fresh thread
+//                      does the job from a brief that quotes the request word for word (several
+//                      workers, one after the other, when the job is large or a worker's context
+//                      fills up), notes kept by code carry what was done, and the result is
+//                      checked before the answer. In two benchmark rounds on a free web model it
+//                      is the one that beat the stock harness (8 of 10 tasks against 6).
+//   hyperexperimental  no tool calls at all: every step is one fresh plain-text chat that says
+//                      what to do next; code runs it and keeps the memory (a log of the steps,
+//                      the files being worked on, long outputs saved to disk). Every request
+//                      stays small however long the job runs, and it works with a model that
+//                      cannot drive the harness's tools. It is slower, and on every benchmark so
+//                      far it finished fewer tasks than Experimental (4 of 10 against 8): pick it
+//                      only when Experimental's workers cannot get the model to call tools, or to
+//                      try it.
 //
 // The page stores the choice in settings (`orchestrator`) and sends threads of the last two to the
 // orchestrator backend (WebSocket /rpc/orchestrator), which speaks the same JSON-RPC protocol as
@@ -18,11 +26,15 @@ export type Orchestrator = "provenance" | "experimental" | "hyperexperimental";
 
 export const ORCHESTRATORS: { id: Orchestrator; name: string; blurb: string }[] = [
   { id: "provenance", name: "Provenance", blurb: "One thread, the standard harness" },
-  { id: "experimental", name: "Experimental", blurb: "Splits the task into small tasks for fresh workers" },
+  {
+    id: "experimental",
+    name: "Experimental",
+    blurb: "A fresh worker per job, checked at the end",
+  },
   {
     id: "hyperexperimental",
     name: "Hyperexperimental",
-    blurb: "Every step in new chats, carrying only a summary",
+    blurb: "A plain chat per step, no tool calls; unproven",
   },
 ];
 
