@@ -11,7 +11,7 @@ finished runs: outside every sandbox-writable root), BENCH_MODEL (the model name
 a tier, or a concrete id of the router's catalog such as chatgpt-web/luna, which the router serves
 strictly), BENCH_SERVED_BY (the one catalog id that may serve: every ledger entry of a run is checked
 against it and a run with any other is kept as invalid and awaits review; the call budget then counts
-that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS, BENCH_REQUIRE_AC (1: start no run while the Mac is on battery). A run whose turn failed on the router with almost nothing spent is retried
+that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS, BENCH_KEEP (folder under the hidden one for this round's finished runs), BENCH_REQUIRE_AC (1: start no run while the Mac is on battery). A run whose turn failed on the router with almost nothing spent is retried
 after a pause (3 times), then once on pool/<tier>.
 """
 import collections, json, os, shutil, signal, subprocess, sys, time, urllib.request
@@ -22,6 +22,7 @@ TASKS_PY = os.path.join(BENCH, "harness", "tasks.py")
 RUNS = os.path.join(BENCH, "runs")  # only the run in progress; finished runs move to HIDDEN/runs
 HIDDEN = os.environ.get("BENCH_HIDDEN") or "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
 os.environ["BENCH_HIDDEN"] = HIDDEN  # tasks.py reads the same one
+KEEP = os.environ.get("BENCH_KEEP") or "runs"  # the folder under HIDDEN that finished runs move to (one per round)
 LEDGER = os.path.expanduser("~/.tierlm/usage-ledger.jsonl")
 TIER = os.environ.get("BENCH_MODEL") or "solstice"
 SERVED_BY = os.environ.get("BENCH_SERVED_BY") or None
@@ -208,7 +209,7 @@ def one(mode, task, model, attempt):
     rec = {"task": task, "mode": mode, "model": model, "attempt": attempt, "run_dir": run_dir, "passed": g["passed"],
            "grade_summary": g["summary"], **{k: res.get(k) for k in (
                "status", "timedOut", "error", "guard", "modelCalls", "roles", "workers", "workerCalls",
-               "workerMaxInputTokens", "steps", "retries", "threadId", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
+               "workerMaxInputTokens", "steps", "retries", "finish", "threadId", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
                "ledger_window_all", "ledger_window_new_keys", "ledger_new_key_calls", "wall_seconds",
                "ledgerKeys", "ledger_calls", "ledger_served", "ledger_ctx", "ledger_pruned", "ledger_pruned_saved",
                "ledger_max_in", "ledger_sum_in", "ledger_sum_out", "invalid")}}
@@ -219,7 +220,8 @@ def one(mode, task, model, attempt):
                    (res.get("modelCalls") or 0) or (res.get("ledger_new_key_calls") or 0))
     save_budget(b)
     # Finished: out of the agent's reach (its tests copy, grade log and transcript included).
-    kept = os.path.join(HIDDEN, "runs", name)
+    kept = os.path.join(HIDDEN, KEEP, name)
+    os.makedirs(os.path.join(HIDDEN, KEEP), exist_ok=True)
     if os.path.exists(kept):
         shutil.rmtree(kept)
     shutil.move(run_dir, kept)
