@@ -674,7 +674,8 @@ select {
   opacity: 1;
 }
 @media (max-height: 560px) {
-  .hero-sun {
+  .hero-sun,
+  .hero-nebula {
     display: none;
   }
 }

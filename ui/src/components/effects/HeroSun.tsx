@@ -262,13 +262,14 @@ export function nebulaOf(seed: number) {
     thick: h(6),
     off: [h(7) * 40, h(8) * 40],
     // irregularity: lopsided towards an angle, a broken shell, streamers, an off-centre cavity,
-    // unequal lobes, jets
+    // unequal lobes, jets; each kept small enough that the star stays near the middle (a sweep
+    // of 72 seeds put the light's centroid up to 0.47 radii off the star before)
     lopA: h(9) * TAU,
-    lop: 0.1 + 0.32 * h(10),
-    tear: style === 4 ? 0.85 + 0.15 * h(11) : 0.15 + 0.7 * h(11),
+    lop: 0.06 + 0.14 * h(10),
+    tear: style === 4 ? 0.6 + 0.2 * h(11) : 0.15 + 0.45 * h(11),
     streak: 0.2 + 0.8 * h(12),
-    shift: [(h(13) - 0.5) * 0.3, (h(14) - 0.5) * 0.3],
-    asym: 0.6 + 0.4 * h(15),
+    shift: [(h(13) - 0.5) * 0.1, (h(14) - 0.5) * 0.1],
+    asym: 0.78 + 0.22 * h(15),
     jets: style !== 4 && h(16) > 0.6 ? 1 : 0,
   };
 }
@@ -708,10 +709,11 @@ void nebula(vec2 p, out vec3 em, out float dens) {
   float rr = rr0 / (lop * (1.0 + lump));       // in the outline's own units: 1 = the rim
   // the filament network: ridged noise on the warped plane, combed along the flow
   float fil = ridged(wp * 4.0 + off * 1.7 + wv * 1.6 + shim);
-  // patchy density, and a shell broken open in places
-  float clump = 0.45 + 1.1 * smoothstep(-0.3, 0.3, gnoise(np * 1.2 + off + 3.0 + shim * 0.5));
+  // Patchy density, and a shell broken open in places: patches and gaps smaller than the
+  // nebula, several round it, so they make it irregular without moving its middle off the star.
+  float clump = 0.5 + 1.0 * smoothstep(-0.3, 0.3, gnoise(np * 2.4 + off + 3.0 + shim * 0.5));
   // (angle-only terms fade out towards the middle, where every direction meets)
-  float brk = mix(1.0, smoothstep(-0.15, 0.3, gnoise(dir * 2.3 + off + 11.0)), uNebQ.z * smoothstep(0.1, 0.55, rr0));
+  float brk = mix(1.0, smoothstep(-0.15, 0.3, gnoise(dir * 4.2 + off + 11.0)), uNebQ.z * smoothstep(0.1, 0.55, rr0));
   float lo = 0.0, hi = 0.0, knot = 0.0, haze = 0.0;
   int style = int(uNeb.z + 0.5);
   if (style == 0) {
@@ -757,7 +759,7 @@ void nebula(vec2 p, out vec3 em, out float dens) {
     knot = lo * smoothstep(0.55, 0.9, fil) * 0.8;
   } else if (style == 4) {
     // VEIL: what is left of a big old shell, broken arcs and long sweeping filaments
-    float sweep = pow(ridged(wp * 2.6 + off + wv * 2.4 + shim), 4.0);
+    float sweep = pow(ridged(wp * 3.4 + off + wv * 2.4 + shim), 4.0);
     lo = shell(rr, 0.8, 0.95) * brk * (0.25 + 2.4 * sweep) + sweep * smoothstep(1.0, 0.5, rr) * 0.3;
     hi = shell(rr, 0.72, 0.9) * pow(fil, 5.0) * 1.2 * brk;
   } else {
@@ -1100,9 +1102,12 @@ function surface(canvas: HTMLCanvasElement, layer: 0 | 1) {
   gl.blendFunc(gl.ONE, gl.ONE);
   return {
     size(w: number, h: number) {
-      canvas.width = Math.max(1, Math.round(w));
-      canvas.height = Math.max(1, Math.round(h));
-      gl.viewport(0, 0, canvas.width, canvas.height);
+      const cw = Math.max(1, Math.round(w));
+      const ch = Math.max(1, Math.round(h));
+      if (cw === canvas.width && ch === canvas.height) return;
+      canvas.width = cw;
+      canvas.height = ch;
+      gl.viewport(0, 0, cw, ch);
     },
     draw(frames: [Frame, number][], lay?: Layout) {
       gl.clearColor(0, 0, 0, 0);
@@ -1201,12 +1206,17 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
     const neb = nebCanvas ? surface(nebCanvas, 1) : null;
     const unit = size / 2; // CSS px per sun-canvas unit
     let lay: Layout = { view: [1, 1, 0, 0], fade: [9, 9, 9, 9], text: [0, 0, 0, 0], nebR: 1 };
+    // Where the sun is in the hero, in the sun canvas's units. Measured on any resize of the
+    // hero, the sun or the heading (a web font arriving, the heading wrapping) and again before
+    // every nebula draw, so the nebula is always centred on the star. With the sun hidden
+    // (short windows) there is nothing to centre on: the nebula's canvas hides too (CSS).
+    const heading = canvas.parentElement?.querySelector("h1") ?? null;
     const measure = () => {
       if (!nebCanvas || !neb) return;
       const hr = nebCanvas.getBoundingClientRect();
       const sr = canvas.getBoundingClientRect();
-      const tr = canvas.parentElement?.querySelector("h1")?.getBoundingClientRect();
-      if (hr.width < 1 || hr.height < 1) return;
+      const tr = heading?.getBoundingClientRect();
+      if (hr.width < 1 || hr.height < 1 || sr.width < 1) return;
       neb.size(hr.width * NEB_RES, hr.height * NEB_RES);
       const sx = sr.left + sr.width / 2;
       const sy = sr.top + sr.height / 2;
@@ -1238,6 +1248,24 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
     });
     if (nebCanvas) ro.observe(nebCanvas);
     ro.observe(canvas);
+    if (heading) ro.observe(heading);
+    // Dev only: where the nebula's canvas thinks the sun is against where it is (CSS px).
+    if (import.meta.env.DEV && nebCanvas)
+      (window as unknown as { __provenanceSunLayout: () => unknown }).__provenanceSunLayout =
+        () => {
+          const hr = nebCanvas.getBoundingClientRect();
+          const sr = canvas.getBoundingClientRect();
+          return {
+            stored: [lay.view[2] * unit, -lay.view[3] * unit],
+            live: [
+              sr.left + sr.width / 2 - (hr.left + hr.width / 2),
+              sr.top + sr.height / 2 - (hr.top + hr.height / 2),
+            ],
+            sunShown: sr.width > 0,
+            nebShown: getComputedStyle(nebCanvas).display !== "none",
+            canvas: [nebCanvas.width, nebCanvas.height, hr.width, hr.height],
+          };
+        };
 
     const speed = import.meta.env.DEV
       ? Number(new URLSearchParams(location.search).get("fxspeed")) || 1
@@ -1259,6 +1287,7 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
       sun.draw(frames);
       if (!neb) return;
       const want = frames.some(([f]) => hasNebula(f));
+      if (want && (everyNeb || !nebShown)) measure();
       if (want ? everyNeb || !nebShown : nebShown) neb.draw(want ? frames : [], lay);
       nebShown = want;
     };
@@ -1382,6 +1411,13 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
         };
         steppers.set(stepper, tiered);
         cleanups.push(() => steppers.delete(stepper));
+        // (and __provenanceSunSeed(n) shows seed n's remnant in place, for sweeping seeds)
+        if (tiered)
+          (window as unknown as { __provenanceSunSeed: (n: number) => void }).__provenanceSunSeed =
+            (n) => {
+              s.seed = lastSeed = n;
+              frame();
+            };
       } else loop();
       cleanups.push(() => {
         stopped = true;
