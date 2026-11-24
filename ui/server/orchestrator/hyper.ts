@@ -90,10 +90,12 @@ import { clip, clipMiddle, ORIGINAL_LIMIT } from "./notes.ts";
 import {
   describeAction,
   isContinue,
+  balanceFences,
   liftCommands,
   liftFiles,
   parseActions,
   parseThought,
+  tidyFences,
   restoreCommand,
   restorePath,
   type Action,
@@ -228,22 +230,24 @@ export async function runHyper(run: Run): Promise<void> {
     const stepsLeft = followSteps
       ? Math.min(caps.steps - step, FOLLOW_UP_STEPS - followSteps)
       : caps.steps - step;
-    const thought = parseThought(
-      await run.model(
-        "think",
-        thinkPrompt({
-          goal,
-          exact: job.exact,
-          requestFile: wholeAt,
-          before,
-          folder: folderBrief(run.cwd),
-          summary,
-          results,
-          step,
-          stepsLeft,
-        }),
-      ),
-    );
+    const thinking = thinkPrompt({
+      goal,
+      exact: job.exact,
+      requestFile: wholeAt,
+      before,
+      folder: folderBrief(run.cwd),
+      summary,
+      results,
+      step,
+      stepsLeft,
+    });
+    // The reply's fences are put in order before anything is read out of it, and a line that
+    // only repeats the end of our own prompt is not the model's (parse.ts tidyFences).
+    const promptTail = thinking.input
+      .split("\n")
+      .filter((l) => l.trim())
+      .slice(-2);
+    const thought = parseThought(tidyFences(await run.model("think", thinking), promptTail));
     if (thought.final !== null) {
       // The finish check, once per turn that changed something: what code can tell, then one
       // fresh reader of the request against what was recorded. What is open goes back to the
@@ -341,6 +345,8 @@ export async function runHyper(run: Run): Promise<void> {
     // c. execute, up to the first refused action
     const lines: string[] = [];
     for (const problem of parsed.problems) lines.push(`(not understood) ${problem}`);
+    for (const f of lifted.flagged) lines.push(`(not written) ${f}`);
+    for (const c of cmds.skipped) lines.push(`(not run) ${c}`);
     const stopAt = parsed.rejected.length ? parsed.rejected[0].at : parsed.actions.length;
     const todo = parsed.actions.slice(0, stopAt);
     const skippedActions = parsed.actions.slice(stopAt);
@@ -411,7 +417,7 @@ export async function runHyper(run: Run): Promise<void> {
       lines.unshift(
         `(recorded) The last ${looked} steps only looked; nothing was written or run. What a step reads is shown once, here below, and will not be shown again: write the files or make the change now from what is here, rather than reading again.`,
       );
-    results = clipMiddle(lines.join("\n\n"), RESULTS_LIMIT);
+    results = balanceFences(clipMiddle(lines.join("\n\n"), RESULTS_LIMIT));
     // d. summarize
     let next: string;
     try {
@@ -430,7 +436,8 @@ export async function runHyper(run: Run): Promise<void> {
       run.save();
       throw e;
     }
-    summary = clipMiddle(next.trim(), SUMMARY_LIMIT);
+    // (a summary never hands an open fence on: the next Think would write inside it)
+    summary = balanceFences(clipMiddle(next.trim(), SUMMARY_LIMIT));
     run.thread.summary = summary;
     run.save();
   }

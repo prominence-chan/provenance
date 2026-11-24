@@ -13,3 +13,15 @@ d. OPEN: text in curly braces is lost from plain (unfenced) Luna replies on the 
 
 Not a software fault: from about 08:20 the Mac was asleep on battery (11-12 %), dark-waking ~20 s every ~17 min. Every Hyperexperimental attempt after sqlite-db-truncate is invalid for that reason and released for rerun; none could be rerun before the 8-hour limit.
 Resume: plug the Mac in, then `sh luna/start.sh` from a copy under scratchpad/bench-luna/harness (paths inside), or rerun driver.py with the same environment; released runs are picked up first.
+
+Later the same day (18:21 - 18:53, on AC power):
+4. [driver] 024b5abf: BENCH_REQUIRE_AC=1 starts no run while the Mac is on battery.
+e. Brace loss worked around in the bridge (a `raw` fence the bridge removes): of 49 translate replies after it, 12 carried braces intact, none arrived fenced, one f-string still lost its {i} {v} (model-extraction try1).
+f. OPEN: text between "<" and ">" is dropped from unfenced plain replies and the reply ends at the next "<" (modernize try2, translate at 18:34:15); a think reply arrived with \n inside quoted strings turned into line breaks.
+g. 18:52: all three ChatGPT accounts reported signed out within three seconds, 280 s after a router start; the driver stopped as instructed. Hyperexperimental: 6 of 10 tasks run (3 pass); polyglot-c-py, sparql-university, constraints-scheduling, large-scale-text-editing not run.
+
+Second round (v2), 2026-11-23 22:32 - 2026-11-24 02:31, integration merged (c37075c7):
+5. [driver] 1d6e2d7a: no run starts on battery below BENCH_MIN_BATTERY; a run the machine slept through (wall clock against monotonic clock, more than 60 s) is invalid-sleep and run again by itself.
+6. [orchestrator] 0bbb4f75: Hyperexperimental puts a reply's fences in order before lifting (empty block dropped, prompt-tail echo removed, open command block closed at the end, summary and cut results balanced); an unmarked block a sentence assigns to one named file is that file's body; an unmarked block runs only when it reads as shell; a code file ending in a shell command is flagged, not written; `run.py` is not the word run. Found after a bridge build left a stray trailing fence on most think replies.
+7. [orchestrator] 62b43f30: the finish check reads a review that came back as a table; four reviews had been read as "no requirements" and the check silently did nothing.
+Bridge (reported, fixed by the coordinator): raw-fence removal left stray fences (22:46); a non-answer not nudged ("this chat does not expose the `exec_command` tool …"). Open: one worker request after a nudged turn got no answer for 5 minutes (01:11), cause unknown.

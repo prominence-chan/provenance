@@ -11,7 +11,9 @@ finished runs: outside every sandbox-writable root), BENCH_MODEL (the model name
 a tier, or a concrete id of the router's catalog such as chatgpt-web/luna, which the router serves
 strictly), BENCH_SERVED_BY (the one catalog id that may serve: every ledger entry of a run is checked
 against it and a run with any other is kept as invalid and awaits review; the call budget then counts
-that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS, BENCH_REQUIRE_AC (1: start no run while the Mac is on battery). A run whose turn failed on the router with almost nothing spent is retried
+that model's ledger entries), BENCH_CALL_BUDGET, BENCH_HOURS, BENCH_KEEP (folder under the hidden one for this round's finished runs), BENCH_REQUIRE_AC (1: start no run while the Mac is on battery), BENCH_MIN_BATTERY (percent: start no run on
+battery below it). A run during which the machine slept more than a minute (wall clock against the monotonic
+clock) is kept as invalid-sleep and run again. A run whose turn failed on the router with almost nothing spent is retried
 after a pause (3 times), then once on pool/<tier>.
 """
 import collections, json, os, shutil, signal, subprocess, sys, time, urllib.request
@@ -22,6 +24,7 @@ TASKS_PY = os.path.join(BENCH, "harness", "tasks.py")
 RUNS = os.path.join(BENCH, "runs")  # only the run in progress; finished runs move to HIDDEN/runs
 HIDDEN = os.environ.get("BENCH_HIDDEN") or "/Users/yufan/Desktop/Development/provenance-wt-bench/.bench-hidden"
 os.environ["BENCH_HIDDEN"] = HIDDEN  # tasks.py reads the same one
+KEEP = os.environ.get("BENCH_KEEP") or "runs"  # the folder under HIDDEN that finished runs move to (one per round)
 LEDGER = os.path.expanduser("~/.tierlm/usage-ledger.jsonl")
 TIER = os.environ.get("BENCH_MODEL") or "solstice"
 SERVED_BY = os.environ.get("BENCH_SERVED_BY") or None
@@ -93,6 +96,18 @@ def web_gate():
     return "unknown", 60, f"no web provider has {SERVED_BY}"
 
 
+def battery_percent():
+    """The battery's charge, or None on AC power / when it cannot be read."""
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return None
+    if "AC Power" in out:
+        return None
+    m = __import__("re").search(r"(\d+)%", out)
+    return int(m.group(1)) if m else None
+
+
 def on_ac():
     try:
         return "AC Power" in subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=20).stdout
@@ -155,6 +170,7 @@ def one(mode, task, model, attempt):
     # The tests and reference solutions are unreadable while the agent works.
     os.chmod(HIDDEN, 0)
     t0 = time.time()
+    mono0 = time.monotonic()  # stands still while the Mac sleeps: the difference to the wall clock is the sleep
     try:
         p = subprocess.Popen(["node", "scripts/orchestrator-bench.ts", mode, "--cwd", cwd, "--job-file",
                               os.path.join(run_dir, "job.txt"), "--out", out, "--model", model, "--limit-min",
@@ -173,6 +189,7 @@ def one(mode, task, model, attempt):
     finally:
         os.chmod(HIDDEN, 0o755)
     t1 = time.time()
+    slept = round((t1 - t0) - (time.monotonic() - mono0), 1)
     # Anything the run left behind (a worker's command, a server the agent started).
     subprocess.run(["pkill", "-f", run_dir], capture_output=True)
     rp = os.path.join(out, "result.json")
@@ -197,7 +214,10 @@ def one(mode, task, model, attempt):
     res["ledger_sum_in"] = sum(r.get("in") or 0 for r in mine)
     res["ledger_sum_out"] = sum(r.get("out") or 0 for r in mine)
     res["invalid"] = None
-    if SERVED_BY:
+    res["slept_seconds"] = slept
+    if slept > 60:
+        res["invalid"] = f"invalid-sleep: the machine slept {slept:.0f} s during the run"
+    if SERVED_BY and not res["invalid"]:
         other = {m: n for m, n in res["ledger_served"].items() if m not in (SERVED_BY, "(nothing)")}
         hdr = {m: n for m, n in (res.get("servedBy") or {}).items() if m != SERVED_BY}
         if other or hdr:
@@ -208,10 +228,10 @@ def one(mode, task, model, attempt):
     rec = {"task": task, "mode": mode, "model": model, "attempt": attempt, "run_dir": run_dir, "passed": g["passed"],
            "grade_summary": g["summary"], **{k: res.get(k) for k in (
                "status", "timedOut", "error", "guard", "modelCalls", "roles", "workers", "workerCalls",
-               "workerMaxInputTokens", "steps", "retries", "threadId", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
+               "workerMaxInputTokens", "steps", "retries", "finish", "threadId", "maxInputTokens", "totalInputTokens", "servedBy", "approvalsDeclined",
                "ledger_window_all", "ledger_window_new_keys", "ledger_new_key_calls", "wall_seconds",
                "ledgerKeys", "ledger_calls", "ledger_served", "ledger_ctx", "ledger_pruned", "ledger_pruned_saved",
-               "ledger_max_in", "ledger_sum_in", "ledger_sum_out", "invalid")}}
+               "ledger_max_in", "ledger_sum_in", "ledger_sum_out", "invalid", "slept_seconds")}}
     # A timeout is a failure whatever the folder holds? No: the official harness grades what is there
     # after an agent timeout too; we do the same and flag it.
     b = budget()
@@ -219,7 +239,8 @@ def one(mode, task, model, attempt):
                    (res.get("modelCalls") or 0) or (res.get("ledger_new_key_calls") or 0))
     save_budget(b)
     # Finished: out of the agent's reach (its tests copy, grade log and transcript included).
-    kept = os.path.join(HIDDEN, "runs", name)
+    kept = os.path.join(HIDDEN, KEEP, name)
+    os.makedirs(os.path.join(HIDDEN, KEEP), exist_ok=True)
     if os.path.exists(kept):
         shutil.rmtree(kept)
     shutil.move(run_dir, kept)
@@ -289,6 +310,17 @@ def main():
                         return
                     log(f"WAIT 60s before {task} {mode}: on battery")
                     time.sleep(60)
+                # BENCH_MIN_BATTERY=<percent>: on battery below that, no run starts (checked each minute).
+                low = int(os.environ.get("BENCH_MIN_BATTERY") or 0)
+                while low:
+                    pct = battery_percent()
+                    if pct is None or pct >= low:
+                        break
+                    if os.path.exists(os.path.join(BENCH, "STOP")):
+                        log("STOP file: not starting more runs")
+                        return
+                    log(f"WAIT 60s before {task} {mode}: battery at {pct}% (below {low}%)")
+                    time.sleep(60)
                 # One web model must serve: wait while its accounts are blocked (at most 30 minutes a
                 # wait), stop when every account is signed out. Never another model.
                 waited = 0
@@ -327,6 +359,10 @@ def main():
                     rec["needs_review"] = True
                     log(f"NEEDS REVIEW {task} {mode}: status={rec.get('status')} err={(rec.get('error') or '')[:300]}")
                 open(rp, "a").write(json.dumps(rec) + "\n")
+                # A run the machine slept through says nothing: it is run again by itself (three times at most).
+                if str(rec.get("invalid") or "").startswith("invalid-sleep") and attempt < 3:
+                    open(rp, "a").write(json.dumps({"task": task, "mode": mode, "release": True,
+                                                    "why": "rerun: the machine slept during the run", "at": time.time()}) + "\n")
         if not ran:
             if not blocked:
                 log("all requested runs done")

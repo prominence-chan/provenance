@@ -1,0 +1,70 @@
+== stock
+sqlite-db-truncate             v1 PASS 5c 244s 2293t                 v2 PASS 4c 134s 2295t
+cancel-async-tasks             v1 FAIL 2c 120s 2324t                 v2 FAIL 2c 27s 2326t
+modernize-scientific-stack     v1 PASS 3c 215s 4853t                 v2 PASS 3c 50s 4849t
+db-wal-recovery                v1 FAIL 5c 216s 2384t                 v2 FAIL 14c 381s 12063t
+model-extraction-relu-logits   v1 FAIL 8c 543s 4240t                 v2 FAIL 2c 135s 2375t
+regex-log                      v1 PASS 2c 89s 2470t                  v2 PASS 2c 34s 2472t
+polyglot-c-py                  v1 PASS 4c 214s 2393t                 v2 PASS 4c 141s 2407t
+sparql-university              v1 FAIL 3c 115s 2613t                 v2 FAIL 4c 95s 2540t
+constraints-scheduling         v1 PASS 3c 108s 3023t                 v2 PASS 4c 130s 3030t
+large-scale-text-editing       v1 PASS 9c 185s 2656t                 v2 PASS 4c 136s 2661t
+   v1: pass 6/10 calls 44 wall 2049s ctx []
+   v2: pass 6/10 calls 43 wall 1264s ctx [{'restarted': 1}]
+== experimental
+sqlite-db-truncate             v1 PASS 15c 547s 4168c/2949t          v2 PASS 8c 203s 2710c/2849t
+cancel-async-tasks             v1 FAIL 24c 847s 4139c/2998t          v2 FAIL 9c 325s 2920c/3241t
+modernize-scientific-stack     v1 PASS 26c 840s 4905c/3829t          v2 PASS 9c 844s 4606c/7636t
+db-wal-recovery                v1 PASS 16c 565s 4377c/3789t          v2 PASS 10c 276s 3416c/3247t
+model-extraction-relu-logits   v1 FAIL 18c 815s 4351c/3079t          v2 PASS 13c 415s 3063c/3289t
+regex-log                      v1 PASS 21c 788s 5433c/3132t          v2 FAIL 8c 309s 3485c/3284t
+polyglot-c-py                  v1 PASS 28c 1500s 5591c/3740t         v2 PASS 6c 311s 3172c/3260t
+sparql-university              v1 FAIL 24c 1090s 6125c/2995t         v2 PASS 39c 1275s 7366c/10312t
+constraints-scheduling         v1 FAIL 14c 708s 5609c/3751t          v2 PASS 10c 345s 6152c/3289t
+large-scale-text-editing       v1 FAIL 26c 1336s 6487c/4615t         v2 PASS 16c 464s 4600c/8404t
+   v1: pass 5/10 calls 212 wall 9037s ctx []
+   v2: pass 8/10 calls 128 wall 4769s ctx [{'restarted': 1}]
+== hyperexperimental
+sqlite-db-truncate             v1 PASS 31c 646s 5214c                v2 PASS 27c 270s 7857c
+cancel-async-tasks             v1 FAIL 10c 91s 5152c                 v2 FAIL 15c 168s 7968c
+modernize-scientific-stack     v1 FAIL 42c 371s 8001c                v2 PASS 33c 349s 8001c
+db-wal-recovery                v1 PASS 25c 253s 7177c                v2 FAIL 42c 475s 7959c
+model-extraction-relu-logits   v1 FAIL 42c 477s 7905c                v2 FAIL 42c 536s 8001c
+regex-log                      v1 PASS 5c 287s 5066c                 v2 PASS 36c 383s 7957c
+polyglot-c-py                  v1 -                                  v2 FAIL 42c 456s 7388c
+sparql-university              v1 -                                  v2 FAIL 42c 497s 8001c
+constraints-scheduling         v1 -                                  v2 PASS 41c 511s 8001c
+large-scale-text-editing       v1 -                                  v2 FAIL 21c 313s 7757c
+   v1: pass 3/6 calls 155 wall 2125s ctx []
+   v2: pass 4/10 calls 341 wall 3958s ctx []
+== finish check (v2)
+hyper sqlite-db-truncate             PASS finish={'requirements': 8, 'open': 5, 'code': 1, 'followUps': 1} review calls 1 met 3 not-shown 3 violated 2 guard=None
+hyper cancel-async-tasks             FAIL finish={'requirements': 6, 'open': 5, 'code': 0, 'followUps': 2} review calls 1 met 1 not-shown 5 violated 0 guard=None
+hyper modernize-scientific-stack     PASS finish={'requirements': 10, 'open': 7, 'code': 1, 'followUps': 2} review calls 1 met 3 not-shown 6 violated 1 guard=None
+hyper db-wal-recovery                FAIL finish=None review calls 0 met 0 not-shown 0 violated 0 guard=Stopped after 14 steps, the limit for on
+hyper model-extraction-relu-logits   FAIL finish=None review calls 0 met 0 not-shown 0 violated 0 guard=Stopped after 14 steps, the limit for on
+hyper regex-log                      PASS finish={'requirements': 8, 'open': 1, 'code': 1, 'followUps': 1} review calls 1 met 7 not-shown 1 violated 0 guard=None
+hyper polyglot-c-py                  FAIL finish=None review calls 0 met 0 not-shown 0 violated 0 guard=Stopped after 14 steps, the limit for on
+hyper sparql-university              FAIL finish=None review calls 0 met 0 not-shown 0 violated 0 guard=Stopped after 14 steps, the limit for on
+hyper constraints-scheduling         PASS finish={'requirements': 10, 'open': 4, 'code': 0, 'followUps': 2} review calls 1 met 6 not-shown 4 violated 0 guard=None
+hyper large-scale-text-editing       FAIL finish={'requirements': 8, 'open': 6, 'code': 1, 'followUps': 1} review calls 1 met 2 not-shown 6 violated 0 guard=None
+exper sqlite-db-truncate             PASS finish={'requirements': 0, 'open': 0, 'code': 0, 'followUps': 0} review calls 1 met 2 not-shown 3 violated 0 guard=None
+exper cancel-async-tasks             FAIL finish={'requirements': 5, 'open': 4, 'code': 0, 'followUps': 1} review calls 1 met 1 not-shown 4 violated 0 guard=None
+exper modernize-scientific-stack     PASS finish={'requirements': 0, 'open': 0, 'code': 2, 'followUps': 1} review calls 0 met 0 not-shown 0 violated 0 guard=None
+exper db-wal-recovery                PASS finish={'requirements': 6, 'open': 5, 'code': 0, 'followUps': 1} review calls 1 met 1 not-shown 5 violated 0 guard=None
+exper model-extraction-relu-logits   PASS finish={'requirements': 6, 'open': 6, 'code': 0, 'followUps': 1} review calls 1 met 0 not-shown 6 violated 0 guard=None
+exper regex-log                      FAIL finish={'requirements': 10, 'open': 8, 'code': 0, 'followUps': 1} review calls 1 met 2 not-shown 8 violated 0 guard=None
+exper polyglot-c-py                  PASS finish={'requirements': 6, 'open': 4, 'code': 0, 'followUps': 1} review calls 1 met 2 not-shown 4 violated 0 guard=None
+exper sparql-university              PASS finish=None review calls 0 met 0 not-shown 0 violated 0 guard=Stopped: the plan was revised 3 times an
+exper constraints-scheduling         PASS finish={'requirements': 10, 'open': 6, 'code': 0, 'followUps': 1} review calls 1 met 4 not-shown 6 violated 0 guard=None
+exper large-scale-text-editing       PASS finish={'requirements': 8, 'open': 3, 'code': 0, 'followUps': 1} review calls 1 met 5 not-shown 3 violated 0 guard=None
+fences/braces in v2 plain replies: {'replies': 362, 'rawleft': 0, 'odd': 0, 'tr': 108, 'trbr': 0, 'unbal': 0} | review calls 14
+== invalid attempts v2
+   sqlite-db-truncate hyperexperimental try 0 calls 42 | invalid-bridge: think replies arrived with a stray trailing fence (the bridge's raw-fence removal, fixed 22:46
+   cancel-async-tasks hyperexperimental try 0 calls 42 | invalid-bridge: think replies arrived with a stray trailing fence (the bridge's raw-fence removal, fixed 22:46
+   large-scale-text-editing hyperexperimental try 0 calls 17 | invalid-orchestrator: the reviewer's reply came back as a table, was read as no requirements, and the finish c
+   cancel-async-tasks experimental try 0 calls 5 | invalid-orchestrator: the reviewer's reply came back as a table, was read as no requirements, and the finish c
+   sparql-university experimental try 0 calls 30 | invalid-orchestrator: the reviewer's reply came back as a table, was read as no requirements, and the finish c
+   constraints-scheduling experimental try 0 calls 2 | invalid-bridge: the worker's second request (after a nudged first turn, account main) never got an answer or a
+   polyglot-c-py stock try 0 calls 1 | invalid-bridge: the only reply was not an answer and had no tool block ("this chat does not expose the `exec_c
+v2 Luna calls in runs: 651 | served: {'chatgpt-web/luna'} | slept: []

@@ -85,6 +85,8 @@ type Result = {
   workerMaxInputTokens?: number;
   steps?: number;
   retries?: number;
+  /** The finish check, when the turn ran one (requirements read, still open, found by code, follow-up tasks). */
+  finish?: unknown;
   threadId?: string;
   maxInputTokens?: number;
   totalInputTokens?: number;
@@ -303,6 +305,7 @@ finish({
   workerMaxInputTokens: o?.workerMaxInputTokens,
   steps: o?.steps,
   retries: (o as { retries?: number } | undefined)?.retries,
+  finish: (o as { finish?: unknown } | undefined)?.finish,
   servedBy,
   ledgerKeys: [...ledgerKeys],
   approvalsDeclined: approvals,
