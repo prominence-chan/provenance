@@ -34,6 +34,21 @@ file = "README.md"
 count = 1
 why = "marks where the fork's README section ends and upstream's README begins"
 
+[[hook]]
+file = "codex-rs/cli/src/config_override_args.rs"
+count = 1
+why = "--help of every command names the fork (codex_provenance::cli_command)"
+
+[[hook]]
+file = "codex-rs/core/src/client.rs"
+count = 1
+why = "the agent's name in the request's harness text, except on the openai provider"
+
+[[hook]]
+file = "codex-rs/core/src/lib.rs"
+count = 1
+why = "`pub mod provenance`"
+
 # ---- config home -------------------------------------------------------------------
 
 [[hook]]
@@ -151,6 +166,7 @@ paths = [
     "docs/UPSTREAM.md",
     "scripts/sync-upstream.sh",
     "scripts/provenance-smoke.py",
+    "scripts/provenance-name-check.py",
     "ui/",
     ".github/provenance-ui.png",
 ]

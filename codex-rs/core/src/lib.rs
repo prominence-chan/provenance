@@ -308,3 +308,4 @@ pub use environment_selection::validate_environment_ids_and_cwds;
 
 mod runtime_auth;
 pub use runtime_auth::build_runtime_auth_manager;
+pub mod provenance; // PROVENANCE-HOOK

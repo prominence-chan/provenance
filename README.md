@@ -95,6 +95,8 @@ Any upstream Codex setting works in `~/.provenance/config.toml`. To use another 
 - Tier names, and any other non-OpenAI model, use conservative fallback metadata: a 128k context window, no
   reasoning-summary parameter, standard JSON-schema function tools.
 - The startup update check is off by default, since it would point at upstream Codex releases.
+- The agent is told it is Provenance: where upstream's prompts, tool descriptions and `--help` say "Codex" for
+  the agent, the fork says Provenance (not with `model_provider = "openai"`, which stays as upstream sends it).
 
 Everything else is upstream Codex. The fork's settings (names, provider, tiers, model metadata, prompt overrides)
 live in [`codex-rs/provenance/harness.toml`](codex-rs/provenance/harness.toml); upstream code reaches them through

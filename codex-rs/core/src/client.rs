@@ -1387,6 +1387,8 @@ impl ModelClient {
             access_programs: None,
             request_country: Default::default(),
         };
+        // PROVENANCE-HOOK: the agent's name in harness text, except on the `openai` provider.
+        let request = crate::provenance::name_agent(self.state.provider.info(), prompt, request)?;
         Ok(request)
     }
 

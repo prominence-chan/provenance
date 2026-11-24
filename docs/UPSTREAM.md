@@ -22,8 +22,10 @@ These paths never exist upstream, so they never conflict.
 | `codex-rs/provenance/tests/hooks.rs` | Merge guards (see [Checks](#checks)) |
 | `codex-rs/model-provider-info/src/provenance.rs` | Builds the built-in `tierlm` provider from `[provider]` |
 | `codex-rs/models-manager/src/provenance.rs` | Builds the tier catalog and the fallback metadata from `[model_defaults]`, `[[tiers]]`, `[sources]` |
+| `codex-rs/core/src/provenance.rs` | Names the agent in what a model is sent ([The agent's name](#the-agents-name)) |
 | `scripts/sync-upstream.sh` | The upstream sync ([Syncing](#syncing)) |
 | `scripts/provenance-smoke.py` | Drives `provenance app-server`: model/list, optionally one real turn |
+| `scripts/provenance-name-check.py` | Reads the request a built binary sends for each tier and fails if it still calls the agent Codex |
 | `docs/UPSTREAM.md` | This file |
 | `ui/` | The desktop / web UI (talks to `provenance app-server`; upstream has no such directory) |
 | `.github/provenance-ui.png` | README screenshot |
@@ -40,6 +42,9 @@ disagree with the tree.
 | --- | --- | --- | --- |
 | `codex-rs/cli/Cargo.toml` | 3 | `[[bin]] name` and `default-run` = `provenance`; the codex-provenance dependency | Cargo names the binary here |
 | `codex-rs/cli/src/main.rs` | 2 | clap `name`/`bin_name`/`override_usage`/`about`/`long_about` from `[branding]`; completion command name | clap reads them from the derive attributes |
+| `codex-rs/cli/src/config_override_args.rs` | 1 | `codex_provenance::cli_command(..)`: every command's `--help` text names the fork (and `~/.provenance`) | the help strings are doc comments on upstream's clap structs, across many files |
+| `codex-rs/core/src/client.rs` | 1 | `crate::provenance::name_agent(..)` at the end of `build_responses_request`: the agent's name in the base instructions, tool descriptions and skills list, on every provider but `openai` | the request is assembled inside upstream's client |
+| `codex-rs/core/src/lib.rs` | 1 | `pub mod provenance` | |
 | `codex-rs/tui/src/history_cell/session.rs` | 2 | TUI session header shows `product_name` | literal in upstream code |
 | `codex-rs/exec/src/event_processor_with_human_output.rs` | 1 | `exec` banner shows `product_name` | literal in upstream code |
 | `codex-rs/arg0/src/lib.rs` | 1 | `codex_provenance::init_home_env()`: `PROVENANCE_HOME` (default `~/.provenance`) exported as `CODEX_HOME` before anything reads it | every binary starts in `arg0_dispatch` |
@@ -89,6 +94,7 @@ fit `ModelInfo` all fail).
 | Metadata for a pinned source | `[sources.<source>]`: layered over the tier's metadata for every `<source>/<tier>` |
 | Base instructions (prompt) | put a file in `codex-rs/provenance/prompts/`, then `instructions_file = "<file>"` in `[model_defaults]` or a tier |
 | Product name, command name, config home | `[branding]` (`bin_name` must match `[[bin]] name` in `codex-rs/cli/Cargo.toml`; a test checks) |
+| What the agent is called in prompts and `--help` | `[branding.agent_text]`: `from` (upstream's word), `keep` (phrases where it names OpenAI's product), `[[branding.agent_text.rewrite]]` (whole sentences) |
 | Startup update check | `[defaults] check_for_update_on_startup` |
 
 **Pinned sources.** A model named `<source>/<tier>` (`luna/solstice`, `pool/spark`) reaches the router
@@ -100,6 +106,42 @@ metadata. The test `unknown_and_pinned_models_resolve` checks both.
 Runtime overrides that need no rebuild stay upstream's: `model`, `model_provider`, `[model_providers.<id>]`,
 `model_catalog_json`, `model_instructions_file`, `compact_prompt` in `~/.provenance/config.toml`, and the
 `TIERLM_BASE_URL` / `TIERLM_TOKEN` env vars.
+
+## The agent's name
+
+Upstream's prompts call the agent "Codex" ("You are a coding agent running in the Codex CLI…"), and so do a
+few tool descriptions and the descriptions of the bundled skills. The fork does not edit those files (there
+are dozens, and upstream rewrites them often). Instead the name is substituted where the text is used:
+
+- **What a model is sent**: `crate::provenance::name_agent` (`codex-rs/core/src/provenance.rs`), called at the
+  end of `build_responses_request`, rewrites the text the harness itself wrote: the base instructions, every
+  tool `description`, and the `<skills_instructions>` list. The conversation is never touched (the person's
+  messages, AGENTS.md, developer instructions a client passes to `thread/start`, tool output): "Codex" there
+  is somebody else's word, e.g. the app's carried-over brief saying which turns Codex served.
+- **Not on the `openai` provider**: a provider named `OpenAI` (`ModelProviderInfo::is_openai`, what
+  `model_provider = "openai"` selects) gets the request exactly as upstream builds it. That is the app's
+  "Run Codex through Provenance": the harness there stays stock.
+- **`--help`**: `codex_provenance::cli_command` passes every help string of the clap command tree through the
+  same rules, and says `~/.provenance` where upstream says `~/.codex`.
+
+The rules are `[branding.agent_text]` in harness.toml: the word (`from = "Codex"`, whole word, case-sensitive,
+so `codex`, `CODEX_HOME`, `gpt-5.3-codex` never match), the phrases in which it means OpenAI's product and
+stays (`keep`: "OpenAI's Codex", "Codex Cloud", …), and whole sentences that would be false with only the
+name swapped (`rewrite`: "Codex CLI is an open source project led by OpenAI." becomes "Provenance is an
+open source fork of OpenAI's Codex CLI.").
+
+Not renamed: text the binary prints for people outside `--help` (TUI strings, error messages such as "Codex
+ran out of room in the model's context window", `doctor` output) and tool *results* a model reads ("Network
+access was denied by the Codex sandbox network proxy"). Those are several hundred literals in upstream files;
+the desktop app renames the agent in the error text it shows for tier turns (`harnessMessage` in
+`ui/src/components/format.ts`). The bodies of the bundled skills (`skills/src/assets/samples/*/SKILL.md`) also
+still say Codex once a model opens one.
+
+Checks: `cargo test -p codex-provenance` (`models_are_told_the_forks_name`: every tier's, a pinned source's
+and an unknown model's base instructions; each `rewrite` sentence is still in upstream's prompt; the `openai`
+provider is skipped) and, on a built binary, `scripts/provenance-name-check.py <binary>`: one turn per tier
+against a stand-in endpoint, the whole request read back, plus one turn on a provider named OpenAI that must
+still say Codex. The sync script runs both.
 
 ## Adding a new customisation
 
@@ -138,8 +180,9 @@ It:
    - files with hooks: left for you, with the reason for each hook (exit status 2);
 3. checks every hook against `hooks.toml`, looks for leftover conflict markers, and lists files that differ from
    upstream without being in the map;
-4. builds `provenance`, runs `cargo test -p codex-provenance`, and smoke-tests `provenance app-server`
-   (model/list must list the tiers; no router quota is spent), then commits the merge.
+4. builds `provenance`, runs `cargo test -p codex-provenance`, smoke-tests `provenance app-server`
+   (model/list must list the tiers; no router quota is spent) and runs the name check
+   (`scripts/provenance-name-check.py`, against a stand-in endpoint), then commits the merge.
 
 ### Resolving a hook conflict
 
@@ -153,6 +196,8 @@ Failures after a clean merge mean upstream changed something a hook relies on:
 | Failure | Meaning |
 | --- | --- |
 | `hook_manifest_matches_tree` | a hook line was lost or duplicated in the merge |
+| `models_are_told_the_forks_name` | upstream reworded a sentence `[branding.agent_text]` rewrites whole (update the `from`), or a new base prompt names the agent in a way the rules miss |
+| `provenance-name-check.py` fails | text that calls the agent Codex reaches a model from a place `name_agent` does not cover (a new harness-written message): extend `core/src/provenance.rs` or add a `keep` phrase if it names OpenAI's product |
 | `no_new_openai_default_sites` | upstream added a new place that falls back to the `openai` provider: hook it with `codex_provenance::default_provider(..)` |
 | `config_defaults_to_the_fork` / `other_providers_keep_upstream_defaults` | config resolution changed shape around the core hooks |
 | `unknown_and_pinned_models_resolve` | upstream changed model lookup; check pinned `<source>/<tier>` names still keep their slug |
@@ -192,6 +237,7 @@ were not run for the first sync). `codex-utils-home-dir`'s home test is hooked a
 | Date | Upstream | Commits | Conflicted files | Needed a person | Time |
 | --- | --- | --- | --- | --- | --- |
 | 2026-11-22 | `cf3ff153` (main) | 211 since `1b841662` | 5 | 1 (`exec` banner, upstream reshaped the next line) | merge + resolution 19 s; Cargo.lock refresh, build, tests, smoke 17 min |
+| 2026-11-24 | `f64f003d` (main) | 123 since `cf3ff153` | 0 | 0 | merge 1 s (run with `--no-build`: 10 GB free on the disk); checks run by hand afterwards |
 
 The first sync also cleared the release-branch residue: the fork started from the `rust-v0.171.0` tag, which is
 off `main` (a cherry-pick of #62387 plus the version bump). Four TUI files conflicted between that cherry-pick

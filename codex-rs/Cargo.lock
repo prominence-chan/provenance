@@ -4854,6 +4854,7 @@ dependencies = [
 name = "codex-provenance"
 version = "0.171.0"
 dependencies = [
+ "clap",
  "codex-config",
  "codex-core",
  "codex-model-provider-info",

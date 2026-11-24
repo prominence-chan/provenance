@@ -339,6 +339,115 @@ async fn other_providers_keep_upstream_defaults() {
     assert!(config.check_for_update_on_startup);
 }
 
+fn developer_message(text: &str) -> codex_protocol::models::ResponseItem {
+    serde_json::from_value(serde_json::json!({
+        "type": "message",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": text}],
+    }))
+    .unwrap_or_else(|err| panic!("message: {err}"))
+}
+
+fn message_text(item: &codex_protocol::models::ResponseItem) -> String {
+    serde_json::to_value(item).unwrap_or_else(|err| panic!("{err}"))["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text"))
+        .to_string()
+}
+
+/// What each tier (and a pinned source, and a model no catalog knows) is given as base
+/// instructions names the fork, not Codex; the `openai` provider is left alone.
+#[tokio::test]
+async fn models_are_told_the_forks_name() {
+    use codex_core::provenance::name_agent_in_input;
+    use codex_core::provenance::name_agent_in_tools;
+    use codex_core::provenance::names_agent_for;
+
+    let branding = &harness().branding;
+    let name = branding.product_name.as_str();
+
+    // The sentences harness.toml rewrites whole are still upstream's.
+    let upstream = codex_models_manager::model_info::BASE_INSTRUCTIONS;
+    for rule in &branding.agent_text.rewrite {
+        assert!(
+            upstream.contains(rule.from.as_str()),
+            "upstream's base prompt no longer says {:?}: update [branding.agent_text]",
+            rule.from
+        );
+    }
+
+    let providers = codex_model_provider_info::built_in_model_providers(None);
+    let router = providers
+        .get(codex_provenance::provider_id())
+        .unwrap_or_else(|| panic!("no built-in provider for the fork"));
+    assert!(names_agent_for(router));
+    let openai = providers
+        .get("openai")
+        .unwrap_or_else(|| panic!("no openai provider"));
+    assert!(!names_agent_for(openai));
+
+    let catalog = codex_models_manager::provenance::tier_catalog();
+    let mut slugs: Vec<String> = catalog.models.iter().map(|m| m.slug.clone()).collect();
+    slugs.push(format!("pool/{}", harness().tiers[0].slug));
+    slugs.push("no-such-model".to_string());
+    let manager = StaticModelsManager::new(None, catalog, ModelOrigin::ExplicitConfig);
+    let config = ModelsManagerConfig::default();
+    for slug in &slugs {
+        let info = manager.get_model_info(slug, &config).await;
+        let instructions = info
+            .model
+            .model_messages
+            .as_ref()
+            .and_then(|messages| messages.instructions_template.clone())
+            .unwrap_or_else(|| panic!("{slug}: no base instructions"));
+        let carried = "Carried over: Codex served turns 3 to 5.";
+        let mut input = vec![
+            developer_message(&instructions),
+            developer_message(carried),
+            developer_message("<skills_instructions>\n- imagegen: Use when Codex should draw."),
+        ];
+        name_agent_in_input(&instructions, &mut input);
+        let sent = message_text(&input[0]);
+        assert_eq!(
+            codex_provenance::agent_names(branding, &sent),
+            Vec::<usize>::new(),
+            "{slug}: base instructions still name the agent Codex"
+        );
+        if !codex_provenance::agent_names(branding, &instructions).is_empty() {
+            assert!(sent.contains(name), "{slug}");
+        }
+        // A client's own developer text is not the harness's to rewrite.
+        assert_eq!(message_text(&input[1]), carried);
+        assert_eq!(
+            message_text(&input[2]),
+            format!("<skills_instructions>\n- imagegen: Use when {name} should draw.")
+        );
+    }
+
+    let tools = r#"[{"type":"function","name":"Codex","description":"Tools of the current Codex thread.","parameters":{"type":"object","properties":{"description":{"type":"string","description":"What Codex should do"}}}}]"#;
+    let named = name_agent_in_tools(tools)
+        .unwrap_or_else(|err| panic!("{err}"))
+        .unwrap_or_else(|| panic!("tool descriptions unchanged"));
+    let named: serde_json::Value =
+        serde_json::from_str(&named).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(named[0]["name"], "Codex");
+    assert_eq!(
+        named[0]["description"],
+        format!("Tools of the current {name} thread.")
+    );
+    assert_eq!(
+        named[0]["parameters"]["properties"]["description"]["description"],
+        format!("What {name} should do")
+    );
+    assert_eq!(
+        name_agent_in_tools(
+            r#"[{"type":"function","name":"shell","description":"Runs a command"}]"#
+        )
+        .unwrap_or_else(|err| panic!("{err}")),
+        None
+    );
+}
+
 #[test]
 fn config_home_defaults_to_the_fork() {
     let name = codex_provenance::home_dir_name();

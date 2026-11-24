@@ -20,6 +20,40 @@ cli_about = "Provenance: a Codex CLI fork that runs on tierlm's pooled model tie
 home_dir_name = ".provenance"
 home_env = "PROVENANCE_HOME"
 
+# The agent's name in text the harness itself writes: what a model is told (base
+# instructions, tool descriptions, the skills list) on every provider except OpenAI's own,
+# and the CLI's --help. Upstream's text says "Codex"; here that word becomes product_name
+# wherever it names this agent. One substitution at the point of use (the hooks in
+# core/src/client.rs and cli/src/config_override_args.rs), so upstream's prompt files stay
+# untouched and keep merging. Requests to the `openai` provider are sent as upstream
+# writes them ("Run Codex through Provenance" in the app stays stock).
+[branding.agent_text]
+# The word that names the agent upstream. Matched as a whole word, case-sensitive
+# (`codex`, `CODEX_HOME`, `gpt-5.3-codex` are never touched).
+from = "Codex"
+# Phrases in which that word names OpenAI's product and stays as it is.
+keep = [
+    "Codex CLI fork",
+    "OpenAI's Codex",
+    "OpenAI Codex",
+    "Codex Cloud",
+    "Codex Apps",
+    "Codex Desktop",
+    "Codex/Work",
+    "Codex or ChatGPT",
+]
+
+# Sentences that would be false with only the name swapped; applied first, whole. A test
+# checks each `from` is still in upstream's base prompt, so a merge that rewords one fails
+# `cargo test -p codex-provenance` instead of passing silently.
+[[branding.agent_text.rewrite]]
+from = "Codex CLI is an open source project led by OpenAI."
+to = "Provenance is an open source fork of OpenAI's Codex CLI."
+
+[[branding.agent_text.rewrite]]
+from = "Within this context, Codex refers to the open-source agentic coding interface (not the old Codex language model built by OpenAI)."
+to = "Within this context, Provenance refers to this agentic coding interface, a fork of OpenAI's Codex CLI."
+
 [provider]
 # The built-in provider the fork uses when config.toml names none.
 id = "tierlm"

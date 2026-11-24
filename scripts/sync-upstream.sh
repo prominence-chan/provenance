@@ -131,6 +131,8 @@ run_checks() {
   local tiers; tiers=$(python3 -I -c 'import tomllib,sys; print(",".join(t["slug"] for t in tomllib.load(open(sys.argv[1],"rb"))["tiers"]))' codex-rs/provenance/harness.toml)
   say "smoke: provenance app-server, model/list must start with $tiers"
   python3 -I scripts/provenance-smoke.py "$CARGO_TARGET_DIR/debug/provenance" --expect-tiers "$tiers" || die "smoke test failed"
+  say "name check: no request to a tier calls the agent Codex; the openai provider stays stock"
+  python3 -I scripts/provenance-name-check.py "$CARGO_TARGET_DIR/debug/provenance" || die "name check failed (docs/UPSTREAM.md, 'The agent's name')"
 }
 
 # ---- --check ------------------------------------------------------------------------

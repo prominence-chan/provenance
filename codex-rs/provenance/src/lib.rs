@@ -12,6 +12,7 @@
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -49,6 +50,28 @@ pub struct Branding {
     pub cli_about: String,
     pub home_dir_name: String,
     pub home_env: String,
+    pub agent_text: AgentText,
+}
+
+/// `[branding.agent_text]`: how upstream's name for the agent becomes `product_name`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentText {
+    /// Upstream's name for the agent (`Codex`), matched as a whole word.
+    pub from: String,
+    /// Phrases in which that word names OpenAI's product and is kept.
+    #[serde(default)]
+    pub keep: Vec<String>,
+    /// Whole sentences replaced before the name is swapped.
+    #[serde(default)]
+    pub rewrite: Vec<Rewrite>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rewrite {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +128,20 @@ pub fn parse_harness(source: &str) -> Result<Harness, String> {
             harness.provider.default_model
         ));
     }
+    let agent_text = &harness.branding.agent_text;
+    if agent_text.from.is_empty() || harness.branding.product_name.contains(&agent_text.from) {
+        return Err(
+            "harness.toml: branding.agent_text.from is empty or part of product_name".into(),
+        );
+    }
+    for rule in &agent_text.rewrite {
+        if rule.from.is_empty() || !agent_names(&harness.branding, &rule.to).is_empty() {
+            return Err(format!(
+                "harness.toml: agent_text rewrite {:?} is empty or still names the agent {:?}",
+                rule.from, agent_text.from
+            ));
+        }
+    }
     // Resolve every instructions_file now so a missing prompt fails at the first use.
     for table in std::iter::once(&harness.model_defaults)
         .chain(harness.tiers.iter().map(|tier| &tier.metadata))
@@ -154,6 +191,116 @@ pub fn cli_usage() -> &'static str {
         let bin = bin_name();
         format!("{bin} [OPTIONS] [PROMPT]\n       {bin} [OPTIONS] <COMMAND> [ARGS]")
     })
+}
+
+// ---- the agent's name in text ---------------------------------------------------------
+
+/// Text the harness wrote for a model, with upstream's name for the agent replaced by
+/// `product_name` (`[branding.agent_text]`): whole sentences from `rewrite` first, then the
+/// bare word wherever it is not inside a `keep` phrase. Borrowed when nothing changes.
+pub fn agent_text(text: &str) -> Cow<'_, str> {
+    agent_text_with(&harness().branding, text)
+}
+
+/// `agent_text` for any branding.
+pub fn agent_text_with<'a>(branding: &Branding, text: &'a str) -> Cow<'a, str> {
+    let rules = &branding.agent_text;
+    if rules.from.is_empty() || !text.contains(rules.from.as_str()) {
+        return Cow::Borrowed(text);
+    }
+    let mut source = Cow::Borrowed(text);
+    for rule in &rules.rewrite {
+        if !rule.from.is_empty() && source.contains(rule.from.as_str()) {
+            source = Cow::Owned(source.replace(rule.from.as_str(), &rule.to));
+        }
+    }
+    let names = agent_names(branding, &source);
+    if names.is_empty() {
+        return source;
+    }
+    let mut out = String::with_capacity(source.len() + names.len() * branding.product_name.len());
+    let mut copied = 0;
+    for start in names {
+        out.push_str(&source[copied..start]);
+        out.push_str(&branding.product_name);
+        copied = start + rules.from.len();
+    }
+    out.push_str(&source[copied..]);
+    Cow::Owned(out)
+}
+
+/// Byte offsets in `text` where upstream's name stands for the agent: a whole word (not part
+/// of an identifier or a model name like `gpt-5-Codex`) outside every `keep` phrase. The name
+/// check (`scripts/provenance-name-check.py`) and the tests use this to prove none is left.
+pub fn agent_names(branding: &Branding, text: &str) -> Vec<usize> {
+    let rules = &branding.agent_text;
+    let from = rules.from.as_str();
+    if from.is_empty() {
+        return Vec::new();
+    }
+    text.match_indices(from)
+        .map(|(start, _)| start)
+        .filter(|&start| {
+            let end = start + from.len();
+            let before = text[..start].chars().next_back();
+            let after = text[end..].chars().next();
+            if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                || after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                return false;
+            }
+            !rules.keep.iter().any(|phrase| {
+                phrase.match_indices(from).any(|(offset, _)| {
+                    start >= offset
+                        && text
+                            .get(start - offset..)
+                            .is_some_and(|tail| tail.starts_with(phrase.as_str()))
+                })
+            })
+        })
+        .collect()
+}
+
+/// `--help` text: the agent's name as above, and the fork's config home where upstream's
+/// text says `~/.codex`.
+pub fn help_text(text: &str) -> String {
+    agent_text(text).replace("~/.codex", &format!("~/{}", home_dir_name()))
+}
+
+/// The CLI's clap command with every help string (commands, subcommands, arguments) passed
+/// through `help_text`. Hook: cli/src/config_override_args.rs.
+pub fn cli_command(command: clap::Command) -> clap::Command {
+    let about = command.get_about().map(ToString::to_string);
+    let long_about = command.get_long_about().map(ToString::to_string);
+    let after_help = command.get_after_help().map(ToString::to_string);
+    let after_long_help = command.get_after_long_help().map(ToString::to_string);
+    let mut command = command;
+    if let Some(text) = about {
+        command = command.about(help_text(&text));
+    }
+    if let Some(text) = long_about {
+        command = command.long_about(help_text(&text));
+    }
+    if let Some(text) = after_help {
+        command = command.after_help(help_text(&text));
+    }
+    if let Some(text) = after_long_help {
+        command = command.after_long_help(help_text(&text));
+    }
+    command
+        .mut_args(|arg| {
+            let help = arg.get_help().map(ToString::to_string);
+            let long_help = arg.get_long_help().map(ToString::to_string);
+            let mut arg = arg;
+            if let Some(text) = help {
+                arg = arg.help(help_text(&text));
+            }
+            if let Some(text) = long_help {
+                arg = arg.long_help(help_text(&text));
+            }
+            arg
+        })
+        .mut_subcommands(cli_command)
 }
 
 // ---- config home ------------------------------------------------------------------
@@ -369,6 +516,76 @@ mod tests {
             pinned.metadata["display_name"],
             entries[0].metadata["display_name"]
         );
+    }
+
+    #[test]
+    fn agent_text_names_the_agent_and_keeps_the_product() {
+        let branding = &harness().branding;
+        let name = branding.product_name.as_str();
+        assert_eq!(agent_text("no name here"), Cow::Borrowed("no name here"));
+        assert_eq!(
+            agent_text("You are Codex. Ask Codex, not codex; see Codex's notes."),
+            format!("You are {name}. Ask {name}, not codex; see {name}'s notes.")
+        );
+        // Identifiers, env vars and model names are not the agent's name.
+        for kept in [
+            "CODEX_HOME",
+            "~/.codex/config.toml",
+            "gpt-5.3-codex",
+            "gpt-5-Codex",
+            "CodexErr",
+            "Codex_x",
+        ] {
+            assert_eq!(agent_text(kept), kept);
+        }
+        // The other product keeps its name.
+        for phrase in &branding.agent_text.keep {
+            let text = format!("see {phrase} for that");
+            assert_eq!(agent_text(&text), text.as_str(), "{phrase}");
+        }
+        assert_eq!(
+            agent_text("Codex Cloud tasks run in Codex"),
+            format!("Codex Cloud tasks run in {name}")
+        );
+        assert_eq!(
+            help_text("loaded from `~/.codex/config.toml` by Codex"),
+            format!("loaded from `~/{}/config.toml` by {name}", home_dir_name())
+        );
+    }
+
+    #[test]
+    fn agent_text_rewrites_leave_no_agent_name() {
+        let branding = &harness().branding;
+        for rule in &branding.agent_text.rewrite {
+            let out = agent_text(&format!("Before. {} After Codex.", rule.from)).into_owned();
+            assert!(out.contains(rule.to.as_str()), "{out}");
+            assert_eq!(agent_names(branding, &out), Vec::<usize>::new(), "{out}");
+        }
+    }
+
+    #[test]
+    fn cli_help_names_the_fork() {
+        let command = clap::Command::new("x")
+            .about("Run Codex")
+            .arg(
+                clap::Arg::new("c")
+                    .long("c")
+                    .help("from `~/.codex/config.toml`"),
+            )
+            .subcommand(clap::Command::new("exec").about("Run Codex non-interactively"));
+        let mut command = cli_command(command);
+        let help = command.render_long_help().to_string();
+        let name = product_name();
+        assert!(help.contains(&format!("Run {name}")), "{help}");
+        assert!(
+            help.contains(&format!("Run {name} non-interactively")),
+            "{help}"
+        );
+        assert!(
+            help.contains(&format!("~/{}/config.toml", home_dir_name())),
+            "{help}"
+        );
+        assert!(agent_names(&harness().branding, &help).is_empty(), "{help}");
     }
 
     #[test]
