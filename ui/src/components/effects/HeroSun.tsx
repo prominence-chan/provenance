@@ -6,8 +6,8 @@
 // corona with two streamer layers turning at different rates and a soft bloom; a red
 // chromosphere with two layers of spicules.
 //
-// Loops and flares are 3D: each active region is a pair of footpoints (sunspots with plage
-// round them) on the turning sphere, carried by the same differential rotation as the
+// Loops and flares are 3D: each active region is a pair of footpoints (faint plage, no
+// sunspots) on the turning sphere, carried by the same differential rotation as the
 // surface, with a loop of plasma arching between them. The CPU builds each loop's curve in 3D
 // and sends it projected (x, y, depth); the shader draws it as a tube, bright against the disc
 // when it faces you, as a prominence when it stands off the limb, hidden where it passes
@@ -18,23 +18,28 @@
 // The tier (App passes the selected one; the welcome's intro shows the plain sun):
 //   spark      a calmer sun: fewer active regions and jets, slightly smaller
 //   ember      the sun (also the fallbacks, Claude Code and Codex)
-//   solstice   an ageing sun, eased into over ~2.5 s: slightly larger, brighter and redder,
-//              more and larger sunspots, more loops and eruptions, a slow pulsation, a
-//              rougher limb
-//   nova       the star ages, destabilises and collapses (BUILD), goes hypernova (one soft
-//              flash, a shock front), and leaves a nebula round a white dwarf that idles in a
-//              bounded loop; each explosion draws a style and palette from its seed. Leaving
-//              nova runs it back: the nebula falls in (IMPLODE), the star re-ignites out of
-//              the dwarf (REIGNITE) and settles to the new tier. Every stage is a function of
-//              two levels (collapse, nebula) that move at fixed rates, so a switch mid-way just
-//              turns them round from where they are.
+//   solstice   an ageing sun, eased into over ~2.5 s: 18% larger, brighter, a deeper
+//              orange-red and puffier, a redder glow, rougher convection and limb, more loops
+//              and eruptions, a slow pulsation
+//   nova       the star boils for a moment and collapses straight down to a white dwarf; its
+//              tipping point lands on the composer's nova burst (FlameFx publishes when, see
+//              fxSync.ts; ~1.2-1.6 s after the selection), so the flash and the composer's
+//              eruption are one event. Then one soft flash, a shock front, and a nebula round
+//              the dwarf that fills the hero (its own canvas behind the heading) and keeps
+//              drifting on closed loops; each explosion draws one of six styles and six
+//              palettes, and its proportions, from its seed. Leaving nova runs it back: the
+//              nebula falls in (IMPLODE), the star re-ignites out of the dwarf (REIGNITE) and
+//              settles to the new tier. Every stage is a function of two levels (collapse,
+//              nebula), so a switch mid-way just turns them round from where they are.
 //
 // Days of uptime (see 12d215ff): the shader only sees small time values. The surface is two
 // layers each living LAYER_LIFE s, cross-faded; everything else (loop lives, the streamers'
 // turn, the pulsation, the nebula's drift) is worked out here in double precision and sent
 // wrapped or as a phase. The nebula's idle motion is periodic by construction.
 //
-// Cheap: ~200 CSS px square, DPR capped at 2, 30 fps, paused when the hero is off screen, the
+// Cheap: the sun's canvas ~200 CSS px square, DPR capped at 2, 30 fps; the nebula's canvas at
+// NEB_RES device px per CSS px, drawn only while there is a nebula (15 fps once settled);
+// paused when the hero is off screen, the
 // tab is hidden or the window has been unfocused for a few seconds. Under
 // prefers-reduced-motion (or data-fx="static" on the main column) there is no sequence: each
 // tier's settled still, cross-faded over STILL_FADE when the tier changes. Without WebGL2: the
@@ -43,6 +48,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTheme } from "../../theme/theme";
 import type { TierId } from "../../theme/tiers";
 import { SolarMark } from "../SolarMark";
+import { novaBurst } from "./fxSync";
 import { GLSL_HASH } from "./glsl";
 import { devUptime, useReducedMotion } from "./useFx";
 
@@ -50,8 +56,10 @@ import { devUptime, useReducedMotion } from "./useFx";
  * slowly turning surface, short enough that its shear stays at the first minute's. */
 const LAYER_LIFE = 100;
 /** Nova's stages, in seconds: the collapse, the nebula's expansion after the blast, and on
- * the way back the nebula falling in and the star re-igniting. */
-const BUILD = 2.6;
+ * the way back the nebula falling in and the star re-igniting. The collapse is normally timed
+ * by the composer's nova flare instead (it lands on its burst, see fxSync.ts); BUILD is its
+ * nominal charge, used when there is no composer flare to follow. */
+const BUILD = 1.35;
 const EXPAND = 6;
 const IMPLODE = 1.8;
 const REIGNITE = 1.7;
@@ -59,10 +67,18 @@ const REIGNITE = 1.7;
 const FLASH_GAP = 6;
 /** The flash's peak (0..1 of the shader's flash term; see the measurements in the commit). */
 const FLASH_PEAK = 0.75;
+/** Seconds from the tipping point to the flash's peak (the composer's is 0.05 s too). */
+const FLASH_RISE = 0.05;
 /** Reduced motion: the cross-fade between two tiers' stills. */
 const STILL_FADE = 0.6;
 /** A frame gap longer than this (paused, hidden) settles the sequence instead of playing it. */
 const JUMP = 0.5;
+/** How far into the collapse level the star starts shrinking (before it: it boils). */
+const COLLAPSE_FROM = 0.25;
+/** Solstice's extra radius. */
+const SOLSTICE_GROWTH = 0.18;
+/** The nebula's canvas resolution, device px per CSS px: soft gas, scaled up by the browser. */
+const NEB_RES = 0.6;
 /** Loops and jets: NL slots (the last one a jet), NP points per curve. */
 const NL = 8;
 const NP = 11;
@@ -82,14 +98,15 @@ const ss = (a: number, b: number, x: number) => {
 // ---- what each tier shows ----------------------------------------------------------------
 
 interface Target {
-  /** -1 spark (calm) .. 0 the sun .. 1 solstice (ageing); nova ages first, then collapses. */
-  evo: number;
+  /** -1 spark (calm) .. 0 the sun .. 1 solstice (ageing); null: as it is (nova goes straight
+   * into the collapse, it doesn't age or swell first). */
+  evo: number | null;
   nova: boolean;
 }
 function targetOf(tier: TierId | null | undefined): Target {
   if (tier === "spark") return { evo: -1, nova: false };
   if (tier === "solstice") return { evo: 1, nova: false };
-  if (tier === "nova") return { evo: 1, nova: true };
+  if (tier === "nova") return { evo: null, nova: true };
   return { evo: 0, nova: false };
 }
 
@@ -125,7 +142,7 @@ function settled(tg: Target): Sim {
   const nova = tg.nova;
   if (nova && lastSeed == null) lastSeed = newSeed();
   return {
-    evo: tg.evo,
+    evo: tg.evo ?? 0,
     evoV: 0,
     col: nova ? 1 : 0,
     neb: nova ? 1 : 0,
@@ -137,23 +154,38 @@ function settled(tg: Target): Sim {
   };
 }
 
-function step(s: Sim, tg: Target, t: number, dt: number): void {
+/**
+ * Moves the sequence on by dt (clock t). tip: when the collapse should reach its tipping point
+ * (the composer's burst less FLASH_RISE, on this clock), or null to take BUILD.
+ */
+function step(s: Sim, tg: Target, t: number, dt: number, tip: number | null = null): void {
   // evo: critically damped, so a change mid-way turns round without a kink (~2.5 s to settle)
   for (let left = dt; left > 0; left -= 1 / 60) {
     const h = Math.min(left, 1 / 60);
     const w = 2.6;
-    s.evoV += (-2 * w * s.evoV - w * w * (s.evo - tg.evo)) * h;
+    if (tg.evo == null) s.evoV *= Math.exp(-h * 8);
+    else s.evoV += (-2 * w * s.evoV - w * w * (s.evo - tg.evo)) * h;
     s.evo += s.evoV * h;
   }
   s.fwd += ((tg.nova ? 1 : 0) - s.fwd) * (1 - Math.exp(-dt / 0.25));
   if (tg.nova) {
     if (s.col < 1) {
-      s.col = Math.min(1, s.col + dt / BUILD);
+      // Aimed at the composer's burst: the rest of the way in the time left, so it lands on it
+      // from wherever it is (a re-selection mid-way included).
+      // The blast is placed at the tip itself, not at the frame that reaches it, so a slow
+      // frame rate doesn't move the flash off the composer's burst.
+      const left = tip == null || tip - t > 4 ? null : tip - t;
+      let at = t;
+      if (left == null) s.col = Math.min(1, s.col + dt / BUILD);
+      else if (left <= dt / 2) {
+        s.col = 1;
+        at = t + Math.max(left, 0);
+      } else s.col = Math.min(0.999, s.col + ((1 - s.col) * dt) / left);
       if (s.col === 1 && s.neb === 0) {
         // the hypernova: a new remnant each time, at most one flash per FLASH_GAP
-        s.blastAt = t;
-        s.flashed = t - s.lastFlash > FLASH_GAP;
-        if (s.flashed) s.lastFlash = t;
+        s.blastAt = at;
+        s.flashed = at - s.lastFlash > FLASH_GAP;
+        if (s.flashed) s.lastFlash = at;
         s.seed = lastSeed = newSeed();
       }
     } else s.neb = Math.min(1, s.neb + dt / EXPAND);
@@ -190,24 +222,54 @@ const PALETTES: [number[], number[], number[]][] = [
     [0.5, 0.66, 1.0],
     [1.0, 0.82, 0.45],
   ],
+  // Helix-like natural colour: deep red rim, blue-white core, gold knots
+  [
+    [0.92, 0.18, 0.16],
+    [0.45, 0.68, 1.0],
+    [1.0, 0.75, 0.4],
+  ],
+  // amber and violet
+  [
+    [1.0, 0.55, 0.18],
+    [0.62, 0.45, 1.0],
+    [1.0, 0.85, 0.7],
+  ],
 ];
-/** ring (a thick shell, planetary nebula), shell (a thin supernova shell with knots),
- * bipolar (an hourglass with a waist ring), crab (filaments over a synchrotron glow). */
-export const NEBULA_STYLES = ["ring", "shell", "bipolar", "crab"] as const;
-export const NEBULA_PALETTES = ["natural", "narrowband", "magenta-green", "crab"] as const;
+/** ring (a thick shell, planetary nebula), shell (a thin torn supernova shell with knots),
+ * bipolar (unequal lobes on a bent axis, a waist ring), crab (filaments over a synchrotron
+ * glow), veil (broken arcs of an old shell, sweeping filaments), eye (nested offset shells). */
+export const NEBULA_STYLES = ["ring", "shell", "bipolar", "crab", "veil", "eye"] as const;
+export const NEBULA_PALETTES = [
+  "natural",
+  "narrowband",
+  "magenta-green",
+  "crab",
+  "helix",
+  "amber-violet",
+] as const;
 
+/** Everything about a remnant's look, from its seed: the same seed, the same nebula. */
 export function nebulaOf(seed: number) {
   const h = (k: number) => hash1(seed * 0.618 + k * 7.31 + 0.5);
-  const style = Math.min(3, Math.floor(h(1) * 4));
-  const pal =
-    style === 3 ? (h(2) < 0.6 ? 3 : Math.floor(h(3) * 3)) : Math.min(3, Math.floor(h(2) * 4));
+  const n = PALETTES.length;
+  const style = Math.min(5, Math.floor(h(1) * 6));
+  const pal = style === 3 && h(2) < 0.55 ? 3 : Math.min(n - 1, Math.floor(h(3) * n));
   return {
     style,
     pal,
     axis: h(4) * TAU,
-    ell: 0.8 + 0.2 * h(5),
+    ell: 0.58 + 0.42 * h(5),
     thick: h(6),
     off: [h(7) * 40, h(8) * 40],
+    // irregularity: lopsided towards an angle, a broken shell, streamers, an off-centre cavity,
+    // unequal lobes, jets
+    lopA: h(9) * TAU,
+    lop: 0.1 + 0.32 * h(10),
+    tear: style === 4 ? 0.85 + 0.15 * h(11) : 0.15 + 0.7 * h(11),
+    streak: 0.2 + 0.8 * h(12),
+    shift: [(h(13) - 0.5) * 0.3, (h(14) - 0.5) * 0.3],
+    asym: 0.6 + 0.4 * h(15),
+    jets: style !== 4 && h(16) > 0.6 ? 1 : 0,
   };
 }
 
@@ -227,7 +289,10 @@ interface Frame {
   nova: number[];
   neb: number[];
   nebP: number[];
+  nebQ: number[];
+  nebS: number[];
   nebPh: number[];
+  nebPh2: number[];
   nebC: number[];
   flash: number;
 }
@@ -264,20 +329,18 @@ function frameAt(t: number, s: Sim): Frame {
   const w = age.map((a) => Math.abs(Math.sin((Math.PI * a) / LAYER_LIFE)));
   const evoP = Math.max(s.evo, 0);
   const evoN = Math.max(-s.evo, 0);
-  const crush = ss(0.45, 1, s.col);
-  const unrest = ss(0.05, 0.5, s.col) * (1 - crush);
-  const sunOn = 1 - ss(0.3, 0.75, s.col); // loops and spots fade as the star collapses
+  const crush = ss(COLLAPSE_FROM, 1, s.col);
+  const unrest = ss(0, COLLAPSE_FROM, s.col) * (1 - crush);
+  const sunOn = 1 - ss(0.15, 0.6, s.col); // the loops fade as the star collapses
 
-  // The star's radius: older is larger; solstice breathes slowly; the collapse swells it a
-  // little, then crushes it to the dwarf's size.
+  // The star's radius: older is larger and breathes slowly; the collapse crushes it straight
+  // down to the dwarf's size, faster and faster (no swell first).
   const breath = Math.sin(wrap(t / 7.5, 1) * TAU);
-  const quake = Math.sin(wrap(t / 0.85, 1) * TAU);
   const R =
     0.36 *
-    (1 + 0.075 * Math.min(s.evo, 1) * (s.evo > 0 ? 1 : 0) - 0.03 * evoN) *
-    (1 + 0.011 * evoP * breath + 0.025 * unrest * quake) *
-    (1 + 0.05 * ss(0, 0.45, s.col)) *
-    (1 - 0.95 * Math.pow(crush, 1.6));
+    (1 + SOLSTICE_GROWTH * evoP - 0.03 * evoN) *
+    (1 + 0.016 * evoP * breath) *
+    (1 - 0.95 * Math.pow(crush, 1.8));
 
   // ---- loops: NL - 1 active regions and a jet ----
   const loop = new Float32Array(NL * NP * 4);
@@ -347,13 +410,8 @@ function frameAt(t: number, s: Sim): Frame {
       bright = lifeE * (1 - 0.8 * erupt) * act * sunOn;
       width = (0.028 + 0.018 * H(9)) * (1 + erupt * 3.5);
       flare = erupts ? Math.exp(-(((u - 0.6) / 0.06) ** 2)) * act * sunOn : 0;
-      spotR =
-        (0.07 + 0.05 * H(10)) *
-        (1 + 0.4 * evoP) *
-        ss(0, 0.25, u) *
-        (1 - ss(0.85, 1, u)) *
-        act *
-        sunOn;
+      // no sunspots: the footpoints are only faint plage
+      spotR = (0.07 + 0.05 * H(10)) * ss(0, 0.25, u) * (1 - ss(0.85, 1, u)) * act * sunOn;
     } else {
       // A jet: a spray of plasma up out of a region, curving over as it falls back.
       const on = H(11) > 0.5 - 0.2 * s.evo ? 1 : 0;
@@ -396,11 +454,12 @@ function frameAt(t: number, s: Sim): Frame {
   const flash =
     s.flashed && bt >= 0
       ? FLASH_PEAK *
-        ss(0, 0.08, bt) *
-        Math.exp(-Math.max(bt - 0.08, 0) / 0.22) *
+        ss(0, FLASH_RISE, bt) *
+        Math.exp(-Math.max(bt - FLASH_RISE, 0) / 0.22) *
         (0.3 + 0.7 * s.fwd)
       : 0;
-  const shockR = 0.82 * (1 - Math.exp(-bt / 0.75));
+  // (layer 1 draws it, in units of the nebula's radius)
+  const shockR = 1.3 * (1 - Math.exp(-bt / 0.75));
   const shock = bt >= 0 && bt < 6 ? ss(0, 0.06, bt) * Math.exp(-bt / 0.8) * s.fwd : 0;
   const E = s.neb > 0 ? 1 - Math.pow(1 - s.neb, 2.6) : 0;
   // the young remnant is hot (whiter); falling in, it heats up again
@@ -410,9 +469,12 @@ function frameAt(t: number, s: Sim): Frame {
   );
   const nb = nebulaOf(s.seed);
   const pal = PALETTES[nb.pal];
-  const phase = wrap(t / 170, 1) * TAU; // the gas's drift: a closed loop, 170 s round
+  // The settled remnant keeps moving, on closed loops: the gas folds round once a minute, the
+  // filaments shimmer on a 23 s loop, it breathes over 40 s, the dwarf twinkles.
+  const phase = wrap(t / 60, 1) * TAU;
+  const phase2 = wrap(t / 23, 1) * TAU;
   const twinkle =
-    0.88 + 0.07 * Math.sin(wrap(t / 0.77, 1) * TAU) + 0.05 * Math.sin(wrap(t / 0.31, 1) * TAU);
+    0.8 + 0.12 * Math.sin(wrap(t / 0.9, 1) * TAU) + 0.08 * Math.sin(wrap(t / 0.37, 1) * TAU);
   return {
     age,
     w,
@@ -427,7 +489,10 @@ function frameAt(t: number, s: Sim): Frame {
     nova: [flash, shockR, shock, E],
     neb: [ss(0, 0.06, s.neb), hot, nb.style, nb.axis],
     nebP: [nb.ell, nb.thick, nb.off[0], nb.off[1]],
-    nebPh: [Math.cos(phase), Math.sin(phase), 1 + 0.012 * Math.sin(wrap(t / 97, 1) * TAU), twinkle],
+    nebQ: [nb.lopA, nb.lop, nb.tear, nb.streak],
+    nebS: [nb.shift[0], nb.shift[1], nb.asym, nb.jets],
+    nebPh: [Math.cos(phase), Math.sin(phase), 1 + 0.03 * Math.sin(wrap(t / 40, 1) * TAU), twinkle],
+    nebPh2: [Math.cos(phase2), Math.sin(phase2), 0, 0],
     nebC: pal.flat(),
     flash,
   };
@@ -440,10 +505,13 @@ in vec2 aPos;
 out vec2 vUv;
 void main() { vUv = aPos; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 
-const FS = `#version 300 es
+/** Layer 0: the sun's canvas (the star, its loops, the dwarf, the flash). Layer 1: the
+ * hero-sized canvas behind the heading (the nebula and the shock front). */
+const fs = (layer: 0 | 1) => `#version 300 es
 precision highp float;
 in vec2 vUv;
 out vec4 outColor;
+#define LAYER ${layer}
 #define NL ${NL}
 #define NP ${NP}
 // Every time value here stays small, whatever the uptime: the CPU works them out from its
@@ -461,8 +529,16 @@ uniform vec4 uSpot[NL * 2]; // footpoints: unit vector on the sphere, sunspot ra
 uniform vec4 uNova;      // flash 0..1, shock radius, shock strength, nebula scale 0..1
 uniform vec4 uNeb;       // nebula brightness, heat (young or falling in), style, axis angle
 uniform vec4 uNebP;      // ellipticity, thickness, noise offset xy
-uniform vec4 uNebPh;     // drift phase (cos, sin), breathing scale, the dwarf's twinkle
+uniform vec4 uNebQ;      // lopsided towards (angle), by how much, broken shell 0..1, streamers 0..1
+uniform vec4 uNebS;      // cavity offset xy, second lobe's size, jets (1) or not
+uniform vec4 uNebPh;     // drift phase (cos, sin; 60 s), breathing scale, the dwarf's twinkle
+uniform vec4 uNebPh2;    // shimmer phase (cos, sin; 23 s)
 uniform vec3 uNebC[3];   // palette: low ionisation (outer), high (inner), knots
+// layer 1 only: where it sits, in the sun canvas's units (1 = half the sun canvas), y up
+uniform vec4 uView;      // this canvas's half size (xy), the sun's centre from its centre (zw)
+uniform vec4 uFade;      // the sun's centre to the hero's left, right, bottom and top edges
+uniform vec4 uText;      // the heading's box round the sun's centre (x0, y0, x1, y1)
+uniform float uNebR;     // the settled nebula's radius
 uniform float uLight;
 uniform vec3 uGlint, uCorona, uEmber, uCrimson, uMagenta;
 ${GLSL_HASH}
@@ -584,7 +660,7 @@ void loops(vec2 q, float inDisc, out float face, out float limb) {
     float e = (core * threads * knots + sheath) * A.x;
     // a jet is brightest at its base and thins out as it climbs
     e *= mix(1.0, pow(1.0 - bt, 0.7) * 1.5, C.y);
-    // against the disc a loop's legs fade into its footpoints, so the sunspots show
+    // against the disc a loop's legs fade into its footpoints
     if (inDisc > 0.5 && bz > -0.02) face += e * mix(smoothstep(0.0, 0.2, bt) * smoothstep(1.0, 0.8, bt), 1.0, C.y);
     else limb += e;
   }
@@ -600,76 +676,119 @@ float shell(float rho, float a, float b) {
        * smoothstep(b * 1.12, b * 0.9, rho);
 }
 
-// The remnant: em = light (dark theme), dens = how much gas (the light theme's ink).
+// The remnant: em = light (dark theme), dens = how much gas (the light theme's ink). p is in
+// the sun canvas's units round the star.
 void nebula(vec2 p, out vec3 em, out float dens) {
   em = vec3(0.0); dens = 0.0;
   float E = uNova.w;
   if (E < 0.003) return;
-  float Rn = 0.62 * E * uNebPh.z;
-  float ca = cos(uNeb.w), sa = sin(uNeb.w);
+  float Rn = uNebR * E * uNebPh.z;
+  // (it rocks a little about its axis, on the 60 s loop)
+  float ax = uNeb.w + 0.035 * uNebPh.y;
+  float ca = cos(ax), sa = sin(ax);
   vec2 np = mat2(ca, sa, -sa, ca) * p / Rn;
   np.y /= uNebP.x;
-  if (dot(np, np) > 3.2) return;
+  if (dot(np, np) > 4.0) return;
   vec2 off = uNebP.zw;
-  // The gas drifts round a closed loop (uNebPh.xy is a phase), so it shimmers in place forever.
-  vec2 flow = uNebPh.xy * 0.04;
+  // Two closed loops of motion (uNebPh, uNebPh2 are phases), so it drifts and shimmers forever
+  // without going anywhere: the whole gas folds slowly, the filaments a little faster.
+  vec2 flow = uNebPh.xy * 0.3;
+  vec2 shim = uNebPh2.xy * 0.22;
   // Domain warping (after Inigo Quilez): fbm displaces the plane, so the noise folds into
   // sheets and wisps rather than blobs.
   vec2 wq = np * 1.5 + off;
   vec2 wv = vec2(gfbm(wq + flow), gfbm(wq + vec2(5.2, 1.3) - flow.yx));
-  vec2 wp = np + wv * 0.24;
-  float rr = length(wp);
-  vec2 dir = wp / max(rr, 1e-4);
+  vec2 wp = np + wv * 0.3;
+  // Lopsided and off-centre: the gas got further one way, and the cavity sits off the star.
+  vec2 cp = wp - uNebS.xy;
+  float rr0 = length(cp);
+  vec2 dir = cp / max(rr0, 1e-4);
+  float lop = 1.0 + uNebQ.y * dot(dir, vec2(cos(uNebQ.x), sin(uNebQ.x)));
+  float lump = gnoise(dir * 1.7 + off) * 0.24 + gnoise(dir * 4.3 + off + 2.0) * 0.08;
+  float rr = rr0 / (lop * (1.0 + lump));       // in the outline's own units: 1 = the rim
   // the filament network: ridged noise on the warped plane, combed along the flow
-  float fil = ridged(wp * 3.3 + off * 1.7 + wv * 1.6);
+  float fil = ridged(wp * 4.0 + off * 1.7 + wv * 1.6 + shim);
+  // patchy density, and a shell broken open in places
+  float clump = 0.45 + 1.1 * smoothstep(-0.3, 0.3, gnoise(np * 1.2 + off + 3.0 + shim * 0.5));
+  // (angle-only terms fade out towards the middle, where every direction meets)
+  float brk = mix(1.0, smoothstep(-0.15, 0.3, gnoise(dir * 2.3 + off + 11.0)), uNebQ.z * smoothstep(0.1, 0.55, rr0));
   float lo = 0.0, hi = 0.0, knot = 0.0, haze = 0.0;
   int style = int(uNeb.z + 0.5);
-  float lump = gnoise(dir * 1.7 + off);       // the outline's lumps, round the rim
   if (style == 0) {
     // RING: a thick shell, red outside, the inner [OIII] zone filling the cavity in teal
-    float ro = 0.82 * (1.0 + 0.12 * lump);
-    float ri = ro * (0.5 + 0.12 * uNebP.y);
-    lo = shell(rr, ri * 1.08, ro) * (0.3 + 1.1 * fil * fil);
-    hi = shell(rr, ri * 0.7, ro * 0.8) * (0.45 + 0.6 * (wv.x + 0.5)) * 0.7;
-    knot = smoothstep(0.32, 0.55, gnoise(wp * 13.0 + off)) * shell(rr, ri, ro * 0.95) * 0.7;
+    float ri = 0.5 + 0.14 * uNebP.y;
+    lo = shell(rr, ri * 1.08, 0.86) * (0.3 + 1.1 * fil * fil) * brk;
+    hi = shell(rr, ri * 0.7, 0.7) * (0.45 + 0.6 * (wv.x + 0.5)) * 0.7;
+    knot = smoothstep(0.32, 0.55, gnoise(wp * 13.0 + off)) * shell(rr, ri, 0.82) * 0.7;
     // a faint outer halo of older, cooler gas
-    lo += exp(-abs(rr - ro) / 0.12) * smoothstep(ro * 0.95, ro * 1.05, rr) * (0.3 + fil) * 0.22;
+    lo += exp(-abs(rr - 0.86) / 0.14) * smoothstep(0.8, 0.92, rr) * (0.3 + fil) * 0.22;
   } else if (style == 1) {
     // SHELL: a thin, torn supernova shell; shocked ejecta knots inside it
-    float ro = 0.9 * (1.0 + 0.1 * lump + 0.06 * gnoise(dir * 4.3 + off));
-    float tear = smoothstep(-0.25, 0.25, gnoise(dir * 3.1 + off + 4.0));
-    lo = shell(rr, ro * 0.9, ro) * (0.2 + 1.8 * pow(fil, 5.0)) * (0.35 + 0.65 * tear);
-    float fil2 = ridged(wp * 4.6 - off + wv * 2.0);
-    hi = shell(rr, ro * 0.74, ro * 0.92) * pow(fil2, 6.0) * 1.4;
-    knot = smoothstep(0.34, 0.5, gfbm(wp * 7.0 + off * 1.3)) * smoothstep(ro * 0.92, ro * 0.6, rr) * 0.6;
-    haze = smoothstep(ro, ro * 0.2, rr) * 0.06;
+    lo = shell(rr, 0.82, 0.92) * (0.2 + 1.8 * pow(fil, 5.0)) * brk;
+    float fil2 = ridged(wp * 5.4 - off + wv * 2.0 - shim);
+    hi = shell(rr, 0.66, 0.84) * pow(fil2, 6.0) * 1.4 * (0.4 + 0.6 * brk);
+    knot = smoothstep(0.34, 0.5, gfbm(wp * 7.0 + off * 1.3)) * smoothstep(0.85, 0.5, rr) * 0.6;
+    haze = smoothstep(0.92, 0.2, rr) * 0.06;
   } else if (style == 2) {
-    // BIPOLAR: two lobes along the axis, pinched at a waist ring round the star
+    // BIPOLAR: two unequal lobes on a bent axis, pinched at a waist ring round the star
     for (int s = 0; s < 2; s++) {
       float sx = s == 0 ? 1.0 : -1.0;
-      vec2 l = (wp - vec2(sx * 0.44, 0.0)) / vec2(0.54, 0.4 + 0.06 * lump);
+      float sz = s == 0 ? 1.0 : uNebS.z;
+      vec2 c = vec2(sx * 0.46 * sz, sx * 0.14 * uNebQ.y);
+      vec2 l = (wp - c) / (vec2(0.56, 0.42) * sz * (1.0 + 0.5 * lump));
       float rl = length(l);
-      float open = 1.0 - 0.55 * smoothstep(0.7, 1.0, sx * wp.x);   // the tips thin out
-      lo += shell(rl, 0.78, 1.0) * open * (0.15 + 1.2 * fil * fil);
+      float open = 1.0 - 0.6 * smoothstep(0.6, 1.0, l.x * sx);   // the tips thin out
+      lo += shell(rl, 0.76, 1.0) * open * (0.15 + 1.2 * fil * fil);
       hi += shell(rl * 1.12, 0.5, 1.0) * exp(-abs(wp.x) / 0.35) * 0.5;
     }
-    float e = length(wp / vec2(0.1, 0.3));
-    float waist = exp(-pow((e - 1.0) / 0.3, 2.0));
+    float e = length((wp - uNebS.xy * 0.3) / vec2(0.1, 0.3));
+    float waist = exp(-pow((e - 1.0) / 0.3, 2.0)) * brk;
     lo += waist * 0.7;
     knot = waist * smoothstep(0.0, 0.4, gnoise(wp * 16.0 + off)) * 1.2;
-    haze = exp(-rr * rr / 0.04) * 0.35;
-  } else {
+    haze = exp(-dot(wp, wp) / 0.04) * 0.35;
+  } else if (style == 3) {
     // CRAB: an ellipsoid cage of filaments, streaming outward, over a blue synchrotron glow
-    float rho = length(wp / vec2(0.95, 0.72)) * (1.0 + 0.12 * lump);
-    float mask = smoothstep(1.0, 0.75, rho);
-    float rad = ridged(vec2(dir * 5.0) + vec2(rho * 1.2, 0.0) + off * 0.7);  // radial streaks
+    float rho = length(cp / vec2(0.95, 0.72)) / (lop * (1.0 + lump));
+    float mask = smoothstep(1.0, 0.72, rho);
+    float rad = ridged(dir * 5.0 + vec2(rho * 1.2, 0.0) + off * 0.7 + shim);  // radial streaks
     lo = mask * (0.75 * pow(fil, 2.2) + 0.4 * pow(rad, 3.0) * smoothstep(0.35, 0.8, rho))
        * (0.35 + 0.65 * smoothstep(0.15, 0.85, rho));
-    hi = exp(-rho * rho / 0.3) * (0.5 + 0.5 * (gfbm(wp * 2.4 + off) + 0.5)) * 0.75 * mask;
+    hi = exp(-rho * rho / 0.3) * (0.5 + 0.5 * (wv.y + 0.5)) * 0.75 * mask;
     knot = lo * smoothstep(0.55, 0.9, fil) * 0.8;
+  } else if (style == 4) {
+    // VEIL: what is left of a big old shell, broken arcs and long sweeping filaments
+    float sweep = pow(ridged(wp * 2.6 + off + wv * 2.4 + shim), 4.0);
+    lo = shell(rr, 0.8, 0.95) * brk * (0.25 + 2.4 * sweep) + sweep * smoothstep(1.0, 0.5, rr) * 0.3;
+    hi = shell(rr, 0.72, 0.9) * pow(fil, 5.0) * 1.2 * brk;
+  } else {
+    // EYE: nested shells, offset and tilted against each other, round a bright inner bubble
+    float cb = cos(1.1 + uNebQ.x), sb = sin(1.1 + uNebQ.x);
+    vec2 r2 = mat2(cb, sb, -sb, cb) * (wp + uNebS.xy * 0.6);
+    float e1 = length(cp / vec2(0.62, 0.42)) / (1.0 + lump * 0.6);
+    float e2 = length(r2 / vec2(0.5, 0.32));
+    lo = shell(e1, 0.82, 1.0) * (0.3 + 1.0 * fil * fil) + shell(rr, 0.85, 1.0) * 0.35 * (0.3 + fil) * brk;
+    hi = shell(e2, 0.7, 1.0) * 0.6 + exp(-dot(wp, wp) / 0.03) * 0.25;
+    knot = shell(e2, 0.85, 1.0) * smoothstep(0.1, 0.5, gnoise(wp * 14.0 + off)) * 0.8;
   }
+  // ragged outer filaments: sparse streaks running out past the rim, only along some
+  // stretches of it (some seeds more than others)
+  if (rr > 0.78 && uNebQ.w > 0.05) {
+    float sector = smoothstep(0.05, 0.4, gnoise(dir * 1.3 + off + 21.0));
+    float streak = pow(ridged(dir * 6.5 + vec2(rr * 1.4, 0.0) + off * 1.3 + shim), 5.0);
+    lo += streak * sector * smoothstep(0.8, 0.97, rr) * exp(-max(rr - 0.97, 0.0) / 0.25) * uNebQ.w * 0.5;
+  }
+  // jets: knots out along the axis, either side (ansae)
+  if (uNebS.w > 0.5) {
+    for (int s = 0; s < 2; s++) {
+      float sx = s == 0 ? 1.0 : -1.0;
+      vec2 d = (wp - vec2(sx * 1.16, 0.05 * sx)) / vec2(0.2, 0.035);
+      knot += exp(-dot(d, d)) * (0.35 + 0.5 * fil);
+    }
+  }
+  lo *= clump;
+  hi *= mix(1.0, clump, 0.5);
   // dark lanes of dust across the glow
-  vec2 dq = np * 2.1 + off * 0.7 + 9.0;
+  vec2 dq = np * 2.1 + off * 0.7 + 9.0 + flow * 0.5;
   float dust = smoothstep(0.08, 0.35, gnoise(dq) * 0.55 + gnoise(dq * 2.03 + 1.7) * 0.28);
   vec3 c0 = uNebC[0], c1 = uNebC[1], c2 = uNebC[2];
   em = c0 * lo * 0.9 + c1 * (hi + haze) * 0.85 + c2 * knot * 0.7;
@@ -678,11 +797,12 @@ void nebula(vec2 p, out vec3 em, out float dens) {
   float hot = uNeb.y;
   float L = dot(em, vec3(0.3, 0.5, 0.2));
   em = mix(em, vec3(0.82, 0.9, 1.0) * L * 1.8, hot * 0.75) * (1.0 + hot * 0.8);
-  em *= smoothstep(1.75, 1.05, length(np));
+  em *= smoothstep(1.5, 1.05, rr) * smoothstep(2.0, 1.6, length(np));
   em = (1.0 - exp(-em * 1.25)) * uNeb.x;
   dens = clamp(max(em.r, max(em.g, em.b)), 0.0, 1.0);
 }
 
+#if LAYER == 0
 void main() {
   vec2 p = vUv;
   float r = length(p);
@@ -690,8 +810,8 @@ void main() {
   float R0 = uStar.x;
   float colp = uStar.y;
   float evoP = max(uStar.z, 0.0), evoN = max(-uStar.z, 0.0);
-  float crush = smoothstep(0.45, 1.0, colp);
-  float unrest = smoothstep(0.05, 0.5, colp) * (1.0 - crush);
+  float crush = smoothstep(${COLLAPSE_FROM}, 1.0, colp);
+  float unrest = smoothstep(0.0, ${COLLAPSE_FROM}, colp) * (1.0 - crush);
   float k = R0 / 0.36;                 // the star against the normal sun's size
   vec3 col = vec3(0.0);
   float alpha = 0.0;
@@ -700,7 +820,7 @@ void main() {
   float limbN = FBM_MEAN;
   if (abs(r - R0) < 0.09 * k + 0.01)
     limbN = blend2(fbmA(a, 4.0, uAge.x * 0.1 + uOff.x), fbmA(a, 4.0, uAge.y * 0.1 + uOff.z), FBM_MEAN);
-  float R = R0 * (1.0 + (limbN - FBM_MEAN) * (0.035 * evoP + 0.14 * unrest));
+  float R = R0 * (1.0 + (limbN - FBM_MEAN) * (0.075 * evoP + 0.14 * unrest));
   vec2 q = p / R;                      // sphere units
   float inDisc = step(r, R);
   float lpFace = 0.0, lpLimb = 0.0;
@@ -720,37 +840,36 @@ void main() {
     float sg = blend2(sg1, sg2, FBM_MEAN);
     float gran = smoothstep(0.2, 0.85, blend2(gr1, gr2, 0.5));
     float act = smoothstep(0.6 - 0.05 * evoP, 0.78, blend2(ac1, ac2, FBM_MEAN));
-    // Limb darkening (Eddington-ish) and a redder, cooler limb.
-    float limb = 0.2 + 0.8 * pow(mu, 0.85);
-    float gk = 0.3 * (1.0 + 0.3 * evoP - 0.2 * evoN);
-    float heat = limb * (0.74 + (sg - 0.5) * (0.24 + 0.9 * unrest) + (gran - 0.5) * gk * (0.35 + 0.65 * mu))
-               + act * pow(1.0 - mu, 1.5) * (0.3 + 0.1 * evoP);
+    // Limb darkening (Eddington-ish) and a redder, cooler limb; an ageing star is puffier
+    // (less darkening), its convection rougher.
+    float limb = 0.2 + 0.8 * pow(mu, 0.85 - 0.35 * evoP);
+    float gk = 0.3 * (1.0 + 0.7 * evoP - 0.2 * evoN);
+    float heat = limb * (0.74 + (sg - 0.5) * (0.24 + 0.25 * evoP + 0.9 * unrest) + (gran - 0.5) * gk * (0.35 + 0.65 * mu))
+               + act * pow(1.0 - mu, 1.5) * (0.3 + 0.15 * evoP);
     // A dark filament: a prominence seen from above, lying on the disc and turning with it.
     float fl = abs(blend2(fi1, fi2, FBM_MEAN) - 0.5);
     heat -= smoothstep(0.035, 0.0, fl) * smoothstep(0.55, 0.68, blend2(fo1, fo2, FBM_MEAN)) * 0.16 * mu;
-    // Sunspots at the loops' footpoints (umbra, penumbra), plage round them, and a flare's
-    // bright kernels when a loop erupts or a jet goes.
+    // Faint plage round the loops' footpoints (no sunspots), and a flare's bright kernels
+    // when a loop erupts or a jet goes.
     vec3 P = vec3(q, mu);
-    float spotD = 0.0, plage = 0.0, fk = 0.0;
+    float plage = 0.0, fk = 0.0;
     for (int i = 0; i < NL * 2; i++) {
       vec4 s = uSpot[i];
       float d = length(P - s.xyz);
       float fl = uLoopC[i / 2].z;
       if (fl > 0.002) fk += fl * exp(-d / 0.05);
-      if (s.w < 0.004 || d > s.w * 3.7) continue;
-      float x = d / s.w * (0.88 + 0.25 * noise((P.xy - s.xy) * 60.0 + float(i) * 7.0));
-      spotD = max(spotD, smoothstep(1.0, 0.6, x) * 0.5 + smoothstep(0.45, 0.25, x) * 0.5);
-      plage += smoothstep(3.2, 1.0, x) * 0.5;
+      if (s.w > 0.004) plage += smoothstep(s.w * 2.6, s.w * 0.4, d) * 0.5;
     }
-    heat = heat * (1.0 - 0.3 * spotD) + min(plage, 1.0) * (0.06 + 0.16 * (1.0 - mu)) * (1.0 - spotD) + fk * 0.5;
+    heat += min(plage, 1.0) * (0.03 + 0.1 * (1.0 - mu)) + fk * 0.5;
+    // ageing: the heat runs lower (a deeper orange-red) though it shines more
+    heat *= 1.0 - 0.1 * evoP;
     col = ramp(clamp(heat, 0.0, 1.0));
     col *= 0.42 + 0.66 * pow(mu, 0.45);
-    col *= 1.0 - 0.72 * spotD;                          // umbrae nearly black, penumbrae brown
     col += uGlint * pow(mu, 8.0) * 0.08;               // a soft hot core
     // loops in front of the disc: bright arcs of hot plasma across the face
     col += mix(uCorona, uGlint, 0.6) * min(lpFace, 1.5) * (0.35 + 0.25 * mu);
-    // ageing: a little brighter and redder; calm: a touch paler
-    col *= mix(vec3(1.0), vec3(1.17, 0.97, 0.82), evoP) * mix(vec3(1.0), vec3(1.0, 1.02, 1.05), evoN);
+    // ageing: brighter, deeper orange-red, swollen; calm: a touch paler
+    col *= mix(vec3(1.0), vec3(1.34, 0.9, 0.6), evoP) * mix(vec3(1.0), vec3(1.0, 1.02, 1.05), evoN);
     // collapsing: it brightens and turns blue-white
     float lum = dot(col, vec3(0.3, 0.55, 0.15));
     // (on paper: a clear blue, since a white-hot star can't show against the page)
@@ -767,14 +886,14 @@ void main() {
     float st1 = 0.55 + 0.9 * pow(noiseA(wrapA(a + uSpin.x), 2.6, 1.0), 2.0);
     float st2 = pow(noiseA(wrapA(a + uSpin.y), 8.0, 4.0 + hh * 3.0), 3.0);
     float corona = exp(-hh / 0.032) * 0.5 + exp(-hh / (0.11 * st1)) * 0.3 + exp(-hh / 0.07) * st2 * 0.35;
-    corona *= (1.0 + 0.2 * evoP + 0.6 * unrest) * fade;
-    float bloom = exp(-hh / 0.2) * 0.14 * (1.0 + 0.15 * evoP) * fade;
+    corona *= (1.0 + 0.35 * evoP + 0.6 * unrest) * fade;
+    float bloom = exp(-hh / 0.2) * 0.14 * (1.0 + 0.6 * evoP) * fade;
     // ---- chromosphere: a thin red rim with two layers of spicules licking off it ----
     // They flow outwards on the two surface layers' clocks, blended the same way. Beyond
     // 0.06 above the limb no spicule reaches (hh / fringeH alone is past 1.74 there).
     float spic = 0.0;
     if (hh < 0.06) {
-      float fringeH = (0.012 + 0.022 * limbN) * (1.0 + 0.35 * evoP);
+      float fringeH = (0.012 + 0.022 * limbN) * (1.0 + 0.5 * evoP);
       float sp = blend2(fbmA(a, 40.0, hh * 34.0 - uAge.x * 0.8 + uOff.y),
                         fbmA(a, 40.0, hh * 34.0 - uAge.y * 0.8 + uOff.w), FBM_MEAN);
       float sp2 = blend2(noiseA(a, 95.0, hh * 70.0 - uAge.x * 1.5 + uOff.x),
@@ -800,23 +919,15 @@ void main() {
     // a touch of magenta in the outer corona and the cooler prominence plasma
     c = mix(c, uMagenta * glow, smoothstep(0.02, 0.2, hh) * 0.35);
     c = mix(c, uCrimson * glow, chrom * smoothstep(0.003, 0.0, hh) * 0.4);
+    c = mix(c, mix(uCrimson, uEmber, 0.5) * glow * 1.15, 0.3 * evoP);   // a redder glow round an old star
     c = mix(c, vec3(0.75, 0.88, 1.0) * glow * 1.2, crush * 0.8);
     float ga = clamp(glow, 0.0, 1.0);
     col = col * alpha + c * (1.0 - alpha);
     alpha = max(alpha, ga * mix(0.75, 1.0, uLight));
   }
 
-  // ---- nova: the remnant, the dwarf, the shock, the flash ----
+  // ---- nova: the dwarf and the flash (the nebula and the shock are on layer 1) ----
   if (colp > 0.5) {
-    vec3 em; float dens;
-    nebula(p, em, dens);
-    // Dark theme: the gas is light, added to the page. Light theme: it is printed like a
-    // plate in an atlas, pigment whose cover follows the gas's density (the cavity stays
-    // paper), since glow can't show on a light page.
-    vec3 pigment = em / max(max(em.r, max(em.g, em.b)), 1e-3) * 0.76;
-    float cover = clamp(dens * 1.5, 0.0, 0.92);
-    col += mix(em, pigment * cover, uLight);
-    alpha = max(alpha, mix(dens * 0.55, cover, uLight));
     // the white dwarf: a hard bright point in a small soft halo, twinkling a little
     float dw = smoothstep(0.85, 1.0, colp) * uNebPh.w;
     float core = exp(-r * r / 0.00012);
@@ -829,19 +940,6 @@ void main() {
     float dwA = clamp((core + halo) * dw, 0.0, 1.0);
     col = mix(col + dwarf, col * (1.0 - max(core * dw, hl)) + dwarfL, uLight);
     alpha = max(alpha, mix(dwA, max(core * dw, hl), uLight));
-    // the shock front: a thin, torn, lopsided ring racing out ahead of the gas
-    if (uNova.z > 0.002) {
-      vec2 dr = p / max(r, 1e-4);
-      float wob = 1.0 + 0.08 * gnoise(dr * 2.4 + uNebP.zw) + 0.04 * gnoise(dr * 7.0 + uNebP.zw);
-      float d = r * wob - uNova.y;
-      float w = 0.005 + 0.03 * uNova.y;
-      float ring = exp(-d * d / (w * w)) * (0.45 + 0.75 * smoothstep(-0.3, 0.3, gnoise(dr * 5.0 + uNebP.zw + uNova.y * 3.0)));
-      float wake = smoothstep(0.0, -0.05, d) * smoothstep(-uNova.y, -uNova.y * 0.3, d) * 0.18;
-      float sk = (ring + wake) * uNova.z;
-      vec3 sc = mix(vec3(0.85, 0.92, 1.0), uNebC[1], smoothstep(0.1, 0.6, uNova.y)) * sk * 0.9;
-      col += sc;
-      alpha = max(alpha, clamp(sk, 0.0, 1.0) * mix(0.5, 0.8, uLight));
-    }
   }
   // the flash: one soft-edged glow from the core, never the whole canvas
   if (uNova.x > 0.001) {
@@ -852,7 +950,48 @@ void main() {
   // fade out well before the canvas edge
   float edge = smoothstep(1.0, 0.82, r);
   outColor = vec4(col * edge, alpha * edge) * uStar.w;
-}`;
+}
+#else
+void main() {
+  vec2 p = vUv * uView.xy - uView.zw;  // the sun canvas's units round the star, y up
+  float r = length(p);
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+  if (uStar.y > 0.5) {
+    vec3 em; float dens;
+    nebula(p, em, dens);
+    // Dark theme: the gas is light, added to the page. Light theme: it is printed like a
+    // plate in an atlas, pigment whose cover follows the gas's density (the cavity stays
+    // paper), since glow can't show on a light page.
+    vec3 pigment = em / max(max(em.r, max(em.g, em.b)), 1e-3) * 0.76;
+    float cover = clamp(dens * 1.5, 0.0, 0.92);
+    col += mix(em, pigment * cover, uLight);
+    alpha = max(alpha, mix(dens * 0.55, cover, uLight));
+    // the shock front: a thin, torn, lopsided ring racing out ahead of the gas
+    if (uNova.z > 0.002) {
+      vec2 dr = p / max(r, 1e-4);
+      float rs = uNova.y * uNebR;
+      float wob = 1.0 + 0.08 * gnoise(dr * 2.4 + uNebP.zw) + 0.04 * gnoise(dr * 7.0 + uNebP.zw);
+      float d = r * wob - rs;
+      float w = 0.012 + 0.04 * rs;
+      float ring = exp(-d * d / (w * w)) * (0.45 + 0.75 * smoothstep(-0.3, 0.3, gnoise(dr * 5.0 + uNebP.zw + uNova.y * 3.0)));
+      float wake = smoothstep(0.0, -0.05, d) * smoothstep(-rs, -rs * 0.3, d) * 0.15;
+      float sk = (ring + wake) * uNova.z;
+      col += mix(vec3(0.85, 0.92, 1.0), uNebC[1], smoothstep(0.1, 0.6, uNova.y)) * sk * 0.9;
+      alpha = max(alpha, clamp(sk, 0.0, 1.0) * mix(0.5, 0.8, uLight));
+    }
+  }
+  // Soft towards the hero's edges, never a hard clip; dimmed behind the heading, so it stays
+  // legible on both themes.
+  float fx = smoothstep(-uFade.x, -uFade.x * 0.55, p.x) * smoothstep(uFade.y, uFade.y * 0.55, p.x);
+  float fy = smoothstep(-uFade.z, -uFade.z * 0.55, p.y) * smoothstep(uFade.w, uFade.w * 0.55, p.y);
+  vec2 tc = (uText.xy + uText.zw) * 0.5, th = (uText.zw - uText.xy) * 0.5;
+  vec2 tq = abs(p - tc) - th;
+  float sd = length(max(tq, 0.0)) + min(max(tq.x, tq.y), 0.0);
+  float dim = mix(0.3, 1.0, smoothstep(-0.05, 0.35, sd));
+  outColor = vec4(col, alpha) * fx * fy * dim * uStar.w;
+}
+#endif`;
 
 // Dev only (?sunstep): every hero sun on the page steps by __provenanceSunStep(seconds),
 // which returns the tiered one's sequence state.
@@ -869,11 +1008,151 @@ if (import.meta.env.DEV)
     return main;
   };
 
+// ---- drawing ------------------------------------------------------------------------------
+
+const UNIFORMS = [
+  "uAge",
+  "uW",
+  "uOff",
+  "uSpin",
+  "uStar",
+  "uLoop",
+  "uLoopA",
+  "uLoopB",
+  "uLoopC",
+  "uSpot",
+  "uNova",
+  "uNeb",
+  "uNebP",
+  "uNebQ",
+  "uNebS",
+  "uNebPh",
+  "uNebPh2",
+  "uNebC",
+  "uView",
+  "uFade",
+  "uText",
+  "uNebR",
+] as const;
+
+/** Where the nebula's canvas sits round the sun, in the sun canvas's units (see uView etc.). */
+interface Layout {
+  view: number[];
+  fade: number[];
+  text: number[];
+  nebR: number;
+}
+
+/** One canvas and its program: the sun's (layer 0) or the nebula's (layer 1). */
+function surface(canvas: HTMLCanvasElement, layer: 0 | 1) {
+  const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true });
+  if (!gl) return null;
+  const sh = (type: number, src: string) => {
+    const s = gl.createShader(type)!;
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) ?? "");
+    return s;
+  };
+  const prog = gl.createProgram()!;
+  try {
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs(layer)));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+      throw new Error(gl.getProgramInfoLog(prog) ?? "");
+  } catch (err) {
+    console.warn("[hero sun] shader setup failed", err);
+    return null;
+  }
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
+    gl.STATIC_DRAW,
+  );
+  const loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const u = (n: string) => gl.getUniformLocation(prog, n);
+  const uni = Object.fromEntries(UNIFORMS.map((n) => [n, u(n)]));
+  const probe = document.createElement("canvas").getContext("2d")!;
+  const rgb = (name: string) => {
+    probe.fillStyle = "#000";
+    probe.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const n = parseInt(String(probe.fillStyle).slice(1), 16) || 0;
+    return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255] as const;
+  };
+  for (const [name, v] of [
+    ["uGlint", "--glint"],
+    ["uCorona", "--corona"],
+    ["uEmber", "--ember"],
+    ["uCrimson", "--crimson"],
+    ["uMagenta", "--magenta"],
+  ] as const)
+    gl.uniform3fv(u(name), rgb(v));
+  gl.uniform1f(u("uLight"), document.documentElement.dataset.theme === "light" ? 1 : 0);
+  // Each draw's output is premultiplied and scaled by its weight, so two draws added up are a
+  // cross-fade (the reduced-motion stills).
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  return {
+    size(w: number, h: number) {
+      canvas.width = Math.max(1, Math.round(w));
+      canvas.height = Math.max(1, Math.round(h));
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    },
+    draw(frames: [Frame, number][], lay?: Layout) {
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      if (lay) {
+        gl.uniform4fv(uni.uView, lay.view);
+        gl.uniform4fv(uni.uFade, lay.fade);
+        gl.uniform4fv(uni.uText, lay.text);
+        gl.uniform1f(uni.uNebR, lay.nebR);
+      }
+      for (const [f, weight] of frames) {
+        gl.uniform2fv(uni.uAge, f.age);
+        gl.uniform2fv(uni.uW, f.w);
+        gl.uniform4fv(uni.uOff, f.off);
+        gl.uniform2fv(uni.uSpin, f.spin);
+        gl.uniform4fv(uni.uStar, [f.star[0], f.star[1], f.star[2], weight]);
+        gl.uniform4fv(uni.uNova, f.nova);
+        gl.uniform4fv(uni.uNeb, f.neb);
+        gl.uniform4fv(uni.uNebP, f.nebP);
+        gl.uniform4fv(uni.uNebQ, f.nebQ);
+        gl.uniform4fv(uni.uNebS, f.nebS);
+        gl.uniform4fv(uni.uNebPh, f.nebPh);
+        gl.uniform4fv(uni.uNebPh2, f.nebPh2);
+        gl.uniform3fv(uni.uNebC, f.nebC);
+        if (layer === 0) {
+          gl.uniform4fv(uni.uLoop, f.loop);
+          gl.uniform4fv(uni.uLoopA, f.loopA);
+          gl.uniform4fv(uni.uLoopB, f.loopB);
+          gl.uniform4fv(uni.uLoopC, f.loopC);
+          gl.uniform4fv(uni.uSpot, f.spot);
+        }
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+    },
+    destroy() {
+      gl.deleteProgram(prog);
+      gl.deleteBuffer(buf);
+    },
+  };
+}
+
+/** Whether a frame has anything for the nebula's canvas (the remnant or the shock front). */
+const hasNebula = (f: Frame) => f.star[1] > 0.5 && (f.nova[3] > 0.003 || f.nova[2] > 0.002);
+
 // ---- the component ----------------------------------------------------------------------
 
-/** The welcome's intro passes no tier: the plain sun. */
+/** The welcome's intro passes no tier: the plain sun (and no nebula canvas). */
 export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | null }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const nebRef = useRef<HTMLCanvasElement>(null);
   const reduced = useReducedMotion();
   const theme = useTheme();
   const [failed, setFailed] = useState(false);
@@ -883,9 +1162,13 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
   const tiered = tier !== undefined;
   const sim = useRef<Sim | null>(null);
   const retarget = useRef<(() => void) | null>(null);
+  /** performance.now() when nova was last selected (the composer's flare starts there too). */
+  const novaSel = useRef(-Infinity);
 
   useEffect(() => {
-    target.current = targetOf(tier);
+    const next = targetOf(tier);
+    if (next.nova && !target.current.nova) novaSel.current = performance.now();
+    target.current = next;
     retarget.current?.();
   }, [tier]);
 
@@ -903,88 +1186,58 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
-    const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true });
-    if (!gl) {
+    const sun = surface(canvas, 0);
+    if (!sun) {
       setFailed(true);
       return;
     }
-    const sh = (type: number, src: string) => {
-      const s = gl.createShader(type)!;
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-        throw new Error(gl.getShaderInfoLog(s) ?? "");
-      return s;
-    };
-    const prog = gl.createProgram()!;
-    try {
-      gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
-      gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
-      gl.linkProgram(prog);
-      if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
-        throw new Error(gl.getProgramInfoLog(prog) ?? "");
-    } catch (err) {
-      console.warn("[hero sun] shader setup failed", err);
-      setFailed(true);
-      return;
-    }
-    gl.useProgram(prog);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
-      gl.STATIC_DRAW,
+    sun.size(
+      size * Math.min(2, window.devicePixelRatio || 1),
+      size * Math.min(2, window.devicePixelRatio || 1),
     );
-    const loc = gl.getAttribLocation(prog, "aPos");
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    const u = (n: string) => gl.getUniformLocation(prog, n);
-    const uni = Object.fromEntries(
-      [
-        "uAge",
-        "uW",
-        "uOff",
-        "uSpin",
-        "uStar",
-        "uLoop",
-        "uLoopA",
-        "uLoopB",
-        "uLoopC",
-        "uSpot",
-        "uNova",
-        "uNeb",
-        "uNebP",
-        "uNebPh",
-        "uNebC",
-      ].map((n) => [n, u(n)]),
-    );
-
-    const probe = document.createElement("canvas").getContext("2d")!;
-    const rgb = (name: string) => {
-      probe.fillStyle = "#000";
-      probe.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-      const n = parseInt(String(probe.fillStyle).slice(1), 16) || 0;
-      return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255] as const;
+    // The nebula's canvas fills the hero behind the heading, at NEB_RES (soft gas needs no
+    // more), and only draws while there is a nebula or a shock.
+    const nebCanvas = nebRef.current;
+    const neb = nebCanvas ? surface(nebCanvas, 1) : null;
+    const unit = size / 2; // CSS px per sun-canvas unit
+    let lay: Layout = { view: [1, 1, 0, 0], fade: [9, 9, 9, 9], text: [0, 0, 0, 0], nebR: 1 };
+    const measure = () => {
+      if (!nebCanvas || !neb) return;
+      const hr = nebCanvas.getBoundingClientRect();
+      const sr = canvas.getBoundingClientRect();
+      const tr = canvas.parentElement?.querySelector("h1")?.getBoundingClientRect();
+      if (hr.width < 1 || hr.height < 1) return;
+      neb.size(hr.width * NEB_RES, hr.height * NEB_RES);
+      const sx = sr.left + sr.width / 2;
+      const sy = sr.top + sr.height / 2;
+      const fade = [sx - hr.left, hr.right - sx, hr.bottom - sy, sy - hr.top].map((d) => d / unit);
+      lay = {
+        view: [
+          hr.width / 2 / unit,
+          hr.height / 2 / unit,
+          (sx - (hr.left + hr.width / 2)) / unit,
+          -(sy - (hr.top + hr.height / 2)) / unit,
+        ],
+        fade,
+        text: tr
+          ? [
+              (tr.left - sx) / unit,
+              -(tr.bottom - sy) / unit,
+              (tr.right - sx) / unit,
+              -(tr.top - sy) / unit,
+            ]
+          : [0, 0, 0, 0],
+        // most of the way to the nearest edge of the hero (it fades out softly there)
+        nebR: Math.min(4.5, Math.max(1.1, 0.85 * Math.min(...fade))),
+      };
     };
-    for (const [uni, v] of [
-      ["uGlint", "--glint"],
-      ["uCorona", "--corona"],
-      ["uEmber", "--ember"],
-      ["uCrimson", "--crimson"],
-      ["uMagenta", "--magenta"],
-    ] as const)
-      gl.uniform3fv(u(uni), rgb(v));
-    gl.uniform1f(u("uLight"), document.documentElement.dataset.theme === "light" ? 1 : 0);
-
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.round(size * dpr);
-    canvas.height = Math.round(size * dpr);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    // Each draw's output is premultiplied and scaled by its weight, so two draws added up
-    // are a cross-fade (the reduced-motion stills).
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE);
+    measure();
+    const ro = new ResizeObserver(() => {
+      measure();
+      drawNow();
+    });
+    if (nebCanvas) ro.observe(nebCanvas);
+    ro.observe(canvas);
 
     const speed = import.meta.env.DEV
       ? Number(new URLSearchParams(location.search).get("fxspeed")) || 1
@@ -999,31 +1252,18 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
 
     const s = (sim.current ??= settled(target.current));
     const still = reduced || staticFx;
-
-    const draw = (frames: [Frame, number][]) => {
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      for (const [f, weight] of frames) {
-        gl.uniform2fv(uni.uAge, f.age);
-        gl.uniform2fv(uni.uW, f.w);
-        gl.uniform4fv(uni.uOff, f.off);
-        gl.uniform2fv(uni.uSpin, f.spin);
-        gl.uniform4fv(uni.uStar, [f.star[0], f.star[1], f.star[2], weight]);
-        gl.uniform4fv(uni.uLoop, f.loop);
-        gl.uniform4fv(uni.uLoopA, f.loopA);
-        gl.uniform4fv(uni.uLoopB, f.loopB);
-        gl.uniform4fv(uni.uLoopC, f.loopC);
-        gl.uniform4fv(uni.uSpot, f.spot);
-        gl.uniform4fv(uni.uNova, f.nova);
-        gl.uniform4fv(uni.uNeb, f.neb);
-        gl.uniform4fv(uni.uNebP, f.nebP);
-        gl.uniform4fv(uni.uNebPh, f.nebPh);
-        gl.uniform3fv(uni.uNebC, f.nebC);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
-      }
+    let nebShown = false;
+    let tick = 0;
+    /** Draws both canvases; the nebula's only when it has something (or must be cleared). */
+    const drawBoth = (frames: [Frame, number][], everyNeb = true) => {
+      sun.draw(frames);
+      if (!neb) return;
+      const want = frames.some(([f]) => hasNebula(f));
+      if (want ? everyNeb || !nebShown : nebShown) neb.draw(want ? frames : [], lay);
+      nebShown = want;
     };
-
-    const cleanups: (() => void)[] = [];
+    let drawNow = () => {};
+    const cleanups: (() => void)[] = [() => ro.disconnect()];
 
     if (still) {
       // One still per tier, at a fixed moment; a tier change cross-fades between them.
@@ -1031,15 +1271,16 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
       Object.assign(s, settled(target.current));
       let shown = frameAt(tStill, s);
       let raf = 0;
-      draw([[shown, 1]]);
+      drawNow = () => drawBoth([[shown, 1]]);
+      drawNow();
       retarget.current = () => {
         const next = frameAt(tStill, Object.assign(s, settled(target.current)));
         const from = shown;
         const start = performance.now();
         cancelAnimationFrame(raf);
-        const tick = () => {
+        const fade = () => {
           const k = ss(0, 1, (performance.now() - start) / 1000 / STILL_FADE);
-          draw(
+          drawBoth(
             k < 1
               ? [
                   [from, 1 - k],
@@ -1047,28 +1288,46 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
                 ]
               : [[next, 1]],
           );
-          if (k < 1) raf = requestAnimationFrame(tick);
+          if (k < 1) raf = requestAnimationFrame(fade);
         };
         shown = next;
-        tick();
+        fade();
       };
       cleanups.push(() => cancelAnimationFrame(raf));
     } else {
       let last = clock();
       let lastFlash = 0;
+      let shownFrame: Frame | null = null;
+      /** When the collapse should tip over, on this clock: the composer's burst (fxSync.ts) of
+       * the selection now playing, less the flash's rise; null with no flare to follow. */
+      const tipAt = (t: number) => {
+        if (manual || novaBurst.selectedAt < novaSel.current - 300) return null;
+        return t + ((novaBurst.burstAt - performance.now()) / 1000) * speed - FLASH_RISE;
+      };
       const frame = () => {
         const t = clock();
         const dt = Math.max(0, t - last);
         last = t;
+        const blast = s.blastAt;
         if (dt > JUMP) {
           // Away (paused, hidden) for a while: show where the sequence has got to by now.
           const keep = s.lastFlash;
-          Object.assign(s, settled(target.current), { evo: target.current.evo, lastFlash: keep });
-        } else step(s, target.current, t, dt);
+          Object.assign(s, settled(target.current), {
+            evo: target.current.evo ?? s.evo,
+            lastFlash: keep,
+          });
+        } else step(s, target.current, t, dt, tipAt(t));
+        if (import.meta.env.DEV && s.blastAt !== blast)
+          (window as unknown as { __provenanceSunTip: number }).__provenanceSunTip =
+            performance.now() + ((s.blastAt - t) / speed) * 1000;
         const f = frameAt(t, s);
         lastFlash = f.flash;
-        draw([[f, 1]]);
+        shownFrame = f;
+        // the settled remnant moves slowly: its canvas redraws at 15 fps
+        const busy = s.neb < 1 || f.nova[2] > 0.002;
+        drawBoth([[f, 1]], busy || manual || tick++ % 2 === 0);
       };
+      drawNow = () => shownFrame && drawBoth([[shownFrame, 1]]);
       let timer = 0;
       let raf = 0;
       let stopped = false;
@@ -1137,14 +1396,17 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
     return () => {
       for (const c of cleanups) c();
       retarget.current = null;
-      gl.deleteProgram(prog);
-      gl.deleteBuffer(buf);
+      sun.destroy();
+      neb?.destroy();
     };
   }, [reduced, staticFx, theme, size, tiered]);
 
   if (failed) return <StaticSun size={size} nova={targetOf(tier).nova} />;
   return (
-    <canvas ref={ref} className="hero-sun" style={{ width: size, height: size }} aria-hidden />
+    <>
+      <canvas ref={ref} className="hero-sun" style={{ width: size, height: size }} aria-hidden />
+      {tiered && <canvas ref={nebRef} className="hero-nebula" aria-hidden />}
+    </>
   );
 }
 
