@@ -469,12 +469,12 @@ function frameAt(t: number, s: Sim): Frame {
   );
   const nb = nebulaOf(s.seed);
   const pal = PALETTES[nb.pal];
-  // The settled remnant keeps moving, on closed loops: the gas folds round once a minute, the
-  // filaments shimmer on a 23 s loop, it breathes over 40 s, the dwarf twinkles.
-  const phase = wrap(t / 60, 1) * TAU;
-  const phase2 = wrap(t / 23, 1) * TAU;
+  // The settled remnant keeps moving, on closed loops: the gas folds round every 100 s, the
+  // filaments shimmer on a 40 s loop, it breathes over 60 s, the dwarf twinkles.
+  const phase = wrap(t / 100, 1) * TAU;
+  const phase2 = wrap(t / 40, 1) * TAU;
   const twinkle =
-    0.8 + 0.12 * Math.sin(wrap(t / 0.9, 1) * TAU) + 0.08 * Math.sin(wrap(t / 0.37, 1) * TAU);
+    0.86 + 0.08 * Math.sin(wrap(t / 1.3, 1) * TAU) + 0.05 * Math.sin(wrap(t / 0.53, 1) * TAU);
   return {
     age,
     w,
@@ -491,7 +491,7 @@ function frameAt(t: number, s: Sim): Frame {
     nebP: [nb.ell, nb.thick, nb.off[0], nb.off[1]],
     nebQ: [nb.lopA, nb.lop, nb.tear, nb.streak],
     nebS: [nb.shift[0], nb.shift[1], nb.asym, nb.jets],
-    nebPh: [Math.cos(phase), Math.sin(phase), 1 + 0.03 * Math.sin(wrap(t / 40, 1) * TAU), twinkle],
+    nebPh: [Math.cos(phase), Math.sin(phase), 1 + 0.02 * Math.sin(wrap(t / 60, 1) * TAU), twinkle],
     nebPh2: [Math.cos(phase2), Math.sin(phase2), 0, 0],
     nebC: pal.flat(),
     flash,
@@ -531,8 +531,8 @@ uniform vec4 uNeb;       // nebula brightness, heat (young or falling in), style
 uniform vec4 uNebP;      // ellipticity, thickness, noise offset xy
 uniform vec4 uNebQ;      // lopsided towards (angle), by how much, broken shell 0..1, streamers 0..1
 uniform vec4 uNebS;      // cavity offset xy, second lobe's size, jets (1) or not
-uniform vec4 uNebPh;     // drift phase (cos, sin; 60 s), breathing scale, the dwarf's twinkle
-uniform vec4 uNebPh2;    // shimmer phase (cos, sin; 23 s)
+uniform vec4 uNebPh;     // drift phase (cos, sin; 100 s), breathing scale, the dwarf's twinkle
+uniform vec4 uNebPh2;    // shimmer phase (cos, sin; 40 s)
 uniform vec3 uNebC[3];   // palette: low ionisation (outer), high (inner), knots
 // layer 1 only: where it sits, in the sun canvas's units (1 = half the sun canvas), y up
 uniform vec4 uView;      // this canvas's half size (xy), the sun's centre from its centre (zw)
@@ -683,8 +683,8 @@ void nebula(vec2 p, out vec3 em, out float dens) {
   float E = uNova.w;
   if (E < 0.003) return;
   float Rn = uNebR * E * uNebPh.z;
-  // (it rocks a little about its axis, on the 60 s loop)
-  float ax = uNeb.w + 0.035 * uNebPh.y;
+  // (it rocks a little about its axis, on the 100 s loop)
+  float ax = uNeb.w + 0.018 * uNebPh.y;
   float ca = cos(ax), sa = sin(ax);
   vec2 np = mat2(ca, sa, -sa, ca) * p / Rn;
   np.y /= uNebP.x;
@@ -692,8 +692,8 @@ void nebula(vec2 p, out vec3 em, out float dens) {
   vec2 off = uNebP.zw;
   // Two closed loops of motion (uNebPh, uNebPh2 are phases), so it drifts and shimmers forever
   // without going anywhere: the whole gas folds slowly, the filaments a little faster.
-  vec2 flow = uNebPh.xy * 0.3;
-  vec2 shim = uNebPh2.xy * 0.22;
+  vec2 flow = uNebPh.xy * 0.17;
+  vec2 shim = uNebPh2.xy * 0.11;
   // Domain warping (after Inigo Quilez): fbm displaces the plane, so the noise folds into
   // sheets and wisps rather than blobs.
   vec2 wq = np * 1.5 + off;
@@ -1227,8 +1227,8 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
               -(tr.top - sy) / unit,
             ]
           : [0, 0, 0, 0],
-        // most of the way to the nearest edge of the hero (it fades out softly there)
-        nebR: Math.min(4.5, Math.max(1.1, 0.85 * Math.min(...fade))),
+        // 70% of the way to the nearest edge of the hero (it fades out softly before it)
+        nebR: Math.min(3.7, Math.max(1.1, 0.7 * Math.min(...fade))),
       };
     };
     measure();
