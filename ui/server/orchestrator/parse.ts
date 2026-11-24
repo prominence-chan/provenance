@@ -18,6 +18,8 @@ export interface MiniTask {
   whole?: boolean;
   /** The task that settles what the finish check found: it is not revised when it fails. */
   followUp?: boolean;
+  /** True when `detail` carries a structured worker hand-over. */
+  handover?: boolean;
 }
 
 export interface Plan {

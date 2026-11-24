@@ -57,12 +57,14 @@ import {
 import {
   changedSince,
   codeFindings,
+  createContextState,
   deliverablesIn,
   findingLines,
   finishText,
   followUpTask,
   snapshot,
   unwrap,
+  updateContextState,
 } from "../server/orchestrator/experimental.ts";
 import {
   captureScript,
@@ -83,8 +85,11 @@ import {
   addProblem,
   addRequest,
   emptyNotes,
+  failureDigest,
+  mergeHandover,
   NOTES_LIMIT,
   notesText,
+  renderHandover,
   reportSections,
 } from "../server/orchestrator/notes.ts";
 import {
@@ -109,6 +114,7 @@ import {
 import {
   BRIEF_BUDGET,
   foldPrompt,
+  HANDOVER_BRIEF_BUDGET,
   ONE_WORKER_CHARS,
   plannerPrompt,
   PROMPT_BUDGET,
@@ -536,6 +542,7 @@ log("router errors: which are worth waiting for; caps");
     PROVENANCE_ORC_WORKER_CALLS: "9",
     PROVENANCE_ORC_WORKER_MINUTES: "3",
     PROVENANCE_ORC_WORKER_TOKENS: "9000",
+    PROVENANCE_ORC_HANDOFFS: "6",
     PROVENANCE_ORC_MODEL_CALLS: "200",
     PROVENANCE_ORC_TURN_MINUTES: "90",
   });
@@ -544,12 +551,13 @@ log("router errors: which are worth waiting for; caps");
       c.workerCalls === 9 &&
       c.workerMs === 180_000 &&
       c.workerContextTokens === 9000 &&
+      c.handoffs === 6 &&
       c.modelCalls === 200 &&
       c.turnMs === 90 * 60_000 &&
       capsFromEnv({ PROVENANCE_ORC_WORKER_TOKENS: "12" }).workerContextTokens === undefined &&
       capsFromEnv({ PROVENANCE_ORC_RETRY_S: "off" }).retryDelaysMs?.length === 0 &&
       Object.keys(capsFromEnv({ PROVENANCE_ORC_RETRY_S: "soon" })).length === 0,
-    "the waits, the worker's budgets (requests, minutes, context) and the turn's (model calls, minutes) can be set from the environment; nonsense is ignored",
+    "the waits, the worker's budgets (requests, minutes, context, handoffs) and the turn's (model calls, minutes) can be set from the environment; nonsense is ignored",
   );
 }
 
@@ -573,6 +581,179 @@ log("reports, thoughts, small helpers");
     sec.result === "made a.py" && sec.changes === "a.py b.py" && sec.blockers === "",
     "report sections; BLOCKERS: none is empty",
   );
+  const hsec = reportSections(
+    [
+      "RESULT: fixed cacheutils (32 -> 21 failures)",
+      "CHANGES: boltons/cacheutils.py",
+      "VALIDATION: pytest -q -> 21 failed",
+      "FAILURES:",
+      "- dictutils.py:142 OMD.popall drops last key",
+      "- iterutils.py:88 windowed skips final chunk",
+      "TRIED: checked setutils (clean); slice broke fill=None",
+      "NEXT: edit dictutils.py:142 and run pytest tests/test_dictutils.py",
+      "STATUS: PARTIAL",
+    ].join("\n"),
+  );
+  check(
+    hsec.failures.includes("dictutils.py:142") &&
+      hsec.failures.includes("iterutils.py:88") &&
+      hsec.tried.includes("slice broke fill=None") &&
+      hsec.next.includes("dictutils.py:142"),
+    "report sections extract structured FAILURES, TRIED and NEXT fields for hand-overs",
+  );
+  const fdig = failureDigest(
+    [
+      "=== test session starts ===",
+      ...Array.from({ length: 20 }, (_, i) => `noise line ${i}`),
+      "FAILED tests/test_dictutils.py::test_popall - AssertionError: wrong",
+      "FAILED tests/test_iterutils.py::test_windowed - ValueError: bad",
+      "========================= 21 failed, 340 passed in 1.4s =========================",
+    ].join("\n"),
+  );
+  check(
+    fdig.includes("FAILED tests/test_dictutils.py::test_popall") &&
+      fdig.includes("21 failed, 340 passed") &&
+      !fdig.includes("noise line 0"),
+    "failureDigest pulls concrete failing test lines and summary out of verbose output",
+  );
+  // Context tracker: stateless vs stateful delta-mode (chatgpt-web) vs flat LOOPCALLS vs restart.
+  {
+    const stateless = createContextState();
+    check(
+      updateContextState(stateless, 6500, 100) === 6500 &&
+        updateContextState(stateless, 9000, 100) === 9000 &&
+        updateContextState(stateless, 12000, 100) === 12000 &&
+        !stateless.deltaMode,
+      "context tracker: monotonic stateless requests stay in full-history mode",
+    );
+    const loop = createContextState();
+    updateContextState(loop, 6500, 50);
+    updateContextState(loop, 7000, 50);
+    updateContextState(loop, 7000, 50);
+    check(
+      !loop.deltaMode && loop.tokens === 7000,
+      "context tracker: flat LOOPCALLS without tool output does not false-trigger delta mode",
+    );
+    const delta = createContextState();
+    const seq = [3259, 2615, 2170, 2615]; // boltons worker 1 actual delta pattern
+    const got = seq.map((n) => updateContextState(delta, n, 200));
+    check(
+      delta.deltaMode && got[1] === 3259 + 200 + 2615 && got[3] >= 11_000 && got[3] < 12_000,
+      `context tracker: stateful web-chat deltas accumulate and fire near 11k (${got.join(" -> ")})`,
+    );
+    const resent = createContextState();
+    updateContextState(resent, 3347, 150);
+    updateContextState(resent, 3347, 150); // resent fresh prompt, no tools
+    const afterDrop = updateContextState(resent, 600, 150);
+    check(
+      resent.deltaMode && afterDrop === 3347 + 150 + 600,
+      "context tracker: resent initial prompt is not double-counted; next drop enters delta mode",
+    );
+    const shortStart = createContextState();
+    updateContextState(shortStart, 2500, 100, 0);
+    updateContextState(shortStart, 2615, 100, 2500);
+    const third = updateContextState(shortStart, 2615, 100, 2500);
+    check(
+      shortStart.deltaMode && third === 2615 + 100 + 2615,
+      "context tracker: flat 10KB deltas after tool output enter delta mode even when call 1 was smaller",
+    );
+    const restarted = updateContextState(delta, 14500, 100);
+    check(
+      restarted === 14500,
+      "context tracker: a bridge restart with a full fresh prompt resets instead of double-counting",
+    );
+  }
+  // Cumulative handover merge + render + long-request brief budget.
+  {
+    const h1 = mergeHandover(null, {
+      n: 1,
+      report:
+        "RESULT: fixed cacheutils\nCHANGES: cacheutils.py\nVALIDATION: pytest -> 21 failed\nFAILURES:\n- dictutils.py:142 OMD.popall\n- iterutils.py:88 windowed\nTRIED: naive slice broke fill=None\nNEXT: edit dictutils.py:142\nSTATUS: PARTIAL",
+      files: [{ path: "cacheutils.py", kind: "update" }],
+      checks: [{ cmd: "pytest -q", ok: false, exit: 1, summary: "21 failed, 340 passed" }],
+    });
+    const h2 = mergeHandover(h1, {
+      n: 2,
+      report: "RESULT: fixed dictutils; down to 10 failures\nSTATUS: PARTIAL",
+      files: [{ path: "dictutils.py", kind: "update" }],
+      checks: [
+        {
+          cmd: "pytest -q",
+          ok: false,
+          exit: 1,
+          summary: "FAILED tests/test_iterutils.py::test_windowed\n10 failed, 351 passed",
+        },
+      ],
+    });
+    const rendered2 = renderHandover(h2, 2500);
+    check(
+      rendered2.includes("fixed dictutils; down to 10 failures") &&
+        rendered2.includes("iterutils.py:88 windowed") &&
+        rendered2.includes("naive slice broke fill=None") &&
+        rendered2.includes("FAILED tests/test_iterutils.py::test_windowed"),
+      "terse successor hand-over still carries forward earlier failure groups, tried fixes and recorded pytest failures",
+    );
+    const h3 = mergeHandover(h2, {
+      n: 3,
+      report: "",
+      files: [{ path: "iterutils.py", kind: "update" }],
+      checks: [],
+    });
+    const rendered3 = renderHandover(h3, 2500);
+    check(
+      rendered3.includes("worker 3 gave no hand-over") &&
+        rendered3.includes("iterutils.py:88 windowed") &&
+        rendered3.includes("iterutils.py (update)"),
+      "empty wrap-up preserves prior hand-over analysis plus the stopped worker's recorded file changes",
+    );
+    const huge = mergeHandover(null, {
+      n: 1,
+      report: [
+        `RESULT: ${"fixed early modules cleanly. ".repeat(30)}`,
+        `CHANGES: ${"boltons/cacheutils.py updated, ".repeat(20)}`,
+        `VALIDATION: .venv/bin/pytest -q -> 21 failed, 340 passed`,
+        `FAILURES:\n- CRITICAL_GROUP_ALPHA: boltons/dictutils.py:142 OMD.popall\n- ${"detail line ".repeat(60)}\n- CRITICAL_GROUP_OMEGA: boltons/iterutils.py:88 windowed`,
+        `TRIED: DEAD_END_MARKER naive slice broke fill=None; ${"checked extra ".repeat(25)}`,
+        `NEXT: EXACT_NEXT_STEP edit boltons/dictutils.py:142 and run pytest tests/test_dictutils.py`,
+        `STATUS: PARTIAL`,
+      ].join("\n"),
+      files: [{ path: "boltons/cacheutils.py", kind: "update" }],
+      checks: [],
+    });
+    const renderedHuge = renderHandover(huge, 1600);
+    check(
+      renderedHuge.length <= 1600 &&
+        renderedHuge.includes("CRITICAL_GROUP_ALPHA") &&
+        renderedHuge.includes("CRITICAL_GROUP_OMEGA") &&
+        renderedHuge.includes("DEAD_END_MARKER") &&
+        renderedHuge.includes("EXACT_NEXT_STEP"),
+      `oversized structured hand-over compacts by section instead of clipping FAILURES/TRIED out of the middle (${renderedHuge.length} <= 1600)`,
+    );
+    const longReq = `${"Fix the seeded bugs across boltons modules. ".repeat(48)}Run pytest -q.`;
+    const hb = workerBrief({
+      request: longReq,
+      exact: [],
+      task: {
+        title: "Do everything THE REQUEST above asks for, and check it",
+        done: "",
+        detail: rendered2,
+        whole: true,
+        handover: true,
+      },
+      index: 1,
+      total: 1,
+      later: [],
+      notes: emptyNotes(),
+      cwd: "/data/app",
+      requestFile: "/tmp/provenance-requests/long.txt",
+    });
+    check(
+      hb.length <= HANDOVER_BRIEF_BUDGET &&
+        hb.includes(longReq) &&
+        hb.includes("iterutils.py:88 windowed"),
+      `hand-over brief fits a 2k+ request whole alongside the working analysis (${hb.length} <= ${HANDOVER_BRIEF_BUDGET})`,
+    );
+  }
   check(parseThought("FINISHED: It works.").final === "It works.", "FINISHED: is final");
   check(
     parseThought("Checked it.\n\n**FINISHED:** All good.").final === "All good.",
@@ -3904,8 +4085,47 @@ log("experimental: a worker whose context fills up hands over to a fresh one");
       /the worker stopped: its context filled up 2 times without the task finishing: the task is too big for one worker/.test(
         dryRevise,
       ) &&
+      /write the second half; the format is one row per line/.test(dryRevise) &&
       /YOUR TASK \(1 of 2\): Do the thing another way/.test(lb.at(-2) ?? ""),
-    "a worker that fills its context twice without changing anything is not handed over a third time: the planner is asked to split what is left",
+    "a worker that fills its context twice without changing anything sends its hand-over working state to the planner to split what is left",
+  );
+  // Stateful web-chat delta context (chatgpt-web reuse_chat): triggers hand-over near 11k instead
+  // of ~14.5k, and carries failure groups, tried fixes, files and next actions across terse and
+  // empty hand-overs.
+  seen.length = 0;
+  from = fake().filter((l) => l.turnStart).length;
+  tracesFrom = traces.length;
+  const dl = await start("experimental");
+  await say(dl.id, "onejob GROWS DELTA: fix seeded library bugs until pytest passes");
+  turn = await turnDone(dl.id, 60_000);
+  lb = briefsFrom(from);
+  const deltaTraces = traces.slice(tracesFrom).filter((t) => t.type === "worker");
+  check(
+    turn.status === "completed" &&
+      seen.map((x) => x.role).join(",") === "planner" &&
+      turn.orchestration?.handoffs === 3 &&
+      turn.orchestration.workers === 4 &&
+      deltaTraces.every((t) => t.type === "worker" && t.maxInputTokens < budget + 2500) &&
+      deltaTraces.slice(0, 3).every((t) => t.type === "worker" && t.calls <= 6),
+    `delta-mode web chat hands over right around ${budget} tokens without ever reaching 14.5k (peak ${turn.orchestration?.workerMaxInputTokens} tokens, calls per worker: ${deltaTraces.map((t) => (t.type === "worker" ? t.calls : 0)).join(",")})`,
+  );
+  check(
+    lb.length === 7 &&
+      /boltons\/dictutils\.py:142 OMD\.popall/.test(lb[2]) &&
+      /naive slice in windowed broke fill=None/.test(lb[2]) &&
+      /NEXT: edit boltons\/dictutils\.py:142/.test(lb[2]) &&
+      // Worker 2 wrote a terse report, yet Worker 3's brief still keeps Worker 1's failure groups,
+      // tried fixes, AND Worker 2's recorded pytest failure line and edited file.
+      /fixed dictutils; failing tests reduced from 21 to 10/.test(lb[4]) &&
+      /boltons\/iterutils\.py:88 windowed skips final short chunk/.test(lb[4]) &&
+      /naive slice in windowed broke fill=None/.test(lb[4]) &&
+      /FAILED tests\/test_iterutils\.py::test_windowed/.test(lb[4]) &&
+      // Worker 3 gave an empty wrap-up, yet Worker 4's brief preserves prior analysis + iterutils.py.
+      /worker 3 gave no hand-over/.test(lb[6]) &&
+      /boltons\/iterutils\.py:88 windowed skips final short chunk/.test(lb[6]) &&
+      /iterutils\.py \(update\)/.test(lb[6]) &&
+      lb.filter((_, i) => i % 2 === 0).every((b) => b.length <= HANDOVER_BRIEF_BUDGET),
+    "concrete failure groups, tried fixes, edited files, recorded pytest failures and next actions survive structured, terse and empty hand-overs",
   );
 }
 

@@ -19,6 +19,12 @@ export const PROMPT_BUDGET = 8000;
 /** The Think call's own budget: goal, working memory, pinned files and the last results. */
 export const THINK_BUDGET = 12_000;
 export const BRIEF_BUDGET = 4800;
+/**
+ * A continuation worker's brief (carrying a structured hand-over across the context boundary):
+ * extra room for failure groups, attempted fixes, files and next actions so the request itself
+ * does not have to be shortened and re-read from disk.
+ */
+export const HANDOVER_BRIEF_BUDGET = 6800;
 /** Hyperexperimental's working memory as it is stored on the thread for a reader (and a hand-over's share). */
 export const SUMMARY_LIMIT = 2500;
 /**
@@ -109,7 +115,7 @@ Reply in plain text in exactly this form:
 ${PLAN_FORMAT}
 
 If nothing useful can still be done, reply instead with one line: ANSWER: <what is finished and what blocks the rest>`,
-    input: `REQUEST:\n${numbered(request.trim(), 2000)}${names ? `\n\n${names}` : ""}\n\nNOTES:\n${notes}\n\nTASK THAT HIT A PROBLEM: ${clip(failed.title, 300)}\nITS REPORT:\n${clipMiddle(report.trim() || "(no report)", 900)}\n\nTASKS THAT WERE STILL PLANNED:\n${rest}`,
+    input: `REQUEST:\n${numbered(request.trim(), 2000)}${names ? `\n\n${names}` : ""}\n\nNOTES:\n${notes}\n\nTASK THAT HIT A PROBLEM: ${clip(failed.title, 300)}\nITS REPORT:\n${clipMiddle(report.trim() || "(no report)", 1400)}\n\nTASKS THAT WERE STILL PLANNED:\n${rest}`,
   };
 }
 
@@ -125,7 +131,18 @@ STATUS: DONE or BLOCKED or PARTIAL (DONE also when all that is left is a check t
  * What a worker is told when its thread has grown close to what a web chat takes: stop, and
  * write the hand-over the next worker starts from (experimental.ts runWorker).
  */
-export const WRAP_UP = `Stop here: this thread's context is nearly full, and another worker with a fresh one goes on from your report. Run no more commands. Write the report now in the form you were given, with STATUS: PARTIAL. Under RESULT say exactly what is finished and true now. Under BLOCKERS write "LEFT TO DO:" and then, precisely, what remains and what you learned that the next worker needs (file names, formats, values, the command that checks the result), so that it does not have to read again what you read.`;
+export const WRAP_UP = `Stop here: this thread's context is nearly full, and another worker with a fresh one goes on from your report. Do NOT call any tools or run any commands; reply with text only.
+
+Write a concrete hand-over in this exact form so the next worker does not repeat your investigation:
+RESULT: what is already fixed, passing, or verified now (include exact pass/fail counts and clean files/modules not to recheck)
+CHANGES: files you created or edited and what changed in each
+VALIDATION: exact check/test command (including venv/env) and its latest result
+FAILURES: concrete remaining failure groups by file/module or root cause — exact test or error names, file:line, and diagnosed cause (or: none)
+TRIED: fixes or hypotheses already tried, and what worked or failed so dead ends are not repeated (or: none)
+NEXT: exact first action for the next worker (exact file, function/line, edit or focused command to run first)
+NOT CHECKED: what has not been run yet and why (or: nothing)
+BLOCKERS: LEFT TO DO: anything else the next worker needs (formats, values, caveats)
+STATUS: PARTIAL`;
 
 /**
  * A worker's brief. In order of what may never be cut: the rules and the report form; the
@@ -165,10 +182,13 @@ export function workerBrief(a: {
   const later = a.later.length
     ? `\nLATER TASKS (other workers do these, not you): ${clip(a.later.map((t) => clip(t.title, 80)).join("; "), 300)}`
     : "";
+  const handover = a.task.handover === true;
   const opening = whole
-    ? `You are the worker for this job. This message is all you know: do all THE REQUEST asks, check it, report, stop.`
-    : `You are one worker in a larger job. This message is all you know; do only YOUR TASK, then stop.`;
-  const task = `YOUR TASK (${a.index} of ${a.total}): ${a.task.title}${a.task.detail ? `\n${clipMiddle(a.task.detail, 1500)}` : ""}
+    ? `You are the worker for this job. This message is all you know: do all THE REQUEST asks, check it, report, stop.${handover ? " Continue directly from the hand-over under YOUR TASK (start with NEXT; do not redo finished work or re-run broad discovery)." : ""}`
+    : `You are one worker in a larger job. This message is all you know; do only YOUR TASK, then stop.${handover ? " Continue directly from the hand-over under YOUR TASK (start with NEXT; do not redo finished work or re-run broad discovery)." : ""}`;
+  const briefBudget = handover ? HANDOVER_BRIEF_BUDGET : BRIEF_BUDGET;
+  const detailLimit = handover ? 2600 : 1500;
+  const task = `YOUR TASK (${a.index} of ${a.total}): ${a.task.title}${a.task.detail ? `\n${clipMiddle(a.task.detail, detailLimit)}` : ""}
 DONE WHEN: ${clip(a.task.done, 240) || "the task is complete and you have checked it"}${later}${idle}${declined}`;
   const rules = `Rules: work in ${a.cwd}. ${whole ? "" : "Do only your task: it is DONE when its own done-criteria hold, even though the whole job is not finished yet. "}Read only the files you need. Use every name, path and value of the request exactly as written there. ${VERIFY_RULES} If an approval is refused, do not ask again: do it another way, or go on without it and name it under BLOCKERS. If you cannot finish, stop and say why rather than guess.
 
@@ -198,7 +218,7 @@ ${rules}`;
   // (which, beside the whole request, only repeats it). A request that does not fit is given in
   // its pieces, and then the names come before everything else: they stand for what was cut.
   const fixed = frame("", !!a.requestFile, "", "", "").length + (a.requestFile?.length ?? 0) + 40;
-  const room = Math.max(600, BRIEF_BUDGET - fixed);
+  const room = Math.max(600, briefBudget - fixed);
   const request = a.request.trim();
   const notesFloor = Math.min(notesIn(1600).length, 500);
   if (request.length <= room - notesFloor) {
@@ -208,7 +228,7 @@ ${rules}`;
     const folder = a.folder && a.folder.length + 10 <= left ? a.folder : "";
     left -= folder ? folder.length + 10 : 0;
     const names = left > 140 ? exactLine(a.exact, Math.min(600, left - 2)) : "";
-    return clipMiddle(frame(request, false, notes, folder, names), BRIEF_BUDGET);
+    return clipMiddle(frame(request, false, notes, folder, names), briefBudget);
   }
   const names = exactLine(a.exact, 600);
   const req = requestExcerpt(
@@ -220,7 +240,7 @@ ${rules}`;
   const notes = notesIn(Math.max(notesFloor, left));
   left -= notes.length;
   const folder = a.folder && a.folder.length + 10 <= left ? a.folder : "";
-  return clipMiddle(frame(req.text, true, notes, folder, names), BRIEF_BUDGET);
+  return clipMiddle(frame(req.text, true, notes, folder, names), briefBudget);
 }
 
 /** `checks` is what was recorded when the tasks ended (does the deliverable exist, did the last check pass). */

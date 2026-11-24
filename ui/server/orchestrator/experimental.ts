@@ -112,10 +112,14 @@ import {
   addRequest,
   clip,
   clipMiddle,
+  failureDigest,
+  mergeHandover,
   notesText,
   ORIGINAL_LIMIT,
+  renderHandover,
   reportSections,
   setPending,
+  type Handover,
 } from "./notes.ts";
 import {
   codeFindings,
@@ -207,8 +211,11 @@ export interface WorkerResult {
   error: string | null;
   /** Commands that were more than a look (or failed), with how each exited and the end of what it printed. */
   commands: Evidence[];
+  /** Non-look or failed commands with a compact failure digest (for hand-over ground truth). */
+  checks: { cmd: string; ok: boolean; exit: number | null; summary: string }[];
   files: { path: string; kind: string }[];
   calls: number;
+  /** Peak effective context tokens reached on this worker (single-request or cumulative delta). */
   maxInputTokens: number;
   /** The last command, when it failed (what a worker that reports nothing was stuck on). */
   lastFailure: { cmd: string; output: string } | null;
@@ -312,16 +319,71 @@ function wholeTask(job: string, suggested: MiniTask[]): MiniTask {
 }
 
 /**
- * The same task for a fresh worker, after one was stopped at its context budget: what that worker
- * handed over (its own words, bounded) and the instruction to go on from the files as they are.
+ * Tracks a worker thread's effective context size in tokens across model requests.
+ *
+ * Stateless APIs resend the full history every turn, so `last.inputTokens` grows monotonically and
+ * equals the active context size. Stateful web-chat continuations (chatgpt-web with `reuse_chat`)
+ * send only the new turn delta after call 1, so `last.inputTokens` drops below the prior context
+ * (~600-2,600 tokens per tool result) while the chat accumulates every turn until the bridge hits
+ * its ~15k cut and restarts. Detecting delta mode lets hand-over fire at `workerContextTokens`
+ * (11k) before the bridge has to trim or summarise.
  */
-function continuation(task: MiniTask, res: WorkerResult, n: number): MiniTask {
-  const said = res.report.trim()
-    ? clipMiddle(res.report.trim(), 1100)
-    : "(it gave no hand-over; the notes below hold what was recorded)";
+export interface ContextState {
+  calls: number;
+  tokens: number;
+  maxReported: number;
+  maxTokens: number;
+  prevOutput: number;
+  deltaMode: boolean;
+}
+
+export function createContextState(): ContextState {
+  return { calls: 0, tokens: 0, maxReported: 0, maxTokens: 0, prevOutput: 0, deltaMode: false };
+}
+
+export function updateContextState(
+  st: ContextState,
+  inputTokens: number,
+  outputTokens = 0,
+  stepToolTokens = 0,
+): number {
+  const inp = Math.max(0, Math.round(inputTokens || 0));
+  const out = Math.max(0, Math.round(outputTokens || 0));
+  st.calls++;
+  st.maxReported = Math.max(st.maxReported, inp);
+  if (st.calls === 1) {
+    st.tokens = inp;
+  } else if (!st.deltaMode) {
+    const dropped = inp > 0 && inp < st.tokens - 20;
+    const flatAfterTool =
+      inp > 0 && stepToolTokens >= 200 && st.prevOutput >= 20 && inp <= st.tokens + 20;
+    if (dropped || flatAfterTool) {
+      st.deltaMode = true;
+      st.tokens = st.tokens + st.prevOutput + inp;
+    } else {
+      st.tokens = Math.max(st.tokens, inp);
+    }
+  } else if (inp >= st.tokens) {
+    // The bridge restarted on a fresh chat and sent the whole history again.
+    st.tokens = inp;
+  } else {
+    st.tokens = st.tokens + st.prevOutput + inp;
+  }
+  st.prevOutput = out;
+  st.maxTokens = Math.max(st.maxTokens, st.tokens);
+  return st.tokens;
+}
+
+/**
+ * The same task for a fresh worker, after one was stopped at its context budget: the cumulative
+ * hand-over state (latest report plus carried-forward failure groups, tried fixes, files, checks
+ * and next action) and the instruction to go on from the files as they are.
+ */
+function continuation(task: MiniTask, ho: Handover): MiniTask {
   return {
     ...task,
-    detail: `(recorded) An earlier worker on this task was stopped when its context was nearly full (hand-over ${n}). Its report:\n${said}\nGo on from the files as they are now. Do not redo what is finished, and do not read again what the report already tells you.`,
+    detail: renderHandover(ho, 2500),
+    handover: true,
   };
 }
 
@@ -343,6 +405,7 @@ export async function runExperimental(run: Run): Promise<void> {
     notes.exact = exactNames(request);
     notes.deliverables = deliverablesIn(request, run.cwd);
     notes.approvals = [];
+    notes.handover = null;
   }
   /** What the work is measured against: this request, or the one being resumed, as written. */
   const job = resuming ? notes.original || (notes.requests.at(-1) ?? request) : notes.original;
@@ -600,13 +663,20 @@ export async function runExperimental(run: Run): Promise<void> {
         if (res.handoff) {
           // Its context was nearly full: it was stopped and asked for a hand-over. That is not a
           // failure of the task and not a reason to plan again: a fresh worker goes on from the
-          // hand-over and the notes, with the same task. Only when that keeps happening (or
-          // happens twice without anything changing) is the planner asked to split what is left.
+          // cumulative hand-over and the notes, with the same task. Only when that keeps happening
+          // (or happens twice without anything changing) is the planner asked to split what is left.
           handoffs++;
           run.stats.handoffs = handoffs;
           const moved = res.files.length > 0 || res.commands.some((c) => c.ok);
           dryHandoffs = moved ? 0 : dryHandoffs + 1;
           const said = reportSections(res.report);
+          const ho = mergeHandover(notes.handover, {
+            n: handoffs,
+            report: res.report,
+            files: res.files,
+            checks: res.checks,
+          });
+          notes.handover = ho;
           if (res.report.trim()) {
             reports.push(res.report);
             lastReport = res.report;
@@ -618,17 +688,16 @@ export async function runExperimental(run: Run): Promise<void> {
           }
           if (handoffs <= caps.handoffs && dryHandoffs < 2 && !task.followUp) {
             attempts.set(key, tries - 1);
-            queue.unshift(continuation(task, res, handoffs));
+            queue.unshift(continuation(task, ho));
             setPending(notes, queue);
             run.say(
-              `The worker's context was nearly full (${res.maxInputTokens} tokens in one request, of ${caps.workerContextTokens} allowed). A fresh worker goes on from its hand-over.`,
+              `The worker's context was nearly full (${res.maxInputTokens} tokens, of ${caps.workerContextTokens} allowed). A fresh worker goes on from its hand-over.`,
             );
             run.save();
             continue;
           }
           res.status = "failed";
           res.error = `its context filled up ${handoffs} time${handoffs === 1 ? "" : "s"} without the task finishing: the task is too big for one worker`;
-          res.report = "";
         }
         const rep = parseReport(res.report);
         const sec = reportSections(res.report);
@@ -660,6 +729,7 @@ export async function runExperimental(run: Run): Promise<void> {
         const contradicted = rep.status === "done" && res.lastFailure !== null;
         if (res.status === "completed" && rep.status === "done" && !contradicted) {
           addDone(notes, task.title, sec.result || "done");
+          notes.handover = null;
           finished.push(task);
           if (task.followUp)
             followUp = { ran: true, done: true, result: sec.result || res.report, why: "" };
@@ -735,14 +805,16 @@ export async function runExperimental(run: Run): Promise<void> {
           : "";
         // With no report to go on, the planner gets what the failed command printed.
         const evidence = res.budget
-          ? `(recorded) The worker was stopped: ${res.error}. It had not finished.${res.report ? `\nThe last thing it said: ${clip(res.report, 300)}` : ""}${trail}${res.lastFailure ? `\nThe last one failed with:\n${res.lastFailure.output}` : ""}`
-          : (contradicted
-              ? `${res.report}\n\n(recorded) Its last command, ${clip(res.lastFailure!.cmd, 160)}, failed with:\n${res.lastFailure!.output}`
-              : res.report) ||
-            res.error ||
-            (res.lastFailure
-              ? `(no report) The last command, ${clip(res.lastFailure.cmd, 160)}, failed with:\n${res.lastFailure.output}`
-              : "");
+          ? `(recorded) The worker was stopped: ${res.error}. It had not finished.${res.report ? `\nThe last thing it said: ${clip(res.report, 300)}` : ""}${notes.handover ? `\nEarlier hand-over working state:\n${renderHandover(notes.handover, 900)}` : ""}${trail}${res.lastFailure ? `\nThe last one failed with:\n${res.lastFailure.output}` : ""}`
+          : res.handoff
+            ? `(recorded) the worker stopped: ${res.error}${notes.handover ? `\nHand-over working state:\n${renderHandover(notes.handover, 1300)}` : res.report ? `\nIts hand-over report:\n${res.report}` : ""}${trail}`
+            : (contradicted
+                ? `${res.report}\n\n(recorded) Its last command, ${clip(res.lastFailure!.cmd, 160)}, failed with:\n${res.lastFailure!.output}`
+                : res.report) ||
+              res.error ||
+              (res.lastFailure
+                ? `(no report) The last command, ${clip(res.lastFailure.cmd, 160)}, failed with:\n${res.lastFailure.output}`
+                : "");
         // The same twice: recorded as what it is, not as the missing tool it names.
         addProblem(
           notes,
@@ -829,6 +901,7 @@ export async function runExperimental(run: Run): Promise<void> {
           break;
         }
         queue = revised.tasks;
+        notes.handover = null;
         setPending(notes, queue);
         run.say(`That hit a problem (${clip(why, 200)}). Revised plan:\n\n${list(queue)}`);
       }
@@ -992,6 +1065,7 @@ export async function runWorker(
     report: "",
     error: null,
     commands: [],
+    checks: [],
     files: [],
     calls: 0,
     maxInputTokens: 0,
@@ -1004,6 +1078,9 @@ export async function runWorker(
     declined: [],
     handoff: false,
   };
+  const ctx = createContextState();
+  let stepToolTokens = 0;
+  let wrapCalls = 0;
   run.stats.workers++;
   let wid: string;
   try {
@@ -1096,24 +1173,37 @@ export async function runWorker(
           // (a command nobody approved did not run: it is neither a result nor a failure)
           if (item.status === "declined") return;
           const ok = item.status === "completed" && (item.exitCode ?? 0) === 0;
-          out.lastFailure = ok
-            ? null
-            : { cmd, output: clipMiddle(String(item.aggregatedOutput ?? "").trim(), 500) };
+          const rawOut = String(item.aggregatedOutput ?? "");
+          stepToolTokens += Math.min(2600, Math.ceil((cmd.length + rawOut.length) / 4));
+          out.lastFailure = ok ? null : { cmd, output: clipMiddle(rawOut.trim(), 500) };
           // Looking around and writing files (those are under FILES) are not worth a line of notes.
-          if (!ok || !lookOnly(cmd))
+          if (!ok || !lookOnly(cmd)) {
+            const exit = typeof item.exitCode === "number" ? item.exitCode : null;
             out.commands.push({
               cmd,
               ok,
-              exit: typeof item.exitCode === "number" ? item.exitCode : null,
-              tail: tailOf(String(item.aggregatedOutput ?? "")),
+              exit,
+              tail: tailOf(rawOut),
             });
+            out.checks.push({
+              cmd,
+              ok,
+              exit,
+              summary: ok ? "" : failureDigest(rawOut, 600),
+            });
+          }
           out.ran++;
           out.recent.push({ cmd, ok });
           if (out.recent.length > 5) out.recent.shift();
         }
-        if (item.type === "fileChange" && item.status === "completed")
+        if (item.type === "fileChange" && item.status === "completed") {
+          stepToolTokens += Math.min(
+            2000,
+            Math.ceil(JSON.stringify(item.changes ?? []).length / 4),
+          );
           for (const c of (item.changes ?? []) as { path: string; kind?: { type?: string } }[])
             out.files.push({ path: relative(run.cwd, c.path), kind: c.kind?.type ?? "update" });
+        }
         return;
       }
       case "item/commandExecution/outputDelta":
@@ -1122,9 +1212,17 @@ export async function runWorker(
         return;
       case "thread/tokenUsage/updated": {
         // One of the worker's own model requests, as the harness reports it.
-        const usage = p.tokenUsage as { last?: { inputTokens?: number } } | undefined;
+        const usage = p.tokenUsage as
+          { last?: { inputTokens?: number; outputTokens?: number } } | undefined;
         out.calls++;
-        out.maxInputTokens = Math.max(out.maxInputTokens, usage?.last?.inputTokens ?? 0);
+        const stepContext = updateContextState(
+          ctx,
+          usage?.last?.inputTokens ?? 0,
+          usage?.last?.outputTokens ?? 0,
+          stepToolTokens,
+        );
+        stepToolTokens = 0;
+        out.maxInputTokens = Math.max(out.maxInputTokens, stepContext);
         run.stats.workerMaxInputTokens = Math.max(
           run.stats.workerMaxInputTokens,
           out.maxInputTokens,
@@ -1138,13 +1236,20 @@ export async function runWorker(
             interruptWorker();
           }
         }
-        // Its context: a request this large is close to what the web chat takes. The worker is
-        // stopped here and asked for its hand-over (below), before the bridge has to cut.
+        if (wrapping) {
+          wrapCalls++;
+          // Wrap-up asks for text only; if the worker ignores that and keeps calling tools, stop it.
+          if (!capStop && wrapCalls >= 2) interruptWorker();
+          return;
+        }
+        // Its context: once the active thread reaches this (either a single full-history request
+        // or accumulated delta turns in a continued web chat), stop here and ask for a hand-over
+        // before the bridge has to cut.
         if (
           !capStop &&
           !out.budget &&
           !out.handoff &&
-          (usage?.last?.inputTokens ?? 0) >= run.caps.workerContextTokens
+          stepContext >= run.caps.workerContextTokens
         ) {
           out.handoff = true;
           interruptWorker();
@@ -1214,8 +1319,10 @@ export async function runWorker(
     out.status = await done;
     if (out.handoff && !run.signal.aborted && !capStop && out.status !== "completed") {
       // The hand-over: one more request on the same thread, asking only for the report. What it
-      // says is what the next worker starts from; if nothing comes, the record has to do.
+      // says is what the next worker starts from; if nothing comes, rescue any pre-wrap-up report
+      // and fall back to the cumulative hand-over and recorded facts.
       wrapping = true;
+      const preWrapReport = out.report;
       out.report = "";
       done = new Promise<WorkerResult["status"]>((res) => (settle = res));
       const giveUp = setTimeout(
@@ -1236,6 +1343,7 @@ export async function runWorker(
       } finally {
         clearTimeout(giveUp);
       }
+      if (!out.report.trim() && preWrapReport.trim()) out.report = preWrapReport;
       out.status = "completed";
       out.error = null;
       harnessFailed = false;
