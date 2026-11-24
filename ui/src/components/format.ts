@@ -35,3 +35,15 @@ export function formatDuration(ms: number | null | undefined): string {
   if (s < 60) return `${s.toFixed(1)}s`;
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
+
+/**
+ * A message the provenance binary wrote (a turn's error, a retry note) for a turn the tiers
+ * ran: upstream's wording calls the agent "Codex" ("Codex ran out of room in the model's
+ * context window"); here it is Provenance. The other product keeps its name (Codex Cloud,
+ * Codex Apps, the Codex CLI), and so does every message of a fallback's turn, where Codex is
+ * what actually ran (pass `fallback` true).
+ */
+export function harnessMessage(message: string, fallback = false): string {
+  if (fallback) return message;
+  return message.replace(/(?<![\w-])Codex(?![\w]| (?:CLI|Cloud|Apps|Desktop)\b)/g, "Provenance");
+}

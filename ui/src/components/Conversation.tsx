@@ -4,7 +4,7 @@ import type { TurnUsage, TurnView } from "../store/state";
 import { useAppState } from "../store/store";
 import { Approvals } from "./Approvals";
 import { DiffView } from "./DiffView";
-import { formatDuration } from "./format";
+import { formatDuration, harnessMessage } from "./format";
 import { isToolItem, ItemView } from "./items/ItemView";
 import { ToolGroup } from "./items/ToolGroup";
 import type { ThreadItem } from "../protocol";
@@ -128,10 +128,12 @@ function Turn({
         .slice(-1)
         .map((e, i) => (
           <div key={i} className="turn-note warn">
-            {e.message} — retrying…
+            {harnessMessage(e.message, !!fallbackOf(model))} — retrying…
           </div>
         ))}
-      {turn.error && <div className="error-card">{turn.error.message}</div>}
+      {turn.error && (
+        <div className="error-card">{harnessMessage(turn.error.message, !!fallbackOf(model))}</div>
+      )}
       {running && !streamingText && (
         <div className="working">
           <TierBadge model={model} compact />
