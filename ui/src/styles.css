@@ -2947,6 +2947,9 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   flex-direction: column;
   gap: 2px;
 }
+.autologin-text .meta {
+  white-space: normal;
+}
 .autologin-who {
   font-size: var(--fs-sm);
   color: var(--text);
@@ -3017,8 +3020,9 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 /* Right after a sign-in: "Keep this account signed in?" (optional). */
 .keep-offer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
   width: 100%;
   max-width: 420px;
   margin-top: 16px;
@@ -3026,6 +3030,10 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   border-radius: var(--radius-lg);
   background: var(--panel-2);
   text-align: left;
+}
+.keep-offer > .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .keep-offer-open {
   display: block;
@@ -3036,7 +3044,7 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
   margin: 0;
 }
 .keep-offer-text {
-  flex: 1;
+  flex: 1 1 200px;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -3048,6 +3056,11 @@ html[data-shell="darwin"] .app:is([data-sidebar="closed"], [data-narrow]) .threa
 .keep-offer-title {
   font-size: var(--fs-md);
   font-weight: 500;
+}
+.keep-offer-title .setup-status {
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: normal;
 }
 .keep-offer-done {
   margin: 16px 0 0;

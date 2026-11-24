@@ -5,15 +5,18 @@
 
 import type {
   AccountPlan,
+  AutologinPaused,
   AutologinPut,
   AutologinResult,
   KeyPatch,
   KeyPost,
   KeysPut,
   KeyTier,
+  LoginMethod,
   OutcomePost,
   LoginState,
   ProviderPatch,
+  SsoLoginMethod,
   WindowBounds,
   WireAccount,
   WireBrowser,
@@ -30,14 +33,18 @@ import type {
   WireWebModel,
 } from "../../shared/router-api";
 
-export type { LoginState } from "../../shared/router-api";
+export type { LoginMethod, LoginState, SsoLoginMethod } from "../../shared/router-api";
 
-export type Login = Pick<WireLogin, "state" | "reason"> & { shown?: boolean };
-export type WebAccount = Omit<Required<WireAccount>, "autologin"> & {
-  /** null: the router has no saved sign-in (an older one): nothing about it is shown. */
-  autologin: WireAutologin | null;
+export type Login = Pick<WireLogin, "state" | "reason"> & {
+  method: LoginMethod | null;
+  shown?: boolean;
 };
-export type Autologin = WireAutologin;
+export type WebAccount = Omit<Required<WireAccount>, "autologin" | "login"> & {
+  login: Login;
+  /** null: the router has no saved sign-in (an older one): nothing about it is shown. */
+  autologin: Autologin | null;
+};
+export type Autologin = Required<WireAutologin>;
 export type PoolHelp = Omit<
   WirePoolHelpProvider,
   "needs" | "recommended" | "multiple_keys" | "until" | "experience" | "setup" | "why_person"
@@ -160,6 +167,18 @@ const objs = (v: unknown): Obj[] =>
   Array.isArray(v) ? (v as Obj[]).filter((x) => typeof x?.id === "string") : [];
 
 const STATES: LoginState[] = ["idle", "preparing", "open", "verifying", "signed_in", "failed"];
+const LOGIN_METHODS: LoginMethod[] = [
+  "google",
+  "password",
+  "microsoft",
+  "apple",
+  "github",
+  "other",
+];
+
+function parseLoginMethod(v: unknown): LoginMethod | null {
+  return LOGIN_METHODS.includes(v as LoginMethod) ? (v as LoginMethod) : null;
+}
 
 function parseLogin(v: unknown): Login {
   const o = (v ?? {}) as Obj;
@@ -167,22 +186,27 @@ function parseLogin(v: unknown): Login {
   return {
     state,
     reason: strOrNull(o.reason),
+    method: parseLoginMethod(o.method),
     ...(typeof o.shown === "boolean" ? { shown: o.shown } : {}),
   };
 }
 
 const PLANS: AccountPlan[] = ["free", "paid", "unknown"];
 const RESULTS: AutologinResult[] = ["ok", "wrong_password", "needs_person", "error"];
+const PAUSED: AutologinPaused[] = ["wrong_password", "needs_person"];
 
-function parseAutologin(v: unknown): WireAutologin | null {
+function parseAutologin(v: unknown): Autologin | null {
   if (!v || typeof v !== "object") return null;
   const o = v as Obj;
   const t = (o.last_try ?? null) as Obj | null;
+  const saved = o.saved === true;
+  const method = parseLoginMethod(o.method);
+  const nextTry = num(o.next_try_in_s);
   return {
     supported: o.supported === true,
     reason: strOrNull(o.reason),
     enabled: o.enabled === true,
-    saved: o.saved === true,
+    saved,
     username: strOrNull(o.username),
     attempts_today: num(o.attempts_today) ?? 0,
     last_try:
@@ -195,6 +219,17 @@ function parseAutologin(v: unknown): WireAutologin | null {
             detail: strOrNull(t.detail),
           }
         : null,
+    method,
+    method_label: strOrNull(o.method_label),
+    needs_credentials:
+      typeof o.needs_credentials === "boolean"
+        ? o.needs_credentials
+        : method === "password" && !saved,
+    queued: o.queued === true,
+    next_try_in_s: nextTry !== null ? Math.max(0, nextTry) : null,
+    running: o.running === true,
+    paused: PAUSED.includes(o.paused as AutologinPaused) ? (o.paused as AutologinPaused) : null,
+    note: strOrNull(o.note),
   };
 }
 
@@ -334,7 +369,20 @@ export function saveAutologin(
   username: string,
   password: string,
 ): Promise<Result<unknown>> {
-  const body: AutologinPut = { agree: true, username, password };
+  const body: AutologinPut = { agree: true, username, password, method: "password" };
+  return call("PUT", `${accountPath(provider, account)}/autologin`, body);
+}
+
+/**
+ * Enable passwordless automatic re-sign-in for a remembered SSO method (Google, Microsoft, Apple).
+ * No password is stored.
+ */
+export function enableSsoAutologin(
+  provider: string,
+  account: string,
+  method: SsoLoginMethod,
+): Promise<Result<unknown>> {
+  const body: AutologinPut = { agree: true, method };
   return call("PUT", `${accountPath(provider, account)}/autologin`, body);
 }
 
@@ -714,6 +762,37 @@ export function planText(a: WebAccount): string | null {
   if (a.plan !== "paid") return null;
   const l = a.plan_label?.trim();
   return l ? l.charAt(0).toUpperCase() + l.slice(1) : "Paid";
+}
+
+/** True when a remembered login method supports passwordless SSO auto-relogin. */
+export function isSsoLoginMethod(m: LoginMethod | null | undefined): m is SsoLoginMethod {
+  return m === "google" || m === "microsoft" || m === "apple";
+}
+
+/** Human-readable name of a remembered login method ("Google", "GitHub", a host label, ...). */
+export function loginMethodName(method: LoginMethod, label?: string | null): string {
+  switch (method) {
+    case "google":
+      return "Google";
+    case "microsoft":
+      return "Microsoft";
+    case "apple":
+      return "Apple";
+    case "github":
+      return "GitHub";
+    case "password":
+      return "email & password";
+    case "other":
+      return label?.trim() || "another sign-in method";
+  }
+}
+
+/** "Retry queued", "Retry queued in 45 s", "Retry queued in 3 min", "Retry queued in 2 h". */
+export function queuedRetryText(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return "Retry queued";
+  if (seconds < 60) return `Retry queued in ${Math.max(1, Math.round(seconds))} s`;
+  if (seconds < 3600) return `Retry queued in ${Math.max(1, Math.round(seconds / 60))} min`;
+  return `Retry queued in ${Math.max(1, Math.round(seconds / 3600))} h`;
 }
 
 /** "14:02" today, "yesterday 14:02", "Nov 2, 14:02". */

@@ -33,7 +33,7 @@ export const PRESENCE = {
   /** The state line, under the tier and orchestrator. */
   credit: "Harness by SkyeNXT · coming soon",
   /** Hover text of the app icon. */
-  largeText: "Provenance · harness by SkyeNXT · made by Yufan",
+  largeText: "Provenance · harness by SkyeNXT",
   /** Clicking the app icon (newer Discord clients) opens this. */
   largeUrl: REPO_URL,
   /** Up to two; Discord shows them to everyone but you. Label 1-32 chars, https URL. */

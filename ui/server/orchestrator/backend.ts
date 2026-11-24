@@ -150,7 +150,7 @@ export const DEFAULT_CAPS: Caps = {
   workerCalls: WORKER_CALLS,
   workerMs: WORKER_MINUTES * 60_000,
   workerContextTokens: WORKER_CONTEXT_TOKENS,
-  handoffs: 4,
+  handoffs: 8,
   workerIdleMs: 5 * 60_000,
   commandMs: 120_000,
   turnMs: TURN_MINUTES * 60_000,
@@ -183,6 +183,8 @@ export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const tokens = Number(env.PROVENANCE_ORC_WORKER_TOKENS);
   if (Number.isInteger(tokens) && tokens >= 2000 && tokens <= 1_000_000)
     out.workerContextTokens = tokens;
+  const handoffs = Number(env.PROVENANCE_ORC_HANDOFFS);
+  if (Number.isInteger(handoffs) && handoffs >= 1 && handoffs <= 50) out.handoffs = handoffs;
   const all = Number(env.PROVENANCE_ORC_MODEL_CALLS);
   if (Number.isInteger(all) && all >= 5 && all <= 5000) out.modelCalls = all;
   const turn = Number(env.PROVENANCE_ORC_TURN_MINUTES);

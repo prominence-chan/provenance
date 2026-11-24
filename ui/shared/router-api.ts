@@ -10,6 +10,10 @@
 
 export type LoginState = "idle" | "preparing" | "open" | "verifying" | "signed_in" | "failed";
 
+export type LoginMethod = "google" | "password" | "microsoft" | "apple" | "github" | "other";
+
+export type SsoLoginMethod = "google" | "microsoft" | "apple";
+
 export interface WireLogin {
   state: LoginState;
   reason: string | null;
@@ -18,6 +22,8 @@ export interface WireLogin {
   since?: number;
   /** How the window ended: "cookie" (signed in), "closed", "timeout". */
   how?: string | null;
+  /** Detected login method once verified. */
+  method?: LoginMethod | null;
   /** POST /web/login/show only: whether macOS brought the window forward. */
   shown?: boolean;
 }
@@ -38,7 +44,7 @@ export interface WireAccount {
   signing_in?: boolean;
   /** Its background browser window is open. */
   window_open?: boolean;
-  login: { state: LoginState; reason: string | null };
+  login: { state: LoginState; reason: string | null; method?: LoginMethod | null };
   /** The site's plan for this account (ChatGPT: free or a paid one); absent from older routers. */
   plan?: AccountPlan;
   /** The plan's own name, e.g. "plus", "pro" (null when free or unknown). */
@@ -53,8 +59,10 @@ export type AccountPlan = "free" | "paid" | "unknown";
 
 export type AutologinResult = "ok" | "wrong_password" | "needs_person" | "error";
 
+export type AutologinPaused = "wrong_password" | "needs_person";
+
 export interface WireAutologin {
-  /** This site can be signed back in with a username and password. */
+  /** This site can be signed back in automatically (via saved password or remembered SSO). */
   supported: boolean;
   /** Why not, in words to show (e.g. a Google account), when unsupported. */
   reason: string | null;
@@ -64,14 +72,39 @@ export interface WireAutologin {
   username: string | null;
   attempts_today: number;
   last_try: { at: number; result: AutologinResult; detail: string | null } | null;
+  /** Remembered login method from the sign-in flow or explicit setup; absent from older routers. */
+  method?: LoginMethod | null;
+  /** Host/label when method === "other". */
+  method_label?: string | null;
+  /** True when method === "password" and credentials haven't been saved yet. */
+  needs_credentials?: boolean;
+  /** True when an automatic re-sign-in retry is queued. */
+  queued?: boolean;
+  /** Seconds until next queued/allowed try. */
+  next_try_in_s?: number | null;
+  /** True while an auto-relogin attempt is running. */
+  running?: boolean;
+  /** Why automatic re-sign-in is paused until the person intervenes. */
+  paused?: AutologinPaused | null;
+  /** Optional status note from the router. */
+  note?: string | null;
 }
 
-/** PUT /web/accounts/{provider}/{account}/autologin. Write-only: never answered with the password. */
-export interface AutologinPut {
-  agree: true;
-  username: string;
-  password: string;
-}
+/**
+ * PUT /web/accounts/{provider}/{account}/autologin. Write-only: never answered with the password.
+ * Supports both email/password credential save and passwordless SSO auto-relogin enable.
+ */
+export type AutologinPut =
+  | {
+      agree: true;
+      username: string;
+      password: string;
+      method?: "password";
+    }
+  | {
+      agree: true;
+      method: SsoLoginMethod;
+    };
 
 export interface WireWebModel {
   id: string;

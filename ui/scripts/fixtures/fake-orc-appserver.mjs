@@ -21,7 +21,9 @@
 //   GROWS      its requests grow past the context budget (12,000 input tokens) after its command
 //              and edit, until it is interrupted; asked to wrap up it reports PARTIAL with what is
 //              LEFT TO DO. A worker whose brief carries that hand-over finishes (GROWS <n>: the
-//              first n workers grow; GROWS DRY: always grows, before it has run or changed anything)
+//              first n workers grow; GROWS DRY: always grows, before it has run or changed anything;
+//              GROWS DELTA: simulates stateful web-chat delta usage [3300, 2615, 2170, 2615, ...]
+//              with structured, terse, and empty wrap-ups across 3 hand-overs)
 //   LOOKSONLY  runs its command, changes no file, and reports BLOCKED
 //   UNCHECKED  its report names something under NOT CHECKED
 //   ENVBLOCK   reports PARTIAL: a tool is missing (its command passed, its file is written)
@@ -52,25 +54,25 @@ const ask = (method, params) =>
     send({ id, method, params });
   });
 
-const usage = (threadId, turnId, input) =>
+const usage = (threadId, turnId, input, output = 50) =>
   note("thread/tokenUsage/updated", {
     threadId,
     turnId,
     tokenUsage: {
       total: {
-        totalTokens: input + 50,
+        totalTokens: input + output,
         inputTokens: input,
         cachedInputTokens: 0,
         cacheWriteInputTokens: 0,
-        outputTokens: 50,
+        outputTokens: output,
         reasoningOutputTokens: 0,
       },
       last: {
-        totalTokens: input + 50,
+        totalTokens: input + output,
         inputTokens: input,
         cachedInputTokens: 0,
         cacheWriteInputTokens: 0,
-        outputTokens: 50,
+        outputTokens: output,
         reasoningOutputTokens: 0,
       },
       modelContextWindow: 16000,
@@ -136,9 +138,80 @@ async function workerTurn(threadId, turnId, brief) {
   await sleep(10);
   if (/^Stop here: this thread's context is nearly full/.test(brief)) {
     // the hand-over a worker is asked for when its context is full
+    if (th.deltaMode) {
+      usage(threadId, turnId, 280, 120);
+      if (th.deltaStage === 0) {
+        say(
+          [
+            "RESULT: diagnosed all 32 failures across 3 modules; cacheutils is clean",
+            "CHANGES: boltons/cacheutils.py (fixed LRU eviction)",
+            "VALIDATION: .venv/bin/pytest -q -> 21 failed, 340 passed",
+            "FAILURES:",
+            "- boltons/dictutils.py:142 OMD.popall drops last key (test_omd_popall)",
+            "- boltons/iterutils.py:88 windowed skips final short chunk (test_windowed)",
+            "TRIED: checked setutils first — already passing; naive slice in windowed broke fill=None",
+            "NEXT: edit boltons/dictutils.py:142 OMD.popall and run .venv/bin/pytest tests/test_dictutils.py",
+            "NOT CHECKED: full suite after dictutils/iterutils fixes",
+            "BLOCKERS: LEFT TO DO: finish dictutils and iterutils",
+            "STATUS: PARTIAL",
+          ].join("\n"),
+        );
+      } else if (th.deltaStage === 1) {
+        // Simulates a terse successor that only reports count/status and omits FAILURES/TRIED/NEXT.
+        say(
+          "RESULT: fixed dictutils; failing tests reduced from 21 to 10\nCHANGES: boltons/dictutils.py\nVALIDATION: .venv/bin/pytest -q -> 10 failed\nBLOCKERS: LEFT TO DO: fix remaining 10 tests\nSTATUS: PARTIAL",
+        );
+      } else {
+        // Simulates a worker whose wrap-up produces no text at all.
+      }
+      return finish("completed");
+    }
     usage(threadId, turnId, 12500);
     say(
       "RESULT: the first half is written and its check passed\nCHANGES: f-half.txt\nVALIDATION: ran python3 check.py, passed\nNOT CHECKED: the second half\nBLOCKERS: LEFT TO DO: write the second half; the format is one row per line, id first\nSTATUS: PARTIAL",
+    );
+    return finish("completed");
+  }
+  if (/GROWS DELTA/.test(task)) {
+    const stage = Number(/\(hand-over (\d+)\)/.exec(brief)?.[1] ?? 0);
+    th.deltaMode = true;
+    th.deltaStage = stage;
+    usage(threadId, turnId, 3300, 200);
+    if (stage < 3) {
+      const cid = randomUUID();
+      const pytestCmd = ".venv/bin/pytest -q";
+      const pytestOut =
+        stage === 0
+          ? "collected 361 items\nFAILED tests/test_dictutils.py::test_omd_popall - AssertionError: missing key\nFAILED tests/test_iterutils.py::test_windowed - ValueError: bad chunk\n21 failed, 340 passed in 1.2s\n"
+          : "collected 361 items\nFAILED tests/test_iterutils.py::test_windowed - ValueError: bad chunk\n10 failed, 351 passed in 1.1s\n";
+      item("item/started", cmdItem(cid, pytestCmd, th.cwd, "inProgress"));
+      item("item/completed", cmdItem(cid, pytestCmd, th.cwd, "failed", pytestOut, 1));
+      const fid = randomUUID();
+      const fname = stage === 0 ? "cacheutils.py" : stage === 1 ? "dictutils.py" : "iterutils.py";
+      const file = {
+        id: fid,
+        type: "fileChange",
+        changes: [{ path: `${th.cwd}/${fname}`, kind: { type: "update" }, diff: "+fix" }],
+        status: "completed",
+      };
+      item("item/started", { ...file, status: "inProgress" });
+      item("item/completed", file);
+      // Emit chatgpt-web-like delta token counts (< 3300 each): cumulative context crosses 11k on delta #3.
+      for (const delta of [2615, 2170, 2615, 2615, 2615, 14500]) {
+        if (th.interrupted) break;
+        usage(threadId, turnId, delta, 200);
+        await sleep(15);
+      }
+      return finish("interrupted");
+    }
+    const cid = randomUUID();
+    item("item/started", cmdItem(cid, ".venv/bin/pytest -q", th.cwd, "inProgress"));
+    item(
+      "item/completed",
+      cmdItem(cid, ".venv/bin/pytest -q", th.cwd, "completed", "361 passed\n", 0),
+    );
+    say(
+      "RESULT: all 361 tests pass\nCHANGES: iterutils.py\nVALIDATION: .venv/bin/pytest -q passed\nBLOCKERS: none\nSTATUS: DONE",
     );
     return finish("completed");
   }

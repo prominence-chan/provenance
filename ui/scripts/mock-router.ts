@@ -57,10 +57,14 @@
 import http from "node:http";
 import type {
   AccountPlan,
+  AutologinPaused,
   AutologinResult,
+  LoginMethod,
   LoginState,
+  SsoLoginMethod,
   WindowBounds,
   WireAccount,
+  WireAutologin,
   WireBrowser,
   WireHealth,
   WireProvider,
@@ -116,7 +120,33 @@ interface Autologin {
   username: string | null;
   attempts_today: number;
   last_try: { at: number; result: AutologinResult; detail: string | null } | null;
+  method: LoginMethod | null;
+  method_label: string | null;
+  needs_credentials: boolean;
+  queued: boolean;
+  next_try_in_s: number | null;
+  running: boolean;
+  paused: AutologinPaused | null;
+  note: string | null;
 }
+
+const SSO_METHODS: SsoLoginMethod[] = ["google", "microsoft", "apple"];
+const isSso = (m: unknown): m is SsoLoginMethod => SSO_METHODS.includes(m as SsoLoginMethod);
+const blankAutologin = (): Autologin => ({
+  enabled: false,
+  saved: false,
+  username: null,
+  attempts_today: 0,
+  last_try: null,
+  method: null,
+  method_label: null,
+  needs_credentials: false,
+  queued: false,
+  next_try_in_s: null,
+  running: false,
+  paused: null,
+  note: null,
+});
 
 const PROVIDERS: Provider[] = [
   {
@@ -206,6 +236,8 @@ interface State {
   legacy: boolean;
   /** A router from before saved sign-ins, plans and /pool/help. */
   older: boolean;
+  /** A router with saved sign-ins, but before method/queued/running/paused fields. */
+  olderAutologin: boolean;
   /** provider id -> account id -> its plan */
   plans: Record<
     string,
@@ -264,6 +296,7 @@ function scenario(name: string): State {
     down: false,
     legacy: false,
     older: false,
+    olderAutologin: false,
     plans: {},
     autologin: {},
     nextTry: { result: "ok", detail: null },
@@ -357,7 +390,13 @@ function inProgress(): { provider: string; account: string } | null {
   return null;
 }
 
-function finish(provider: string, account: string, ok: boolean, reason?: string): boolean {
+function finish(
+  provider: string,
+  account: string,
+  ok: boolean,
+  reason?: string,
+  opts?: { method?: LoginMethod; method_label?: string | null; autologin_enabled?: boolean },
+): boolean {
   const a = state.accounts[provider]?.[account];
   if (!a || a.login.state !== "open") return false;
   // The router sees the sign-in finish, closes the window and checks the site in the background.
@@ -365,7 +404,11 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
   later(VERIFY_MS, () => {
     if (a.login.state !== "verifying") return;
     if (ok) {
-      a.login = { state: "signed_in", reason: null };
+      a.login = {
+        state: "signed_in",
+        reason: null,
+        ...(opts?.method ? { method: opts.method } : {}),
+      };
       Object.assign(a, {
         signed_in: true,
         checked_at: now(),
@@ -373,6 +416,24 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
         blocked: false,
         reason: null,
       });
+      if (opts?.method) {
+        const prev = state.autologin[provider]?.[account];
+        const next: Autologin = prev ? { ...prev } : blankAutologin();
+        next.method = opts.method;
+        next.method_label = opts.method === "other" ? (opts.method_label ?? null) : null;
+        if (isSso(opts.method) && AUTOLOGIN[provider] === null) {
+          next.saved = false;
+          next.username = null;
+          next.enabled = opts.autologin_enabled !== false;
+          next.needs_credentials = false;
+          next.paused = null;
+        } else if (opts.method === "password") {
+          next.needs_credentials = !next.saved;
+        } else {
+          next.needs_credentials = false;
+        }
+        (state.autologin[provider] ??= {})[account] = next;
+      }
     } else {
       const why =
         reason ??
@@ -384,17 +445,32 @@ function finish(provider: string, account: string, ok: boolean, reason?: string)
   return true;
 }
 
-function autologinBody(provider: string, account: string) {
+function autologinBody(provider: string, account: string): WireAutologin {
   const reason = AUTOLOGIN[provider];
+  const supported = reason === null;
   const al = state.autologin[provider]?.[account];
-  return {
-    supported: reason === null,
+  const base: WireAutologin = {
+    supported,
     reason: reason ?? null,
     enabled: al?.enabled ?? false,
     saved: al?.saved ?? false,
     username: al?.username ?? null,
     attempts_today: al?.attempts_today ?? 0,
     last_try: al?.last_try ?? null,
+  };
+  if (state.olderAutologin) return base;
+  const method = al?.method ?? null;
+  const saved = al?.saved ?? false;
+  return {
+    ...base,
+    method,
+    method_label: al?.method_label ?? null,
+    needs_credentials: al?.needs_credentials ?? (supported && method === "password" && !saved),
+    queued: al?.queued ?? false,
+    next_try_in_s: al?.next_try_in_s ?? null,
+    running: al?.running ?? false,
+    paused: al?.paused ?? null,
+    note: al?.note ?? null,
   };
 }
 
@@ -564,7 +640,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     if (p === "/mock/finish") {
       const { provider, account } = target(body);
-      const ok = finish(provider, account, body.ok !== false, body.reason as string | undefined);
+      const ok = finish(provider, account, body.ok !== false, body.reason as string | undefined, {
+        method: typeof body.method === "string" ? (body.method as LoginMethod) : undefined,
+        method_label: typeof body.method_label === "string" ? body.method_label : null,
+        autologin_enabled:
+          typeof body.autologin_enabled === "boolean" ? body.autologin_enabled : undefined,
+      });
       if (ok && typeof body.plan === "string")
         (state.plans[provider] ??= {})[account] = {
           plan: body.plan as AccountPlan,
@@ -591,11 +672,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     if (p === "/mock/older") {
       state.older = body.older !== false;
+      state.olderAutologin = body.olderAutologin === true;
       state.noWebOpen = body.noWebOpen === true;
       state.noMultiKey = body.noMultiKey === true;
       setPoolFlags({ older: state.older, noMultiKey: state.noMultiKey });
       return send(res, 200, {
         older: state.older,
+        olderAutologin: state.olderAutologin,
         noWebOpen: state.noWebOpen,
         noMultiKey: state.noMultiKey,
       });
@@ -610,10 +693,32 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       return send(res, 200, { ok: true });
     }
     if (p === "/mock/autologin") {
-      state.nextTry = {
-        result: (body.result as AutologinResult) ?? "ok",
-        detail: (body.detail as string) ?? null,
-      };
+      if (typeof body.provider === "string" && typeof body.account === "string") {
+        const provider = body.provider;
+        const account = body.account;
+        const al = ((state.autologin[provider] ??= {})[account] ??= blankAutologin());
+        if ("method" in body) al.method = (body.method as LoginMethod | null) ?? null;
+        if ("method_label" in body) al.method_label = (body.method_label as string | null) ?? null;
+        if (typeof body.enabled === "boolean") al.enabled = body.enabled;
+        if (typeof body.saved === "boolean") al.saved = body.saved;
+        if ("username" in body) al.username = (body.username as string | null) ?? null;
+        if (typeof body.needs_credentials === "boolean")
+          al.needs_credentials = body.needs_credentials;
+        if (typeof body.queued === "boolean") al.queued = body.queued;
+        if ("next_try_in_s" in body)
+          al.next_try_in_s = typeof body.next_try_in_s === "number" ? body.next_try_in_s : null;
+        if (typeof body.running === "boolean") al.running = body.running;
+        if ("paused" in body) al.paused = (body.paused as AutologinPaused | null) ?? null;
+        if ("note" in body) al.note = (body.note as string | null) ?? null;
+        if (typeof body.attempts_today === "number") al.attempts_today = body.attempts_today;
+        if ("last_try" in body) al.last_try = (body.last_try as Autologin["last_try"]) ?? null;
+      }
+      if (typeof body.result === "string" || !("provider" in body)) {
+        state.nextTry = {
+          result: (body.result as AutologinResult) ?? "ok",
+          detail: (body.detail as string) ?? null,
+        };
+      }
       return send(res, 200, { ok: true });
     }
     return send(res, 404, { detail: "Not Found" });
@@ -647,31 +752,62 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     if (AUTOLOGIN[provider] !== null)
       return send(res, 409, { detail: AUTOLOGIN[provider] ?? "Not supported here." });
-    const al = ((state.autologin[provider] ??= {})[account] ??= {
-      enabled: false,
-      saved: false,
-      username: null,
-      attempts_today: 0,
-      last_try: null,
-    });
+    const al = ((state.autologin[provider] ??= {})[account] ??= blankAutologin());
     if (what === "autologin" && m === "PUT") {
       const body = await readJson(req);
       if (body.agree !== true)
         return send(res, 409, { detail: "Saving a sign-in needs the person's agreement." });
+      if (isSso(body.method)) {
+        Object.assign(al, {
+          method: body.method,
+          method_label: null,
+          saved: false,
+          username: null,
+          enabled: true,
+          needs_credentials: false,
+          queued: false,
+          next_try_in_s: null,
+          running: false,
+          paused: null,
+          last_try: null,
+        });
+        return send(res, 200, autologinBody(provider, account));
+      }
+      if (body.method !== undefined && body.method !== "password")
+        return send(res, 409, { detail: "Unsupported sign-in method for automatic re-sign-in." });
       const username = typeof body.username === "string" ? body.username.trim() : "";
       if (!username || typeof body.password !== "string" || !body.password)
         return send(res, 409, { detail: "Both the username and the password are needed." });
       // The real router puts the password in the keychain; the mock keeps nothing of it.
-      Object.assign(al, { saved: true, enabled: true, username, last_try: null });
+      Object.assign(al, {
+        saved: true,
+        enabled: true,
+        username,
+        method: "password" as const,
+        method_label: null,
+        needs_credentials: false,
+        queued: false,
+        next_try_in_s: null,
+        running: false,
+        paused: null,
+        last_try: null,
+      });
       return send(res, 200, autologinBody(provider, account));
     }
     if (what === "autologin" && m === "PATCH") {
       const body = await readJson(req);
       if (typeof body.enabled !== "boolean")
         return send(res, 409, { detail: "enabled is true or false." });
-      if (!al.saved) return send(res, 409, { detail: "No sign-in is saved for this account." });
+      if (!al.saved && !isSso(al.method))
+        return send(res, 409, { detail: "No sign-in is saved for this account." });
       al.enabled = body.enabled;
-      if (al.enabled && al.last_try?.result === "wrong_password") al.last_try = null;
+      al.paused = null;
+      if (!al.enabled) {
+        al.queued = false;
+        al.next_try_in_s = null;
+      } else if (al.last_try?.result === "wrong_password") {
+        al.last_try = null;
+      }
       return send(res, 200, autologinBody(provider, account));
     }
     if (what === "autologin" && m === "DELETE") {
@@ -680,11 +816,21 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     if (what === "autologin/try" && m === "POST") {
       await readJson(req);
-      if (!al.saved || !al.enabled)
+      if ((!al.saved && !isSso(al.method)) || !al.enabled)
         return send(res, 409, { detail: "Saved sign-in is off for this account." });
       al.attempts_today++;
+      al.running = false;
+      al.queued = false;
+      al.next_try_in_s = null;
       al.last_try = { at: now(), ...state.nextTry };
-      if (state.nextTry.result === "wrong_password") al.enabled = false;
+      if (state.nextTry.result === "wrong_password") {
+        al.enabled = false;
+        al.paused = "wrong_password";
+      } else if (state.nextTry.result === "needs_person") {
+        al.paused = "needs_person";
+      } else {
+        al.paused = null;
+      }
       if (state.nextTry.result === "ok") Object.assign(a, { signed_in: true, checked_at: now() });
       return send(res, 200, autologinBody(provider, account));
     }

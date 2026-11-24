@@ -55,24 +55,28 @@ path, cmd, *rest = sys.argv[1:]
 data = tomllib.load(open(path, "rb"))
 hooks = {h["file"]: h for h in data["hook"]}
 owned = data["owned"]["paths"]
-def is_owned(p):
-    for pat in owned:
+dropped = data.get("dropped", {}).get("paths", [])
+def matches(p, pats):
+    for pat in pats:
         if pat.endswith("/"):
             if p.startswith(pat): return True
         elif len(pat.split("/")) == len(p.split("/")) and fnmatch.fnmatchcase(p, pat):
             return True
     return False
+def is_owned(p): return matches(p, owned)
+def is_dropped(p): return matches(p, dropped)
 if cmd == "classify":            # classify FILE... -> "<kind>\t<file>\t<why>"
     for f in rest:
         if f == "codex-rs/Cargo.lock": print(f"lock\t{f}\t")
         elif is_owned(f): print(f"owned\t{f}\t")
+        elif is_dropped(f): print(f"dropped\t{f}\t")
         elif f in hooks: print(f"hook\t{f}\t{hooks[f]['why']}")
         else: print(f"other\t{f}\t")
 elif cmd == "counts":            # counts -> "<file>\t<expected>"
     for f, h in hooks.items(): print(f"{f}\t{h['count']}")
 elif cmd == "mapped":            # mapped FILE... -> files that are neither owned nor hooked
     for f in rest:
-        if f != "codex-rs/Cargo.lock" and not is_owned(f) and f not in hooks: print(f)
+        if f != "codex-rs/Cargo.lock" and not is_owned(f) and not is_dropped(f) and f not in hooks: print(f)
 PY
 }
 
@@ -179,8 +183,9 @@ if [[ "$MODE" == "sync" ]]; then
   while IFS=$'\t' read -r kind file why; do
     [[ -z "$file" ]] && continue
     case "$kind" in
-      lock)  git checkout --theirs -- "$file" && git add -- "$file"; say "  auto  $file: upstream's (cargo regenerates it)" ;;
-      owned) git checkout --ours -- "$file" && git add -- "$file"; say "  auto  $file: fork-owned, kept ours" ;;
+      lock)    git checkout --theirs -- "$file" && git add -- "$file"; say "  auto  $file: upstream's (cargo regenerates it)" ;;
+      owned)   git checkout --ours -- "$file" && git add -- "$file"; say "  auto  $file: fork-owned, kept ours" ;;
+      dropped) git rm -qf -- "$file"; say "  auto  $file: dropped root file, kept removed" ;;
       other)
         if git show ":2:$file" 2>/dev/null | grep -q 'PROVENANCE-HOOK'; then
           NEED+=("$file"); say "  YOU   $file: has a hook tag but is missing from hooks.toml"
