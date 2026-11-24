@@ -24,9 +24,10 @@ These paths never exist upstream, so they never conflict.
 | `codex-rs/models-manager/src/provenance.rs` | Builds the tier catalog and the fallback metadata from `[model_defaults]`, `[[tiers]]`, `[sources]` |
 | `scripts/sync-upstream.sh` | The upstream sync ([Syncing](#syncing)) |
 | `scripts/provenance-smoke.py` | Drives `provenance app-server`: model/list, optionally one real turn |
+| `README.md`, `SETUP.md` | Fork-owned README and technical setup guide |
 | `docs/UPSTREAM.md` | This file |
 | `ui/` | The desktop / web UI (talks to `provenance app-server`; upstream has no such directory) |
-| `.github/provenance-ui.png` | README screenshot |
+| `.github/banner.png`, `.github/provenance-ui.png` | README banner and screenshot |
 
 `codex-provenance` is a workspace member because it is a path dependency inside `codex-rs/` (Cargo adds those
 automatically), so the workspace `Cargo.toml` members list is not edited.
@@ -54,7 +55,6 @@ disagree with the tree.
 | `codex-rs/tui/src/app_server_session/account.rs` | 1 | default provider when checking auth capabilities | same |
 | `codex-rs/tui/src/app_server_session/provider_selection.rs` | 1 | default provider in provider selection | same |
 | `codex-rs/{app-server,arg0,core,exec,model-provider-info,models-manager,tui,utils/home-dir}/Cargo.toml` | 1 each | `[dependencies.codex-provenance]`, placed just before `[dependencies]` so upstream's alphabetical dependency edits never touch it | Cargo needs the dependency per crate |
-| `README.md` | 1 | marks where the fork's section ends and upstream's README begins | GitHub shows README.md |
 | `codex-rs/Cargo.toml` | 1 | workspace `version = "0.171.0"` (upstream main: `0.0.0`) | Cargo reads the version here |
 
 Hook shapes, so a hook re-applied after a conflict looks like the others:

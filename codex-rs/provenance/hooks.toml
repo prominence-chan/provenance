@@ -29,11 +29,6 @@ file = "codex-rs/exec/src/event_processor_with_human_output.rs"
 count = 1
 why = "`exec` banner says the product name"
 
-[[hook]]
-file = "README.md"
-count = 1
-why = "marks where the fork's README section ends and upstream's README begins"
-
 # ---- config home -------------------------------------------------------------------
 
 [[hook]]
@@ -146,11 +141,56 @@ why = "codex-provenance dependency"
 # matches within one path segment, a trailing `/` means the whole directory.
 [owned]
 paths = [
+    "README.md",
+    "SETUP.md",
     "codex-rs/provenance/",
     "codex-rs/*/src/provenance.rs",
     "docs/UPSTREAM.md",
     "scripts/sync-upstream.sh",
     "scripts/provenance-smoke.py",
     "ui/",
+    ".github/banner.png",
     ".github/provenance-ui.png",
+]
+
+# Unused upstream root files/directories intentionally removed to keep the repository root tidy.
+# scripts/sync-upstream.sh keeps these deleted if upstream edits them during a merge.
+[dropped]
+paths = [
+    ".bazelignore",
+    ".bazelrc",
+    ".bazelversion",
+    ".cargo/",
+    ".codespellignore",
+    ".codespellrc",
+    ".markdownlint-cli2.yaml",
+    ".npmrc",
+    ".nvmrc",
+    ".prettierignore",
+    ".prettierrc.toml",
+    ".vscode/",
+    ".worktreeinclude",
+    "announcement_tip.toml",
+    "bazel/",
+    "BUILD.bazel",
+    "CHANGELOG.md",
+    "codex-cli/",
+    "defs.bzl",
+    "flake.lock",
+    "flake.nix",
+    "justfile",
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "package.json",
+    "patches/",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "rbe.bzl",
+    "ruff.toml",
+    "sdk/",
+    "SECURITY.md",
+    "third_party/",
+    "tools/",
+    "workspace_root_test_launcher.bat.tpl",
+    "workspace_root_test_launcher.sh.tpl",
 ]

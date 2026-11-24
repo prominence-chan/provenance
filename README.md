@@ -1,199 +1,80 @@
 <div align="center">
 
-<img src="ui/design/icon/icon-256.png" alt="Provenance app icon" width="112" />
+<img src=".github/banner.png" alt="Provenance" width="100%" />
 
-# Provenance
+<h1>Provenance</h1>
 
-**A coding agent for your Mac and your terminal, running on pooled free-tier models.**
+**A local coding agent for macOS and your terminal, powered by pooled free-tier models.**<br />
+Pick a strength, not a model.
 
-A fork of [OpenAI Codex CLI](https://github.com/openai/codex), powered by
-[provenance-core](https://github.com/prominence-chan/provenance-core). Pick a strength, not a model.
+<br />
 
-[![Download for macOS](https://img.shields.io/badge/download-macOS%20arm64-111111?style=flat-square&logo=apple&logoColor=white)](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0)
-[![License](https://img.shields.io/badge/license-Apache--2.0-111111?style=flat-square)](LICENSE)
-[![provenance-core](https://img.shields.io/badge/backend-provenance--core-111111?style=flat-square)](https://github.com/prominence-chan/provenance-core)
-[![Upstream](https://img.shields.io/badge/upstream-openai%2Fcodex-111111?style=flat-square)](https://github.com/openai/codex)
+<a href="https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0"><img src="https://img.shields.io/badge/download-macOS%20arm64-111111?style=flat-square&logo=apple&logoColor=white" alt="Download for macOS arm64" /></a>
+<a href="https://github.com/prominence-chan/provenance-core"><img src="https://img.shields.io/badge/router-provenance--core-111111?style=flat-square" alt="provenance-core" /></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-111111?style=flat-square" alt="Apache-2.0 License" /></a>
 
-<img src=".github/provenance-ui.png" alt="The Provenance desktop app" width="88%" />
+<br />
+
+<img src=".github/provenance-ui.png" alt="The Provenance desktop app" width="90%" />
 
 </div>
 
-## Why
+<br />
 
-Codex is a great agent harness, but it wants an OpenAI account. Provenance keeps the harness and swaps the brain.
-Requests go to a local [provenance-core](https://github.com/prominence-chan/provenance-core), which pools the free
-tiers of a dozen LLM providers and sorts them into four tiers:
+## Why Provenance?
 
-| Tier       | Strength                    |
-| ---------- | --------------------------- |
-| `nova`     | hyperfrontier               |
-| `solstice` | frontier (default)          |
-| `ember`    | strong mid-size             |
-| `spark`    | fast / small                |
+Most coding agents lock you into a single paid subscription or make you babysit API keys and rate limits. Provenance takes a different approach: it runs locally on your machine and routes every request through [provenance-core](https://github.com/prominence-chan/provenance-core), which pools free-tier capacity from across a dozen providers (plus web chat accounts you sign into) behind one endpoint.
 
-No ChatGPT login and no `OPENAI_API_KEY`.
+Instead of picking a provider or swapping models when one hits a quota wall, you pick how much horsepower the task needs:
 
-## Install the app
+<div align="center">
 
-1. Download `Provenance-0.1.0-arm64.dmg` from the
-   [latest release](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0) (Apple Silicon)
-   and drag **Provenance** into Applications.
-2. The app is ad-hoc signed, not notarized, so the first launch needs a right-click on it, then **Open**. Or run
-   `xattr -dr com.apple.quarantine /Applications/Provenance.app` once.
-3. It needs the `provenance` binary in `~/.local/bin` (see [Build the CLI](#build-the-cli)) and provenance-core on
-   `127.0.0.1:4141`. If provenance-core isn't running, the app starts it, and shows a banner if it can't. Paths and
-   URLs can be changed under **Provenance → Preferences…**
+<table>
+<tr>
+<th><img src="https://img.shields.io/badge/spark-9cc8ff?style=for-the-badge" alt="spark" /></th>
+<th><img src="https://img.shields.io/badge/ember-c9663f?style=for-the-badge" alt="ember" /></th>
+<th><img src="https://img.shields.io/badge/solstice-ff6a3d?style=for-the-badge" alt="solstice" /></th>
+<th><img src="https://img.shields.io/badge/nova-ff4fa3?style=for-the-badge" alt="nova" /></th>
+</tr>
+<tr>
+<td align="center">fast &amp; small</td>
+<td align="center">strong mid-size</td>
+<td align="center">frontier</td>
+<td align="center">the very strongest</td>
+</tr>
+<tr>
+<td align="center"><sub>quick checks, bulk work</sub></td>
+<td align="center"><sub>everyday edits, summaries</sub></td>
+<td align="center"><sub>coding (default)</sub></td>
+<td align="center"><sub>the hardest problems</sub></td>
+</tr>
+</table>
 
-Or build it yourself: `cd ui && npm install && npm run app:build && npm run app:install`. Details in
-[`ui/README.md`](ui/README.md#app).
+</div>
 
-## Build the CLI
+## Highlights
 
-Needs a Rust toolchain (`codex-rs/rust-toolchain.toml` pins the version; rustup installs it on first use).
+- **Desktop app & CLI** — A native macOS app with multi-project threads, live diffs, command approvals, and folder switching, paired with a fast `provenance` terminal client that shares the same engine.
+- **Built-in routing & failover** — Conversations stay on the same model inside your chosen tier and automatically fail over when a provider rate-limits or goes down.
+- **Guided account & key setup** — Connect free web chat accounts or API keys right inside **Models & accounts**; the desktop app bundles and manages its own local router automatically.
+- **Keep working on big threads** — Optional fallbacks let you hand off threads that outgrow free-tier context limits to local coding CLIs you already use, without losing context.
 
-```shell
-cd codex-rs
-cargo build --release -p codex-cli --bin provenance -j 4
-install -m 755 target/release/provenance ~/.local/bin/provenance
-```
+## Get started
 
-## Run
+1. Download `Provenance-0.1.0-arm64.dmg` from the [latest release](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0) (Apple Silicon) and drag **Provenance** into **Applications**.
+2. Because the app is ad-hoc signed rather than notarized, right-click it and choose **Open** the first time (or clear quarantine once — see [SETUP.md](SETUP.md)).
+3. Open **Models & accounts** in the app to sign into a chat site or add free-tier API keys, then start a thread.
 
-Start provenance-core (it serves `http://127.0.0.1:4141/v1`), then:
-
-```shell
-provenance                          # interactive TUI
-provenance exec "<task>"            # non-interactive
-provenance -m nova exec "<task>"    # choose a tier
-provenance-ui                       # the desktop app (or the web UI with --web)
-```
-
-The desktop app and the web UI share one frontend in `ui/`, a Codex-desktop-style client for
-`provenance app-server`. Without the app installed, `cd ui && npm install && npm run dev` serves it on
-`http://localhost:5173`. See [`ui/README.md`](ui/README.md) for how it fits together.
-
-## Configure
-
-| Setting               | How to set it                                                   |
-| --------------------- | --------------------------------------------------------------- |
-| provenance-core URL   | `TIERLM_BASE_URL` (default `http://127.0.0.1:4141/v1`)          |
-| provenance-core token | `TIERLM_TOKEN` (optional; sent as `Authorization: Bearer ...`)  |
-| config home           | `PROVENANCE_HOME` (default `~/.provenance`)                     |
-| default tier          | `model = "spark"` in `~/.provenance/config.toml`, or `-m spark` |
-
-Any upstream Codex setting works in `~/.provenance/config.toml`. To use another provider, set
-`model_provider = "openai"` or define your own under `[model_providers.<id>]` (Responses API only; upstream removed
-`wire_api = "chat"`).
-
-<details>
-<summary><b>What differs from upstream Codex</b></summary>
-
-- The binary is `provenance`. Its config home is `~/.provenance` (override with `PROVENANCE_HOME`), so it never
-  reads or writes your real `~/.codex` config, auth or sessions.
-- The built-in provider (id `tierlm`, pointing at provenance-core) is the default: Responses API
-  (`wire_api = "responses"`) at `http://127.0.0.1:4141/v1`.
-- Tier names, and any other non-OpenAI model, use conservative fallback metadata: a 128k context window, no
-  reasoning-summary parameter, standard JSON-schema function tools.
-- The startup update check is off by default, since it would point at upstream Codex releases.
-
-Everything else is upstream Codex. The fork's settings (names, provider, tiers, model metadata, prompt overrides)
-live in [`codex-rs/provenance/harness.toml`](codex-rs/provenance/harness.toml); upstream code reaches them through
-one-line tagged hooks. [`docs/UPSTREAM.md`](docs/UPSTREAM.md) maps every hook and how to merge new
-upstream Codex (`scripts/sync-upstream.sh`).
-
-</details>
-
-## Credits and license
-
-Provenance is built on [OpenAI Codex CLI](https://github.com/openai/codex) and keeps its license:
-Apache-2.0 (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)). All credit for the agent itself goes to the Codex
-team. Not affiliated with or endorsed by OpenAI.
-
----
-
-<!-- PROVENANCE-HOOK: the fork's README ends here; upstream's README follows unchanged. -->
-<p align="center"><sub><b>Upstream README</b>: everything below is the original OpenAI Codex CLI README, kept as is.<br/>Commands there say <code>codex</code>; in this fork the binary is <code>provenance</code>.</sub></p>
-
----
-
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
-
----
-
-## Quickstart
-
-### Installing and running Codex CLI
-
-Run the following on Mac or Linux to install Codex CLI:
-
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
-
-Run the following on Windows to install Codex CLI:
-
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
-
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
-
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
-```
-
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
-
-Codex CLI can also be installed via the following package managers:
-
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+Want to build from source, run the CLI (`provenance`), use the browser UI, or tune configuration and environment variables? Head over to **[SETUP.md](SETUP.md)**.
 
 ## Docs
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+- **[SETUP.md](SETUP.md)** — Building the desktop app and CLI, running from the terminal, configuration, and environment variables
+- **[ui/README.md](ui/README.md)** — Desktop shell, web UI architecture, orchestrators, and test scripts
+- **[docs/UPSTREAM.md](docs/UPSTREAM.md)** — Harness customization (`harness.toml`) and upstream maintenance
 
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+---
+
+<div align="center">
+<sub>Licensed under <a href="LICENSE">Apache-2.0</a> (see <a href="NOTICE">NOTICE</a>). Agent runtime adapted from <a href="https://github.com/openai/codex">openai/codex</a>; not affiliated with or endorsed by OpenAI.</sub>
+</div>
