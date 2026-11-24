@@ -69,6 +69,7 @@ const { log, shot, check, shots } = kit(
 
 // Obviously fake values, made up for this check.
 const PASSWORD = "FAKE-pw-for-tests-only-7Qx2";
+const PASSWORD2 = "FAKE-pw-remembered-only-9Kp4";
 const GROQ_KEY = `gsk_${"FAKEtestKEY0".repeat(4)}0123`; // gsk_ + 52
 const GOOGLE_KEY = `AIza${"FAKEtestKEY".repeat(3)}xy`; // AIza + 35
 const GROQ_KEY2 = `gsk_${"FAKEsecondKEY".repeat(3)}REJECT9`; // the stand-in's check refuses it
@@ -131,7 +132,13 @@ const post = (route: string, body: unknown = {}, method = "POST") =>
     body: JSON.stringify(body),
   }).then((r) => r.json());
 type MockState = {
-  autologin: Record<string, Record<string, { saved: boolean; enabled: boolean; username: string }>>;
+  autologin: Record<
+    string,
+    Record<
+      string,
+      { saved: boolean; enabled: boolean; username: string | null; method?: string | null }
+    >
+  >;
   plans: Record<string, Record<string, { needs_confirmation: string | null }>>;
   keys: Record<string, boolean>;
   accounts: Record<string, Record<string, { login: { state: string } }>>;
@@ -1406,16 +1413,271 @@ try {
   await page.click(".sidebar-setup").catch(() => {});
   await post("/mock/older", { older: false });
 
-  // ---- nothing leaked anywhere ----------------------------------------------------------------
+  // ---- 5. remembered login methods, SSO auto-relogin & queued retries -------------------------
+  log("remembered login methods and SSO auto-relogin");
+  await post("/mock/reset", { scenario: "fresh" });
+  await post("/mock/requests");
+  await page.reload();
+  await page.waitForSelector(".composer textarea");
+  await openSetup(page);
+  await pickSite(page, "chatgpt-web");
+  await row(page, "main").getByRole("button", { name: "Sign in" }).click();
+  await page.waitForSelector(`${dialog} [data-login="open"]`);
+  await post("/mock/finish", {
+    provider: "chatgpt-web",
+    account: "main",
+    ok: true,
+    method: "google",
+  });
+  await page.waitForSelector(`${dialog} .keep-offer-sso`, { timeout: 10_000 });
+  const googleReady = await page.locator(`${dialog} .keep-offer-sso`).innerText();
   check(
-    !urls.some((u) => SECRETS.some((s) => u.includes(s) || u.includes(encodeURIComponent(s)))),
+    /Auto sign-in via Google/.test(googleReady) &&
+      /remembered your Google sign-in/.test(googleReady) &&
+      /No password is stored/.test(googleReady) &&
+      (await page.locator(`${dialog} input[type="password"]`).count()) === 0,
+    "ReadyStep after Google sign-in: reassuring SSO auto sign-in status, no password field",
+  );
+  await allViews(page, "ready-sso-google");
+
+  // Back to ChatGPT account row: Google SSO row with Try now, Turn off, Forget, queued & running.
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.waitForSelector(`${dialog} .setup-accounts`);
+  const googleRow = row(page, "main").locator(".autologin");
+  await googleRow.waitFor();
+  const gText = await googleRow.innerText();
+  check(
+    /Auto sign-in via Google/.test(gText) &&
+      /On/.test(gText) &&
+      /No password stored/.test(gText) &&
+      ["Try now", "Turn off", "Forget"].every((b) => gText.includes(b)),
+    "Google SSO account row: Auto sign-in via Google, On, No password stored, Try now / Turn off / Forget",
+  );
+  await post("/mock/autologin", { result: "ok" });
+  await googleRow.getByRole("button", { name: "Try now" }).click();
+  await page.waitForFunction(() =>
+    /Signed back in at/.test(
+      document.querySelector('li[data-account="main"] .autologin')?.textContent ?? "",
+    ),
+  );
+  check(true, "Google SSO Try now: Signed back in at <time>");
+
+  // Queued retry state on the row.
+  await post("/mock/autologin", {
+    provider: "chatgpt-web",
+    account: "main",
+    queued: true,
+    next_try_in_s: 180,
+    running: false,
+  });
+  await page.waitForFunction(() =>
+    /Retry queued in 3 min/.test(
+      document.querySelector('li[data-account="main"] .autologin')?.textContent ?? "",
+    ),
+  );
+  check(true, "queued auto-relogin shows Retry queued in 3 min");
+  await allViews(page, "autologin-sso-queued");
+
+  // Running auto-relogin state disables Try now.
+  await post("/mock/autologin", {
+    provider: "chatgpt-web",
+    account: "main",
+    running: true,
+    queued: false,
+  });
+  await page.waitForFunction(() =>
+    /Signing back in…/.test(
+      document.querySelector('li[data-account="main"] .autologin')?.textContent ?? "",
+    ),
+  );
+  check(
+    await googleRow.getByRole("button", { name: "Trying…" }).isDisabled(),
+    "running auto-relogin shows Signing back in… and disables Try now",
+  );
+
+  // Turn off -> Turn on via SSO PUT (no password!), then Forget.
+  await post("/mock/autologin", {
+    provider: "chatgpt-web",
+    account: "main",
+    running: false,
+    queued: false,
+  });
+  await page.waitForFunction(() =>
+    /Try now/.test(document.querySelector('li[data-account="main"] .autologin')?.textContent ?? ""),
+  );
+  await googleRow.getByRole("button", { name: "Turn off" }).click();
+  await page.waitForFunction(() =>
+    /Turn on/.test(document.querySelector('li[data-account="main"] .autologin')?.textContent ?? ""),
+  );
+  check(
+    (await mockState()).autologin["chatgpt-web"].main.enabled === false,
+    "Google SSO Turn off: off on router",
+  );
+  await post("/mock/requests");
+  await googleRow.getByRole("button", { name: "Turn on" }).click();
+  await googleRow.getByRole("button", { name: "Try now" }).waitFor();
+  const ssoPut = (await mockRequests()).find(
+    (r) => r.method === "PUT" && r.url === "/web/accounts/chatgpt-web/main/autologin",
+  );
+  check(
+    !!ssoPut &&
+      JSON.parse(ssoPut.body).agree === true &&
+      JSON.parse(ssoPut.body).method === "google" &&
+      !("password" in JSON.parse(ssoPut.body)),
+    "Google SSO Turn on sends PUT {agree: true, method: 'google'} with no password",
+  );
+  await googleRow.getByRole("button", { name: "Forget" }).click();
+  await googleRow.getByRole("button", { name: "Forget" }).click();
+  await row(page, "main").getByRole("button", { name: "Keep signed in…" }).waitFor();
+  check(!(await mockState()).autologin["chatgpt-web"]?.main, "Google SSO Forget clears router");
+
+  // Microsoft SSO signed in when auto sign-in was turned off: ReadyStep offers Turn on without password.
+  await row(page, "main").getByRole("button", { name: "Sign in again" }).click();
+  await page.waitForSelector(`${dialog} [data-login="open"]`);
+  await post("/mock/finish", {
+    provider: "chatgpt-web",
+    account: "main",
+    ok: true,
+    method: "microsoft",
+    autologin_enabled: false,
+  });
+  await page.waitForSelector(`${dialog} .keep-offer[data-autologin-method="microsoft"]`, {
+    timeout: 10_000,
+  });
+  const msOffer = page.locator(`${dialog} .keep-offer[data-autologin-method="microsoft"]`);
+  check(
+    /Keep this account signed in via Microsoft\?/.test(await msOffer.innerText()) &&
+      (await msOffer.getByRole("button", { name: "Turn on" }).isVisible()) &&
+      (await page.locator(`${dialog} input[type="password"]`).count()) === 0,
+    "ReadyStep for disabled Microsoft SSO offers Turn on without asking for a password",
+  );
+  await msOffer.getByRole("button", { name: "Turn on" }).click();
+  await page.waitForSelector(`${dialog} .keep-offer-sso[data-autologin-method="microsoft"]`);
+  check(
+    (await mockState()).autologin["chatgpt-web"].main.enabled === true &&
+      (await mockState()).autologin["chatgpt-web"].main.method === "microsoft",
+    "ReadyStep Turn on enables Microsoft SSO on router",
+  );
+  await page.getByRole("button", { name: "Set up another site" }).click();
+  await page.waitForSelector(`${dialog} .setup-sites`);
+
+  // Remembered email/password login: explicit opt-in, never stores without asking.
+  await pickSite(page, "qwen-web");
+  await row(page, "main").getByRole("button", { name: "Sign in" }).click();
+  await page.waitForSelector(`${dialog} [data-login="open"]`);
+  await post("/mock/finish", {
+    provider: "qwen-web",
+    account: "main",
+    ok: true,
+    method: "password",
+  });
+  await page.waitForSelector(`${dialog} .keep-offer[data-autologin-method="password"]`, {
+    timeout: 10_000,
+  });
+  const pwReadyText = await page
+    .locator(`${dialog} .keep-offer[data-autologin-method="password"]`)
+    .innerText();
+  check(
+    /email & password/.test(pwReadyText) &&
+      /doesn't store your login without asking/.test(pwReadyText),
+    "ReadyStep for remembered email/password explains Provenance does not store login without asking",
+  );
+  await layoutOk(page, "ready remembered password");
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.waitForSelector(`${dialog} .setup-accounts`);
+  const pwRow = row(page, "main").locator('.autologin[data-autologin="needs_credentials"]');
+  await pwRow.waitFor();
+  check(
+    /Signed in with email & password/.test(await pwRow.innerText()) &&
+      /doesn't store your login without asking/.test(await pwRow.innerText()),
+    "account row for remembered password explains explicit opt-in is required",
+  );
+  await pwRow.getByRole("button", { name: "Save sign-in…" }).click();
+  const pwForm = row(page, "main").locator(".autologin-form");
+  await pwForm.waitFor();
+  check(
+    !(await pwForm.locator('input[type="checkbox"]').isChecked()),
+    "remembered password form keeps agreement unchecked by default",
+  );
+  await pwForm.locator('input[type="password"]').fill(PASSWORD2);
+  check(
+    !(await reactStrings(page)).includes(PASSWORD2),
+    "remembered password form keeps password out of React state while typed",
+  );
+  await pwForm.locator('input[type="checkbox"]').check();
+  await pwForm.getByRole("button", { name: "Save" }).click();
+  await row(page, "main").locator('.autologin[data-autologin="on"]').waitFor();
+  const pw2Holds = await pageHolds(page, PASSWORD2);
+  check(!pw2Holds.length, `saved remembered password is nowhere in page (${pw2Holds})`);
+
+  // Remembered GitHub and other (host label) logins: concise label, no false SSO claim, optional password save.
+  await post("/mock/autologin", {
+    provider: "qwen-web",
+    account: "main",
+    method: "other",
+    method_label: "sso.acme.test",
+    saved: false,
+    enabled: false,
+    needs_credentials: false,
+  });
+  await page.waitForFunction(() =>
+    /Signed in via sso\.acme\.test/.test(
+      document.querySelector('li[data-account="main"] .autologin')?.textContent ?? "",
+    ),
+  );
+  const otherText = await row(page, "main").locator(".autologin").innerText();
+  check(
+    /Signed in via sso\.acme\.test/.test(otherText) &&
+      /Automatic re-sign-in isn't available for sso\.acme\.test/.test(otherText) &&
+      (await row(page, "main").getByRole("button", { name: "Save password…" }).isVisible()),
+    "remembered 'other' login shows method_label without claiming auto-relogin works",
+  );
+  await allViews(page, "autologin-other-method");
+
+  await post("/mock/autologin", {
+    provider: "qwen-web",
+    account: "main",
+    method: "github",
+    method_label: null,
+    saved: false,
+    enabled: false,
+    needs_credentials: false,
+  });
+  await page.waitForFunction(() =>
+    /Signed in via GitHub/.test(
+      document.querySelector('li[data-account="main"] .autologin')?.textContent ?? "",
+    ),
+  );
+  check(true, "remembered GitHub login shows Signed in via GitHub");
+
+  // Pre-method router (original 7 WireAutologin fields only): parses cleanly with safe defaults.
+  await post("/mock/older", { older: false, olderAutologin: true });
+  await post("/mock/autologin", {
+    provider: "qwen-web",
+    account: "main",
+    method: null,
+    saved: false,
+    enabled: false,
+  });
+  await row(page, "main").getByRole("button", { name: "Keep signed in…" }).waitFor();
+  check(true, "pre-method autologin payload falls back cleanly to Keep signed in…");
+  await post("/mock/older", { older: false, olderAutologin: false });
+  await page.getByRole("button", { name: "Close" }).click();
+
+  // ---- nothing leaked anywhere ----------------------------------------------------------------
+  const allSecrets = [...SECRETS, PASSWORD2];
+  check(
+    !urls.some((u) => allSecrets.some((s) => u.includes(s) || u.includes(encodeURIComponent(s)))),
     `no secret in any URL the pages asked for (${urls.length} requests)`,
   );
   check(
-    !consoleLines.some((l) => SECRETS.some((s) => l.includes(s))),
+    !consoleLines.some((l) => allSecrets.some((s) => l.includes(s))),
     "none in the pages' console",
   );
-  check(!printed.some((l) => SECRETS.some((s) => l.includes(s))), "none in the UI server's output");
+  check(
+    !printed.some((l) => allSecrets.some((s) => l.includes(s))),
+    "none in the UI server's output",
+  );
   check(!errors.length, `no page errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
   log("PASS");
 } catch (e) {

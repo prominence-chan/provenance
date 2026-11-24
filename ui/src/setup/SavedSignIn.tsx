@@ -1,6 +1,9 @@
-// Saved sign-in and automatic re-sign-in, per account (opt-in): the router keeps the password in
-// this Mac's keychain and, when the site signs the account out, signs it back in by itself,
-// stopping to ask the person whenever the site wants a code, a captcha or anything unusual.
+// Saved sign-in and automatic re-sign-in, per account:
+// - Password login (opt-in): the router keeps the password in this Mac's keychain and, when the
+//   site signs the account out, signs it back in by itself, stopping to ask the person whenever
+//   the site wants a code, a captcha or anything unusual.
+// - Remembered SSO login (Google / Microsoft / Apple): re-signs in via the remembered provider
+//   without storing any password.
 // API: PUT/PATCH/DELETE /web/accounts/{provider}/{account}/autologin, POST …/autologin/try.
 //
 // The password lives only in its own <input> (uncontrolled: never React state, never the store)
@@ -11,7 +14,11 @@ import { useRef, useState } from "react";
 import { Status } from "./parts";
 import {
   accountName,
+  enableSsoAutologin,
   forgetAutologin,
+  isSsoLoginMethod,
+  loginMethodName,
+  queuedRetryText,
   saveAutologin,
   setAutologinEnabled,
   siteHost,
@@ -22,15 +29,23 @@ import {
   type WebProvider,
 } from "./web";
 
-/** The saved sign-in's state in plain words, from its last try. */
+/** The auto sign-in's state in plain words, from running/queued/paused flags and its last try. */
 function stateOf(al: Autologin): { cls: string; text: string } {
   const t = al.last_try;
-  if (t?.result === "wrong_password")
+  const wrong = al.paused === "wrong_password" || t?.result === "wrong_password";
+  if (al.running) return { cls: "dot-warn", text: "Signing back in…" };
+  if (wrong)
     return {
       cls: "dot-err",
       text: "Wrong password: saved sign-in switched off until you update it",
     };
+  if (al.paused === "needs_person")
+    return {
+      cls: "dot-warn",
+      text: `Needs you: ${t?.detail ?? al.note ?? "the site asked for something only you can give"}`,
+    };
   if (!al.enabled) return { cls: "dot-off", text: "Off" };
+  if (al.queued) return { cls: "dot-warn", text: queuedRetryText(al.next_try_in_s) };
   if (!t) return { cls: "dot-ok", text: "On" };
   if (t.result === "ok") return { cls: "dot-ok", text: `Signed back in at ${whenText(t.at)}` };
   if (t.result === "needs_person")
@@ -42,9 +57,9 @@ function stateOf(al: Autologin): { cls: string; text: string } {
 }
 
 /**
- * The line under an account row: an offer to keep it signed in, or the saved sign-in with Turn
- * off / Forget / Try now. Nothing when the router has no saved sign-in, or the site can't
- * (its reason is shown once by the caller).
+ * The line under an account row: an offer to keep it signed in, a remembered method note, or
+ * the active/saved auto sign-in with Try now / Turn off / Forget. Nothing when the router has
+ * no saved sign-in, or the site can't (its reason is shown once by the caller).
  */
 export function SavedSignIn({
   provider,
@@ -66,8 +81,13 @@ export function SavedSignIn({
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [forget, setForget] = useState(false);
-  if (!al?.supported) return null;
-  if (open)
+  if (!al) return null;
+
+  const method = al.method;
+  const sso = isSsoLoginMethod(method);
+  const otherMethod = method === "github" || method === "other";
+
+  if (open && al.supported)
     return (
       <KeepSignedInForm
         provider={provider}
@@ -79,16 +99,24 @@ export function SavedSignIn({
         onCancel={onClose}
       />
     );
-  if (!al.saved) {
-    // Worth offering once the account has been signed in here (signed out counts: that's when
-    // it helps); before its first sign-in there is nothing to keep.
-    if (a.signed_in === null) return null;
-    return (
-      <button className="setup-add autologin-offer" onClick={onOpen}>
-        Keep signed in…
-      </button>
-    );
+
+  if (!al.supported) {
+    if (otherMethod) {
+      const label = loginMethodName(method, al.method_label);
+      return (
+        <div className="autologin" data-autologin="method" data-autologin-method={method}>
+          <div className="autologin-text">
+            <span className="autologin-who">Signed in via {label}</span>
+            <span className="meta">
+              {al.reason ?? `Automatic re-sign-in isn't available for ${label}.`}
+            </span>
+          </div>
+        </div>
+      );
+    }
+    return null;
   }
+
   const run = async (what: string, fn: () => Promise<{ ok: boolean; detail?: string }>) => {
     setBusy(what);
     setErr(null);
@@ -97,89 +125,173 @@ export function SavedSignIn({
     if (!r.ok) setErr(r.detail ?? "That didn't work.");
     onChanged();
   };
-  const st = stateOf(al);
-  const wrong = al.last_try?.result === "wrong_password";
-  const who = al.username ?? a.email;
-  return (
-    <div
-      className="autologin"
-      data-autologin={wrong ? "wrong_password" : al.enabled ? "on" : "off"}
-    >
-      <div className="autologin-text">
-        <span className="autologin-who">
-          Saved sign-in
-          {who ? (
-            <>
-              {" "}
-              for <bdi>{who}</bdi>
-            </>
-          ) : null}
-        </span>
-        <span className="autologin-status">
-          <Status cls={st.cls} text={st.text} />
-          {al.attempts_today > 0 && (
-            <span className="meta">
-              {al.attempts_today}&nbsp;attempt{al.attempts_today === 1 ? "" : "s"}&nbsp;today
-            </span>
-          )}
-        </span>
-      </div>
-      {forget ? (
-        <span className="autologin-actions">
-          <span className="meta">Forget it?</span>
-          <button
-            className="btn btn-danger"
-            disabled={busy !== null}
-            onClick={() => {
-              setForget(false);
-              void run("forget", () => forgetAutologin(provider.id, a.id));
-            }}
-          >
-            Forget
-          </button>
-          <button className="btn" onClick={() => setForget(false)} autoFocus>
-            Keep
-          </button>
-        </span>
-      ) : (
-        <span className="autologin-actions">
-          {wrong ? (
-            <button className="btn" onClick={onOpen}>
-              Update
+
+  if (al.saved || sso) {
+    const st = stateOf(al);
+    const wrong = al.paused === "wrong_password" || al.last_try?.result === "wrong_password";
+    const who = al.username ?? a.email;
+    const isSsoCard = !al.saved && sso;
+    const ssoName = isSsoCard ? loginMethodName(method, al.method_label) : null;
+    const dataState = wrong
+      ? "wrong_password"
+      : al.running
+        ? "running"
+        : al.queued
+          ? "queued"
+          : al.enabled
+            ? "on"
+            : "off";
+    return (
+      <div
+        className="autologin"
+        data-autologin={dataState}
+        data-autologin-method={method ?? undefined}
+      >
+        <div className="autologin-text">
+          <span className="autologin-who">
+            {isSsoCard ? (
+              <>Auto sign-in via {ssoName}</>
+            ) : (
+              <>
+                Saved sign-in
+                {who ? (
+                  <>
+                    {" "}
+                    for <bdi>{who}</bdi>
+                  </>
+                ) : null}
+              </>
+            )}
+          </span>
+          <span className="autologin-status">
+            <Status cls={st.cls} text={st.text} />
+            {isSsoCard && <span className="meta">No password stored</span>}
+            {al.attempts_today > 0 && (
+              <span className="meta">
+                {al.attempts_today}&nbsp;attempt{al.attempts_today === 1 ? "" : "s"}&nbsp;today
+              </span>
+            )}
+            {al.note && !st.text.includes(al.note) && <span className="meta">{al.note}</span>}
+          </span>
+        </div>
+        {forget ? (
+          <span className="autologin-actions">
+            <span className="meta">Forget it?</span>
+            <button
+              className="btn btn-danger"
+              disabled={busy !== null}
+              onClick={() => {
+                setForget(false);
+                void run("forget", () => forgetAutologin(provider.id, a.id));
+              }}
+            >
+              Forget
             </button>
-          ) : (
-            <>
-              {al.enabled && (
+            <button className="btn" onClick={() => setForget(false)} autoFocus>
+              Keep
+            </button>
+          </span>
+        ) : (
+          <span className="autologin-actions">
+            {wrong && !isSsoCard ? (
+              <button className="btn" onClick={onOpen}>
+                Update
+              </button>
+            ) : (
+              <>
+                {al.enabled && (
+                  <button
+                    className="btn"
+                    disabled={busy !== null || al.running}
+                    onClick={() => void run("try", () => tryAutologin(provider.id, a.id))}
+                  >
+                    {busy === "try" || al.running ? "Trying…" : "Try now"}
+                  </button>
+                )}
                 <button
                   className="btn"
-                  disabled={busy !== null}
-                  onClick={() => void run("try", () => tryAutologin(provider.id, a.id))}
+                  disabled={busy !== null || al.running}
+                  onClick={() =>
+                    void run("toggle", () =>
+                      isSsoCard && !al.enabled
+                        ? enableSsoAutologin(provider.id, a.id, method)
+                        : setAutologinEnabled(provider.id, a.id, !al.enabled),
+                    )
+                  }
                 >
-                  {busy === "try" ? "Trying…" : "Try now"}
+                  {al.enabled ? "Turn off" : "Turn on"}
                 </button>
-              )}
-              <button
-                className="btn"
-                disabled={busy !== null}
-                onClick={() =>
-                  void run("toggle", () => setAutologinEnabled(provider.id, a.id, !al.enabled))
-                }
-              >
-                {al.enabled ? "Turn off" : "Turn on"}
-              </button>
-            </>
-          )}
-          <button className="btn" disabled={busy !== null} onClick={() => setForget(true)}>
-            Forget
+              </>
+            )}
+            <button
+              className="btn"
+              disabled={busy !== null || al.running}
+              onClick={() => setForget(true)}
+            >
+              Forget
+            </button>
+          </span>
+        )}
+        {err && (
+          <p className="setup-row-msg autologin-err" role="alert">
+            {err}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  // Worth offering once the account has been signed in here (signed out counts: that's when
+  // it helps); before its first sign-in there is nothing to keep.
+  if (a.signed_in === null && !method && !al.needs_credentials) return null;
+
+  if (method === "password" || al.needs_credentials) {
+    return (
+      <div
+        className="autologin"
+        data-autologin="needs_credentials"
+        data-autologin-method="password"
+      >
+        <div className="autologin-text">
+          <span className="autologin-who">Signed in with email &amp; password</span>
+          <span className="meta">
+            Provenance doesn't store your login without asking. Give Provenance your email and
+            password if you want automatic re-sign-in.
+          </span>
+        </div>
+        <span className="autologin-actions">
+          <button className="btn" onClick={onOpen}>
+            Save sign-in…
           </button>
         </span>
-      )}
-      {err && (
-        <p className="setup-row-msg autologin-err" role="alert">
-          {err}
-        </p>
-      )}
-    </div>
+      </div>
+    );
+  }
+
+  if (otherMethod) {
+    const label = loginMethodName(method, al.method_label);
+    return (
+      <div className="autologin" data-autologin="method" data-autologin-method={method}>
+        <div className="autologin-text">
+          <span className="autologin-who">Signed in via {label}</span>
+          <span className="meta">
+            Automatic re-sign-in isn't available for {label}. If {provider.name} also accepts email
+            &amp; password, you can save one.
+          </span>
+        </div>
+        <span className="autologin-actions">
+          <button className="btn" onClick={onOpen}>
+            Save password…
+          </button>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <button className="setup-add autologin-offer" onClick={onOpen}>
+      Keep signed in…
+    </button>
   );
 }
 
@@ -206,6 +318,8 @@ export function KeepSignedInForm({
   const [err, setErr] = useState<string | null>(null);
   const id = `al-${provider.id}-${a.id}`;
   const ready = agree && username.trim() !== "" && hasPw && !busy;
+  const needsCreds =
+    !a.autologin?.saved && (a.autologin?.method === "password" || a.autologin?.needs_credentials);
 
   const save = async () => {
     const field = pw.current;
@@ -239,6 +353,7 @@ export function KeepSignedInForm({
         Keep {accountName(a.id)} signed in
       </h4>
       <p className="autologin-lead">
+        {needsCreds && "Provenance doesn't store your login without asking. "}
         If {provider.name} signs this account out, Provenance signs it back in by itself with the
         sign-in you save here.
       </p>
@@ -301,8 +416,8 @@ export function KeepSignedInForm({
 }
 
 /**
- * Right after a manual sign-in: "Keep this account signed in?", optional and skippable (Done
- * skips it), with nothing preselected.
+ * Right after a manual sign-in: reassures the person when SSO auto sign-in is active, offers
+ * turning SSO back on without a password, or offers the explicit opt-in password form.
  */
 export function KeepSignedInOffer({
   provider,
@@ -315,8 +430,82 @@ export function KeepSignedInOffer({
 }) {
   const [open, setOpen] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const al = a.autologin;
-  if (!al?.supported || (al.saved && !saved)) return null;
+  if (!al) return null;
+
+  const method = al.method ?? (a.login.state === "signed_in" ? a.login.method : null);
+  const sso = isSsoLoginMethod(method);
+  const otherMethod = method === "github" || method === "other";
+
+  if (al.supported && sso && !al.saved) {
+    const label = loginMethodName(method, al.method_label);
+    if (al.enabled) {
+      return (
+        <div className="keep-offer keep-offer-sso" data-autologin-method={method} role="status">
+          <span className="keep-offer-text">
+            <span className="keep-offer-title">
+              <Status cls="dot-ok" text={`Auto sign-in via ${label}`} />
+            </span>
+            <span className="meta">
+              Provenance remembered your {label} sign-in and will automatically sign back in if{" "}
+              {provider.name} signs you out. No password is stored.
+            </span>
+          </span>
+        </div>
+      );
+    }
+    const turnOn = async () => {
+      setBusy(true);
+      setErr(null);
+      const r = await enableSsoAutologin(provider.id, a.id, method);
+      setBusy(false);
+      if (!r.ok) {
+        setErr(r.detail);
+        return;
+      }
+      onChanged();
+    };
+    return (
+      <div className="keep-offer" data-autologin-method={method}>
+        <span className="keep-offer-text">
+          <span className="keep-offer-title">Keep this account signed in via {label}?</span>
+          <span className="meta">
+            Provenance remembered your {label} sign-in and can automatically sign back in if{" "}
+            {provider.name} signs you out. No password is stored.
+          </span>
+          {err && (
+            <span className="setup-row-msg" role="alert">
+              {err}
+            </span>
+          )}
+        </span>
+        <button className="btn" disabled={busy} onClick={() => void turnOn()}>
+          {busy ? "Turning on…" : "Turn on"}
+        </button>
+      </div>
+    );
+  }
+
+  if (!al.supported) {
+    if (otherMethod) {
+      const label = loginMethodName(method, al.method_label);
+      return (
+        <div className="keep-offer" data-autologin-method={method}>
+          <span className="keep-offer-text">
+            <span className="keep-offer-title">Signed in via {label}</span>
+            <span className="meta">
+              {al.reason ?? `Automatic re-sign-in isn't available for ${label}.`}
+            </span>
+          </span>
+        </div>
+      );
+    }
+    return null;
+  }
+
+  if (al.saved && !saved) return null;
   if (saved)
     return (
       <p className="keep-offer-done" role="status">
@@ -338,6 +527,40 @@ export function KeepSignedInOffer({
         />
       </div>
     );
+  if (otherMethod) {
+    const label = loginMethodName(method, al.method_label);
+    return (
+      <div className="keep-offer" data-autologin-method={method}>
+        <span className="keep-offer-text">
+          <span className="keep-offer-title">Signed in via {label}</span>
+          <span className="meta">
+            Automatic re-sign-in isn't available for {label}. If {provider.name} also accepts email
+            &amp; password, you can save one.
+          </span>
+        </span>
+        <button className="btn" onClick={() => setOpen(true)}>
+          Save password…
+        </button>
+      </div>
+    );
+  }
+  if (method === "password" || al.needs_credentials) {
+    return (
+      <div className="keep-offer" data-autologin-method="password">
+        <span className="keep-offer-text">
+          <span className="keep-offer-title">Keep this account signed in?</span>
+          <span className="meta">
+            Provenance remembers you signed in with email &amp; password, and doesn't store your
+            login without asking. Give Provenance your email and password if you want automatic
+            re-sign-in.
+          </span>
+        </span>
+        <button className="btn" onClick={() => setOpen(true)}>
+          Save sign-in…
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="keep-offer">
       <span className="keep-offer-text">

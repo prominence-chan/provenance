@@ -284,9 +284,14 @@ export function SiteStep({
                 onChanged={onReload}
               />
             )}
-            {a.autologin && !a.autologin.supported && a.autologin.reason && !siteReason && (
-              <p className="meta autologin-unsupported">{a.autologin.reason}</p>
-            )}
+            {a.autologin &&
+              !a.autologin.supported &&
+              a.autologin.reason &&
+              !siteReason &&
+              a.autologin.method !== "github" &&
+              a.autologin.method !== "other" && (
+                <p className="meta autologin-unsupported">{a.autologin.reason}</p>
+              )}
             {rowMsg?.account === a.id && (
               <p className="setup-row-msg" role="alert">
                 {rowMsg.text}
