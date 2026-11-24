@@ -237,15 +237,24 @@ try {
           ? "translate"
           : "summarize";
       const step = Number(/This is step (\d+)/.exec(c.input)?.[1] ?? 0);
+      // One kind of action per step: a step stops at its first action that fails, and here the
+      // failures (the sandbox refusing a write) are what is being looked at.
+      const plans = ["do the writes", "now the command", "now look and edit"];
       const reply =
         role === "think"
-          ? step === 1
-            ? "do the writes"
-            : "FINISHED: done"
+          ? parity
+            ? step === 1
+              ? "look at the shell"
+              : "FINISHED: done"
+            : (plans[step - 1] ?? "FINISHED: done")
           : role === "translate"
             ? parity
               ? `RUN: ${PARITY_CMD}`
-              : `WRITE: inside.txt\n<<<\nhello\n>>>\nWRITE: ${outside}/escape.txt\n<<<\nno\n>>>\nRUN: echo ran > by-run.txt; echo x > ${outside}/escape2.txt; cat inside.txt\nREAD: inside.txt\nREPLACE: inside.txt\n<<<\nhello\n===\nhello again\n>>>\nSEARCH: again IN .`
+              : /do the writes/.test(c.input)
+                ? `WRITE: inside.txt\n<<<\nhello\n>>>\nWRITE: ${outside}/escape.txt\n<<<\nno\n>>>`
+                : /now the command/.test(c.input)
+                  ? `RUN: echo ran > by-run.txt; echo x > ${outside}/escape2.txt; cat inside.txt`
+                  : `READ: inside.txt\nREPLACE: inside.txt\n<<<\nhello\n===\nhello again\n>>>\nSEARCH: again IN .`
             : "wrote things";
       return { text: reply, promptChars: 0, servedBy: "script", session: "script", ms: 0 };
     };
@@ -262,8 +271,14 @@ try {
             config: { orchestrator: "hyperexperimental" },
           })
         ).thread as { id: string };
-        await call("turn/start", { threadId: th.id, input: text("go") });
-        return turnDone(th.id, 60_000);
+        // (the request names the two paths outside the folder: code then leaves them to the
+        // sandbox, which is what this check is about; a path the request does not name is
+        // refused by code before anything runs, see the offline check)
+        await call("turn/start", {
+          threadId: th.id,
+          input: text(`go: also try ${outside}/escape.txt and ${outside}/escape2.txt`),
+        });
+        return turnDone(th.id, 90_000);
       };
       log("workspace write (Auto)");
       let t = await run("workspace-write", "on-request");
@@ -281,8 +296,12 @@ try {
         !existsSync(path.join(outside, "escape.txt")),
         "WRITE outside the folder was refused by the sandbox",
       );
+      const changes = (t: Turn) => t.items.filter((i) => i.type === "fileChange");
+      const cmd = (t: Turn, re: RegExp) =>
+        t.items.find((i) => i.type === "commandExecution" && re.test(i.command ?? ""));
       check(
-        t.items[3].type === "fileChange" && t.items[3].status === "failed",
+        changes(t)[1]?.changes?.[0].path === `${outside}/escape.txt` &&
+          changes(t)[1].status === "failed",
         "and shows as failed",
       );
       check(
@@ -290,12 +309,24 @@ try {
         "RUN wrote inside the folder, and its write outside was refused",
       );
       check(
-        /not permitted/i.test(t.items[4].aggregatedOutput ?? "") &&
-          /hello/.test(t.items[4].aggregatedOutput ?? ""),
+        /not permitted/i.test(cmd(t, /^echo ran/)?.aggregatedOutput ?? "") &&
+          /hello/.test(cmd(t, /^echo ran/)?.aggregatedOutput ?? ""),
         "the command saw 'Operation not permitted' and still read the file",
       );
-      check(/hello\n\[lines 1-250 of 1\]/.test(t.items[5].aggregatedOutput ?? ""), "READ works");
-      check(/inside\.txt:1:hello again/.test(t.items[7].aggregatedOutput ?? ""), "SEARCH works");
+      check(
+        /hello\n\[lines 1-250 of 1\]/.test(cmd(t, /^READ: inside/)?.aggregatedOutput ?? ""),
+        "READ works",
+      );
+      check(
+        /inside\.txt:1:hello again/.test(cmd(t, /^SEARCH: again/)?.aggregatedOutput ?? ""),
+        "SEARCH works",
+      );
+      check(
+        /\*\*Not finished\.\*\* `[^`]*escape\.txt`, named in the request, does not exist/.test(
+          t.items.at(-1)?.text ?? "",
+        ),
+        "and the answer says first that a file the request names does not exist (the code check)",
+      );
       check(approvals.length === 0, "nothing was asked (Auto)");
       log("read only");
       t = await run("read-only", "on-request");

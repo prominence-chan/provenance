@@ -55,7 +55,9 @@ import type { AppServer } from "./appserver.ts";
 import { mono } from "./clock.ts";
 import { runExperimental } from "./experimental.ts";
 import { runHyper } from "./hyper.ts";
+import type { Memory } from "./memory.ts";
 import { clipMiddle, emptyNotes, notesText, type Notes } from "./notes.ts";
+import { platformLabel } from "./platform.ts";
 import { PROMPT_BUDGET, SUMMARY_LIMIT, type Prompt } from "./prompts.ts";
 
 /** How much of a hand-over brief Experimental keeps as its goal (its notes stay bounded). */
@@ -79,14 +81,29 @@ export interface Caps {
   attempts: number;
   /** Experimental: times the planner may revise the list. */
   replans: number;
-  /** Hyperexperimental: think -> translate -> execute -> summarize rounds. */
+  /**
+   * Hyperexperimental: steps per turn, as a backstop only. A run that is advancing is bounded by
+   * the turn's model calls and minutes; one that is circling by `noProgressSteps`.
+   */
   steps: number;
+  /** Hyperexperimental: this many steps in a row that change nothing and run nothing new end the turn. */
+  noProgressSteps: number;
+  /** Hyperexperimental: after this many steps in a row that only look, the next must act (or say BLOCKED). */
+  lookSteps: number;
   /** Every model call of the turn: plain calls plus the workers' own requests. */
   modelCalls: number;
   /** Experimental: one worker's own budget of model requests (then it is stopped, and the planner revises). */
   workerCalls: number;
   /** Experimental: one worker's own budget of time (the same). */
   workerMs: number;
+  /**
+   * Experimental: one worker's context, in input tokens of a single request as the router reports
+   * them. A worker whose requests reach this is asked to write its hand-over and is stopped; a
+   * fresh worker goes on from it. Set under what a web chat takes before the bridge has to cut.
+   */
+  workerContextTokens: number;
+  /** Experimental: hand-overs for a full context per turn (then the planner is asked to split). */
+  handoffs: number;
   /** A worker with nothing running and no word from the model for this long is stopped. */
   workerIdleMs: number;
   /** One RUN action. */
@@ -114,15 +131,26 @@ export const RETRY_DELAYS_MS = [5_000, 20_000, 60_000, 120_000];
 export const WORKER_CALLS = 24;
 export const WORKER_MINUTES = 10;
 export const TURN_MINUTES = 22;
+/**
+ * A worker's context budget (input tokens of one request). The web chat behind the bridge takes
+ * about 15k tokens of prompt; in the second benchmark round a worker's first request was about
+ * 3k and the largest of any worker 10.3k. A worker is wrapped up at 11k, which leaves its last
+ * tool output and the wrap-up request under the bridge's cut.
+ */
+export const WORKER_CONTEXT_TOKENS = 11_000;
 
 export const DEFAULT_CAPS: Caps = {
   tasks: 10,
   attempts: 2,
   replans: 3,
-  steps: 14,
+  steps: 40,
+  noProgressSteps: 5,
+  lookSteps: 3,
   modelCalls: 80,
   workerCalls: WORKER_CALLS,
   workerMs: WORKER_MINUTES * 60_000,
+  workerContextTokens: WORKER_CONTEXT_TOKENS,
+  handoffs: 4,
   workerIdleMs: 5 * 60_000,
   commandMs: 120_000,
   turnMs: TURN_MINUTES * 60_000,
@@ -132,7 +160,8 @@ export const DEFAULT_CAPS: Caps = {
 /**
  * Caps set from the environment (the app passes its own): PROVENANCE_ORC_RETRY_S="5,20,60,120"
  * (seconds before each retry; "0" or "off" for none), PROVENANCE_ORC_WORKER_CALLS,
- * PROVENANCE_ORC_WORKER_MINUTES, PROVENANCE_ORC_TURN_MINUTES. Anything unreadable is ignored.
+ * PROVENANCE_ORC_WORKER_MINUTES, PROVENANCE_ORC_TURN_MINUTES, PROVENANCE_ORC_WORKER_TOKENS (a
+ * worker's context budget, input tokens). Anything unreadable is ignored.
  */
 export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const out: Partial<Caps> = {};
@@ -150,6 +179,9 @@ export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const minutes = Number(env.PROVENANCE_ORC_WORKER_MINUTES);
   if (Number.isFinite(minutes) && minutes >= 0.5 && minutes <= 240)
     out.workerMs = Math.round(minutes * 60_000);
+  const tokens = Number(env.PROVENANCE_ORC_WORKER_TOKENS);
+  if (Number.isInteger(tokens) && tokens >= 2000 && tokens <= 1_000_000)
+    out.workerContextTokens = tokens;
   const turn = Number(env.PROVENANCE_ORC_TURN_MINUTES);
   if (Number.isFinite(turn) && turn >= 1 && turn <= 600) out.turnMs = Math.round(turn * 60_000);
   return out;
@@ -172,12 +204,28 @@ export interface Stats {
   steps: number;
   stopped: string | null;
   /**
-   * The finish check of a turn that changed something: how many requirements the reviewer
-   * listed, how many it found not shown or violated, what code found on its own (a missing or
-   * misnamed file, a path outside the folder, a failed last check), and how many follow-up tasks
-   * (Experimental) or steps (Hyperexperimental) were run for them. Absent when no check ran.
+   * The finish check of a turn that changed something (finish.ts): `reviewed` whether a reviewer
+   * was called (it is not for a small job that ran its result and names nothing unchecked);
+   * `requirements` how many checks it named, `passed` how many of those passed when code ran
+   * them, `open` how many failed or could not be run at the end; `code` what code found on its
+   * own (a missing or misnamed file, a path outside the folder, a failed last check);
+   * `followUps` the fix tasks (Experimental) or steps (Hyperexperimental) run for what failed.
+   * Absent when the turn changed nothing.
    */
-  finish?: { requirements: number; open: number; code: number; followUps: number };
+  finish?: {
+    requirements: number;
+    open: number;
+    code: number;
+    followUps: number;
+    reviewed?: boolean;
+    passed?: number;
+  };
+  /** Experimental: workers stopped at their context budget and handed over to a fresh one. */
+  handoffs?: number;
+  /** Hyperexperimental: steps whose actions were read straight from the Think text (no translate call). */
+  direct?: number;
+  /** Hyperexperimental: actions answered from memory or refused before they ran (a repeat, a path outside the folder, a look past the limit). */
+  refused?: number;
 }
 
 export type TraceEvent =
@@ -251,8 +299,13 @@ export interface ThreadRecord {
   turns: TurnRecord[];
   /** Experimental: the session notes. */
   notes: Notes;
-  /** Hyperexperimental: the summary. */
+  /**
+   * Hyperexperimental: the working memory as text (what a reader, a hand-over or "where things
+   * stand" is shown); the memory itself is `memory`.
+   */
   summary: string;
+  /** Hyperexperimental: the working memory (memory.ts): the log, kept facts, pins, what was seen. */
+  memory?: Memory | null;
   /** Hyperexperimental: the request a turn ended without finishing ("continue" takes it up). */
   openGoal?: string | null;
   /**
@@ -516,8 +569,10 @@ export class OrchestratorBackend {
     const context = t.turns.length ? "" : contextText(p.additionalContext);
     if (!typed.trim() && !context.trim()) throw new Error("Nothing to send");
     if (context) {
-      if (t.orchestrator === "hyperexperimental") t.summary = clipMiddle(context, SUMMARY_LIMIT);
-      else t.notes.requests = [clipMiddle(context, HANDOVER_GOAL_CHARS)];
+      if (t.orchestrator === "hyperexperimental") {
+        t.summary = clipMiddle(context, SUMMARY_LIMIT);
+        t.memory = null;
+      } else t.notes.requests = [clipMiddle(context, HANDOVER_GOAL_CHARS)];
     }
     // A turn that only carries on asks the orchestrator to go on.
     const text = typed.trim() ? typed : "continue";
@@ -881,7 +936,8 @@ export class Run {
 
   /**
    * One plain model call in a new chat: instructions + one user message, nothing else. The
-   * prompt is held to PROMPT_BUDGET (an over-long input loses its middle).
+   * prompt is held to `budget` (PROMPT_BUDGET unless the role has its own: the Think call's is
+   * THINK_BUDGET); an over-long input loses its middle.
    *
    * A call the router can't serve now (429, 5xx, no answer, a timeout, a failed stream, an empty
    * reply) is tried again after each of caps.retryDelaysMs, with a status line in the thread;
@@ -889,8 +945,13 @@ export class Run {
    * waiting can't cure (a refused token), does the turn end with the plain message. The call
    * counts once against the turn's model calls however often it is tried.
    */
-  async model(role: Role, prompt: Prompt, maxOutputTokens?: number): Promise<string> {
-    const room = Math.max(1000, PROMPT_BUDGET - prompt.instructions.length);
+  async model(
+    role: Role,
+    prompt: Prompt,
+    maxOutputTokens?: number,
+    budget = PROMPT_BUDGET,
+  ): Promise<string> {
+    const room = Math.max(1000, budget - prompt.instructions.length);
     const input = prompt.input.length > room ? clipMiddle(prompt.input, room) : prompt.input;
     this.check();
     this.spend();
@@ -1092,11 +1153,7 @@ export function folderBrief(cwd: string): string {
 }
 
 export function platformName(): string {
-  return process.platform === "darwin"
-    ? "macOS, zsh"
-    : process.platform === "win32"
-      ? "Windows"
-      : "Linux, sh";
+  return platformLabel();
 }
 
 function inputText(input: unknown): string {

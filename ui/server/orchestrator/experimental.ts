@@ -25,15 +25,19 @@
 //              still planned is progress: the plan stands). A worker whose model request
 //              failed (after the harness's own retries) is not a failed task: the task is run
 //              again after a wait, on the schedule plain calls use.
-//   4. check   when the list is done, the finish check, once per turn that changed something:
-//              by code, every file the request names as output exists under exactly that name
-//              (a file of nearly that name is a near miss and is called one), nothing was written
-//              outside the folder to a path the request does not name, and the last recorded
-//              check did not fail; then one plain call, a fresh reader given the request word for
-//              word and what was recorded, answers per requirement MET / NOT SHOWN / VIOLATED
-//              with the cheapest check for what is not shown. What is open becomes ONE more
-//              task, written by code from those findings (never by the planner), and is not
-//              revised if it fails.
+//   4. check   when the list is done, the finish check, once per turn that changed something
+//              (finish.ts). By code, always: every file the request names as output exists
+//              under exactly that name (a file of nearly that name is a near miss and is called
+//              one), nothing was written outside the folder to a path the request does not name,
+//              and the last recorded check did not fail. A reviewer (one plain call) only when it
+//              can add something: the job was split, the last worker names something as not
+//              checked, or no recorded command ran the result. It is given the evidence (files
+//              with excerpts, commands with exit codes and the end of their output) and names at
+//              most three things the evidence does not show, each with one command; those are run
+//              by code. Only a check that fails, or what code found, becomes ONE more task,
+//              written by code from the failing command and its output (never by the planner),
+//              with half a task's budget; it is not revised if it fails, and afterwards the
+//              failing commands are run again by code.
 //   5. answer  for a job that was not split, the worker's own report; for a split one, a short
 //              reply written from the notes (one plain call). What code found (a missing or
 //              misnamed file, a failed last check) is stated first, and what the finish check
@@ -58,28 +62,33 @@
 // and one more task still fit, and when too little is left the turn stops with what it has and
 // says what is not done, instead of running into the cap.
 //
+// A worker's context has a budget too (Caps.workerContextTokens, input tokens of one request as
+// the router reports them, set under what the web chat takes before the bridge has to cut). A
+// worker whose requests reach it is stopped and asked, on the same thread, for a hand-over: what
+// is done, what is left, what it learned. A fresh worker then gets the same task with that
+// hand-over and the notes. No planner call is spent: a job that started as one worker and grew is
+// carried on by further workers, not by the harness's own compaction. Only when a context fills
+// up twice with nothing changed, or more often than Caps.handoffs in a turn, is what remains sent
+// to the planner to split.
+//
+// What no plan gets past is not planned around: a last task that made the work and reports only
+// that something cannot be run or installed here (a missing tool, no network) ends the job with
+// "not verified"; a plan that was already revised and whose tasks since changed nothing is not
+// revised again.
+//
 // Between turns only the notes are kept: a follow-up message is planned from them, not from the
 // history. They also hold the tasks still to do, so after a turn that ended early (no model, a
 // guard, an interrupt) "continue" runs what was left without planning again. Workers run one at
 // a time; runWorker holds no state outside its arguments, so tasks the planner marked
 // independent could be run side by side later.
 //
-// Guards (backend.ts Caps): worker runs per turn, tries per task, plan revisions, model calls and
-// minutes per turn (workers' requests counted as app-server reports them), requests and minutes
-// per worker.
+// Guards (backend.ts Caps): worker runs per turn, tries per task, plan revisions, hand-overs, model
+// calls and minutes per turn (workers' requests counted as app-server reports them), requests,
+// minutes and context per worker.
 // A guard that stops the work ends the turn with a plain message and the notes. Time is read off
 // the monotonic clock (clock.ts).
 
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Item } from "../fallback/items.ts";
@@ -109,7 +118,21 @@ import {
   setPending,
 } from "./notes.ts";
 import {
+  codeFindings,
+  findingCount,
+  findingLines,
+  finishText,
+  followUpTask,
+  review,
+  reviewWorth,
+  runChecks,
+  tailOf,
+  type Check,
+  type Evidence,
+} from "./finish.ts";
+import {
   isContinue,
+  lookOnly,
   looksLikeRefusal,
   parsePlan,
   parseReport,
@@ -122,21 +145,21 @@ import {
   finalPrompt,
   ONE_WORKER_CHARS,
   plannerPrompt,
-  reviewPrompt,
   revisePrompt,
   WORKER_BASE,
   workerBrief,
+  WRAP_UP,
 } from "./prompts.ts";
-import {
-  exactNames,
-  filesNamed,
-  nearMiss,
-  parseReview,
-  requestExcerpt,
-  strayPaths,
-  type Review,
-  type ReviewItem,
-} from "./request.ts";
+import { exactNames, filesNamed, requestExcerpt } from "./request.ts";
+
+export {
+  codeFindings,
+  findingCount,
+  findingLines,
+  finishText,
+  followUpTask,
+  REVIEW_TOKENS,
+} from "./finish.ts";
 import { routerProblem } from "./router.ts";
 
 type Json = Record<string, unknown>;
@@ -164,12 +187,16 @@ const RESERVE_MS = 45_000;
 /** Less than this left (after the reserve) is not enough to start another task. */
 const MIN_TASK_CALLS = 3;
 const MIN_TASK_MS = 60_000;
+/** A fix task after the finish check gets this share of a task's budget: it has one thing to fix. */
+const FIX_FACTOR = 0.5;
 /**
- * The reviewer's reply may be this long (tokens). Generous on purpose: a model that reasons
- * before it writes spends its allowance there first, and a reply cut off after "R1: …" is no
- * review (seen with 700 on a real run).
+ * A report that is not done only because something cannot be run or installed here: a missing
+ * tool, no network, a refused install. No plan gets past that; the answer says "not verified".
  */
-export const REVIEW_TOKENS = 3000;
+const ENV_BLOCK_RE =
+  /cannot execute|not (?:installed|available|found)|unavailable|no (?:\w+[ -]){0,3}(?:engine|library|libraries|module|package|tool|parser|runtime|network|internet|access)\b|network (?:access )?(?:is |was )?(?:unavailable|disabled|blocked|restricted)|could ?n[o']t (?:be )?(?:install|execut|run)|unable to (?:install|execute|run)|(?:install\w*|pip|npm|docker)\b[^.\n]{0,60}\b(?:failed|denied|refused)|missing (?:tool|dependency|library|module|engine)|\b\w+ (?:is|was) missing\b/i;
+/** After a worker is told to wrap up, its hand-over may take this long. */
+const WRAP_UP_MS = 150_000;
 /** The one worker of an unsplit job gets this much more than a task of a split one. */
 const WHOLE_JOB_FACTOR = 1.5;
 
@@ -178,7 +205,8 @@ export interface WorkerResult {
   /** The worker's last message. */
   report: string;
   error: string | null;
-  commands: { cmd: string; ok: boolean }[];
+  /** Commands that were more than a look (or failed), with how each exited and the end of what it printed. */
+  commands: Evidence[];
   files: { path: string; kind: string }[];
   calls: number;
   maxInputTokens: number;
@@ -196,6 +224,11 @@ export interface WorkerResult {
   ran: number;
   /** Commands (or changes) it asked approval for and was refused. */
   declined: string[];
+  /**
+   * It was stopped because its context reached the budget (Caps.workerContextTokens), and its
+   * report is the hand-over it was asked for (or "" when it gave none).
+   */
+  handoff: boolean;
 }
 
 /** What one worker may spend: its own share of what the turn has left. */
@@ -203,9 +236,6 @@ export interface WorkerBudget {
   calls: number;
   ms: number;
 }
-
-export const LOOKING_RE =
-  /^\s*(?:ls|cat|find|sed -n|head|tail|pwd|rg|grep|wc|echo|printf|mkdir|touch|cd|tree|which|file|stat)\b/;
 
 /**
  * The files a request names that do not exist: what the job is to produce ("… create
@@ -227,10 +257,6 @@ export function deliverablesIn(request: string, cwd: string): string[] {
   return out;
 }
 
-function missing(deliverables: string[], cwd: string): string[] {
-  return deliverables.filter((d) => !existsSync(path.resolve(cwd, d)));
-}
-
 /**
  * The request as a file a worker (or a READ) can open, for a request no prompt holds whole. Under
  * the system temp folder (readable from every sandbox preset, and not in the person's project).
@@ -245,179 +271,6 @@ export function requestFile(threadId: string, request: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** What code can tell about the end of a job without asking anyone. */
-export interface CodeFindings {
-  /** Files the request names as output that do not exist. */
-  gone: string[];
-  /** Of those, the ones something of nearly that name was made for instead. */
-  near: { want: string; have: string }[];
-  /** Paths outside the folder that were written to and that the request does not name. */
-  stray: string[];
-  /** The last recorded check, when it failed. */
-  failed: string | null;
-}
-
-export function codeFindings(a: {
-  deliverables: string[];
-  cwd: string;
-  request: string;
-  /** Files created or changed this turn (relative to the folder where they are inside it). */
-  files: string[];
-  commands: string[];
-  reports: string[];
-  lastCheck: { cmd: string; ok: boolean } | null;
-}): CodeFindings {
-  const gone = missing(a.deliverables, a.cwd);
-  const wanted = new Set(a.deliverables);
-  const made = a.files.filter((f) => !wanted.has(f) && existsSync(path.resolve(a.cwd, f)));
-  const near: CodeFindings["near"] = [];
-  for (const want of gone) {
-    const have = nearMiss(want, made);
-    if (have) near.push({ want, have });
-  }
-  return {
-    gone,
-    near,
-    stray: strayPaths(
-      {
-        files: a.files.filter((f) => path.isAbsolute(f)),
-        commands: a.commands,
-        reports: a.reports,
-      },
-      a.cwd,
-      a.request,
-    ),
-    failed: a.lastCheck && !a.lastCheck.ok ? a.lastCheck.cmd : null,
-  };
-}
-
-/** The findings as lines (for the reviewer, a follow-up task, the answer). */
-export function findingLines(f: CodeFindings): string[] {
-  const out: string[] = [];
-  for (const g of f.gone) {
-    const n = f.near.find((x) => x.want === g);
-    out.push(
-      n
-        ? `\`${g}\`, named in the request, does not exist; \`${n.have}\` was made instead: a near miss, not the file asked for (the request's name and place are the right ones)`
-        : `\`${g}\`, named in the request, does not exist`,
-    );
-  }
-  for (const s of f.stray)
-    out.push(`\`${s}\` is outside the working folder and the request does not name it`);
-  if (f.failed) out.push(`the last recorded check failed: \`${clip(f.failed, 160)}\``);
-  return out;
-}
-
-export function findingCount(f: CodeFindings): number {
-  return f.gone.length + f.stray.length + (f.failed ? 1 : 0);
-}
-
-/** A few hundred characters from the start of a small text file ("" for anything else). */
-function excerpt(file: string, max = 520): string {
-  try {
-    const st = statSync(file);
-    if (!st.isFile() || st.size === 0) return "";
-    const fd = openSync(file, "r");
-    const buf = Buffer.alloc(Math.min(st.size, max * 2));
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    closeSync(fd);
-    const text = buf.subarray(0, n).toString("utf8");
-    // (a binary file is not shown)
-    if (/[\u0000-\u0008\u000e-\u001f]/.test(text)) return "";
-    return text.length > max ? `${text.slice(0, max)}…` : text;
-  } catch {
-    return "";
-  }
-}
-
-/** The files changed this turn as the reviewer sees them: kind, size, the head of the small ones. */
-export function filesEvidence(
-  files: { path: string; kind: string }[],
-  deliverables: string[],
-  cwd: string,
-): string {
-  const out: string[] = [];
-  const wanted = new Set(deliverables);
-  let shown = 0;
-  const order = [...files].sort((a, b) => Number(wanted.has(b.path)) - Number(wanted.has(a.path)));
-  for (const f of order.slice(0, 10)) {
-    const abs = path.resolve(cwd, f.path);
-    const size = fileSize(abs);
-    out.push(`- ${f.path} (${f.kind}, ${size === null ? "not there now" : `${size} bytes`})`);
-    if (size !== null && shown < 4) {
-      const head = excerpt(abs);
-      if (head) {
-        out.push(
-          head
-            .split("\n")
-            .slice(0, 14)
-            .map((l) => `    | ${l}`)
-            .join("\n"),
-        );
-        shown++;
-      }
-    }
-  }
-  for (const d of deliverables)
-    if (!files.some((f) => f.path === d))
-      out.push(
-        `- ${d} (named in the request): ${fileSize(path.resolve(cwd, d)) === null ? "MISSING" : "exists, not changed this turn"}`,
-      );
-  return out.join("\n");
-}
-
-/** The follow-up task for what the finish check left open: written by code, never by a planner. */
-export function followUpTask(open: ReviewItem[], found: string[]): MiniTask {
-  const lines = [
-    ...found.map((f) => `- (recorded) ${f}`),
-    ...open.map(
-      (o) =>
-        `- ${o.verdict === "violated" ? "VIOLATED" : "NOT SHOWN"}: ${clip(o.requirement, 200)}${o.note ? ` — ${clip(o.note, 200)}` : ""}`,
-    ),
-  ];
-  return {
-    title: "Settle the open points of the finish check, and fix what the checks show",
-    detail: `A reviewer read the request against what was recorded. These points are open:\n${lines.join("\n")}\nFor each: run the check named (or a better one) on the real result, the way the request says it will be used. Where a check fails or a point is violated, fix the work and run the check again. Never weaken or remove a check to make it pass. A file the request names must exist under exactly that name and place.`,
-    done: "every open point is settled by a command you ran (name each in VALIDATION), or is listed under NOT CHECKED with the reason",
-    followUp: true,
-  };
-}
-
-/** What the answer says about the finish check ("" when it has nothing to say). */
-export function finishText(a: {
-  review: Review | null;
-  open: ReviewItem[];
-  followUp: { ran: boolean; done: boolean; result: string; why: string } | null;
-  skipped: string | null;
-  /** Hyperexperimental: the follow-up was further steps of the same job, not a task of its own. */
-  steps?: boolean;
-}): string {
-  if (!a.review && !a.open.length)
-    return a.skipped
-      ? `Finish check: not run (${a.skipped}); nothing beyond the recorded commands was verified.`
-      : "";
-  const total = a.review?.items.length ?? 0;
-  // (all shown met: the answer stays as it is)
-  if (!a.open.length) return "";
-  const list = a.open
-    .map(
-      (o) =>
-        `- ${o.verdict === "violated" ? "violated" : "not shown"}: ${clip(o.requirement, 180)}${o.note ? ` (${clip(o.note, 160)})` : ""}`,
-    )
-    .join("\n");
-  const head = `**Finish check.** Read against what was recorded, ${a.open.length} of ${total} requirement${total === 1 ? "" : "s"} ${a.open.length === 1 ? "was" : "were"} not shown met:\n${list}`;
-  if (!a.followUp?.ran)
-    return `${head}\n${a.steps ? "No further step" : "No follow-up task"} was run for ${a.open.length === 1 ? "it" : "them"}${a.skipped ? ` (${a.skipped})` : ""}: treat ${a.open.length === 1 ? "it" : "them"} as **not verified**.`;
-  const it = a.open.length === 1 ? "it" : "them";
-  if (a.steps)
-    return a.followUp.done
-      ? `${head}\nMore steps were then run for ${it}; the answer above says what was checked and what was not.`
-      : `${head}\nMore steps were run for ${it} and did not settle ${it} (${clip(a.followUp.why || "they did not finish", 200)}): treat ${it} as **not verified**.`;
-  return a.followUp.done
-    ? `${head}\nA follow-up task then ran for ${it} and reported: ${clip(a.followUp.result || "done", 400)}`
-    : `${head}\nA follow-up task ran for ${it} and did not settle ${it} (${clip(a.followUp.why || "it did not finish", 200)}): treat ${it} as **not verified**.`;
 }
 
 /** The plan for a request: one call, and one firmer call if the first declined to plan. */
@@ -455,6 +308,20 @@ function wholeTask(job: string, suggested: MiniTask[]): MiniTask {
     ...(order ? { detail: order } : {}),
     done: "what the request asks for exists exactly as it names it, and you have run it",
     whole: true,
+  };
+}
+
+/**
+ * The same task for a fresh worker, after one was stopped at its context budget: what that worker
+ * handed over (its own words, bounded) and the instruction to go on from the files as they are.
+ */
+function continuation(task: MiniTask, res: WorkerResult, n: number): MiniTask {
+  const said = res.report.trim()
+    ? clipMiddle(res.report.trim(), 1100)
+    : "(it gave no hand-over; the notes below hold what was recorded)";
+  return {
+    ...task,
+    detail: `(recorded) An earlier worker on this task was stopped when its context was nearly full (hand-over ${n}). Its report:\n${said}\nGo on from the files as they are now. Do not redo what is finished, and do not read again what the report already tells you.`,
   };
 }
 
@@ -533,13 +400,21 @@ export async function runExperimental(run: Run): Promise<void> {
   const refused = new Map<string, string[]>();
   /** What this turn changed and ran: the finish check's material. */
   const turnFiles = new Map<string, string>();
-  const turnCommands: { cmd: string; ok: boolean }[] = [];
-  /** The finish check, once per turn: what it found, and how its follow-up went. */
-  let review: Review | null = null;
-  let open: ReviewItem[] = [];
+  const turnCommands: Evidence[] = [];
+  /** The finish check, once per turn: its checks (run by code), and how the fix for what failed went. */
+  let reviewed = false;
+  let checks: Check[] = [];
   let checked = false;
   let skipped: string | null = null;
   let followUp: { ran: boolean; done: boolean; result: string; why: string } | null = null;
+  /** Why no fix was started for what the finish check found ("" when one was, or none was needed). */
+  let fixWhy = "";
+  /** Workers stopped at their context budget this turn, and how many of those in a row changed nothing. */
+  let handoffs = 0;
+  let dryHandoffs = 0;
+  /** Workers that changed a file, and that count when the plan was last revised. */
+  let changes = 0;
+  let changesAtReplan = 0;
   /** How many reports there were when the job's own tasks ended (a follow-up's come after). */
   let ownReports = -1;
   const split = queue.length > 1;
@@ -610,8 +485,8 @@ export async function runExperimental(run: Run): Promise<void> {
         const have = room();
         if (!enough(have)) {
           if (task.followUp) {
-            // The job's own tasks ran; only the settling of the finish check does not fit.
-            skipped = `${short(have)}; too little was left`;
+            // The job's own tasks ran; only the fix for what the finish check found does not fit.
+            fixWhy = `${short(have)}; too little was left to start a fix that could finish`;
             queue = [];
             break;
           }
@@ -620,7 +495,7 @@ export async function runExperimental(run: Run): Promise<void> {
             `Stopped with the job partly done: ${short(have)}, and what is left is not enough for another task. Not done: ${left()}. Send "continue" to go on.`,
           );
         }
-        const factor = task.whole ? WHOLE_JOB_FACTOR : 1;
+        const factor = task.whole ? WHOLE_JOB_FACTOR : task.followUp ? FIX_FACTOR : 1;
         const budget: WorkerBudget = {
           calls: Math.max(2, Math.min(Math.round(caps.workerCalls * factor), have.calls)),
           ms: Math.max(1000, Math.min(Math.round(caps.workerMs * factor), have.ms)),
@@ -630,10 +505,14 @@ export async function runExperimental(run: Run): Promise<void> {
         const total = finished.length + 1 + queue.length;
         if (total > 1 && !wait)
           run.say(`**Task ${finished.length + 1} of ${total}:** ${task.title}`);
-        else if (task.followUp && !wait)
+        else if (task.followUp && !wait) {
+          const failed = checks.filter((c) => c.state === "failed").length;
+          const byCode = findingLines(found()).length;
+          const n = failed + byCode;
           run.say(
-            `**Finish check:** ${open.length + findingLines(found()).length} point${open.length + findingLines(found()).length === 1 ? "" : "s"} not shown by what was recorded. One more task to settle ${open.length + findingLines(found()).length === 1 ? "it" : "them"}.`,
+            `**Finish check:** ${n} thing${n === 1 ? "" : "s"} found after the work was reported done (${[byCode ? `${byCode} by code` : "", failed ? `${failed} check${failed === 1 ? "" : "s"} failed` : ""].filter(Boolean).join(", ")}). One task to fix ${n === 1 ? "it" : "them"}.`,
           );
+        }
         const brief = workerBrief({
           request: job,
           exact,
@@ -660,11 +539,13 @@ export async function runExperimental(run: Run): Promise<void> {
           brief,
           calls: res.calls,
           maxInputTokens: res.maxInputTokens,
-          status: res.budget
-            ? `stopped (${res.budget})`
-            : res.modelFailure
-              ? "no model"
-              : res.status,
+          status: res.handoff
+            ? "handed over (context)"
+            : res.budget
+              ? `stopped (${res.budget})`
+              : res.modelFailure
+                ? "no model"
+                : res.status,
           threadId: res.threadId,
           report: res.report,
           commands: res.ran,
@@ -672,13 +553,16 @@ export async function runExperimental(run: Run): Promise<void> {
         // Recorded facts first: they hold whatever the report says, and whatever stopped the worker.
         for (const c of res.commands) {
           addCommand(notes, c.cmd, c.ok);
-          lastCheck = c;
+          // (a look that failed is recorded, but it is not "the last check": `ls` of a file that
+          // is not there yet says nothing about the result)
+          if (!lookOnly(c.cmd)) lastCheck = c;
           turnCommands.push(c);
         }
         for (const f of res.files) {
           addFile(notes, f.path, f.kind);
           turnFiles.set(f.path, f.kind);
         }
+        if (res.files.length) changes++;
         // An approval nobody gave is recorded once, whatever the worker made of it.
         for (const d of res.declined) addApproval(notes, d);
         run.check();
@@ -712,6 +596,39 @@ export async function runExperimental(run: Run): Promise<void> {
         if (wait) {
           wait.end(true);
           wait = null;
+        }
+        if (res.handoff) {
+          // Its context was nearly full: it was stopped and asked for a hand-over. That is not a
+          // failure of the task and not a reason to plan again: a fresh worker goes on from the
+          // hand-over and the notes, with the same task. Only when that keeps happening (or
+          // happens twice without anything changing) is the planner asked to split what is left.
+          handoffs++;
+          run.stats.handoffs = handoffs;
+          const moved = res.files.length > 0 || res.commands.some((c) => c.ok);
+          dryHandoffs = moved ? 0 : dryHandoffs + 1;
+          const said = reportSections(res.report);
+          if (res.report.trim()) {
+            reports.push(res.report);
+            lastReport = res.report;
+            addDone(
+              notes,
+              `${task.title} (part ${handoffs}, handed over)`,
+              said.result || res.report,
+            );
+          }
+          if (handoffs <= caps.handoffs && dryHandoffs < 2 && !task.followUp) {
+            attempts.set(key, tries - 1);
+            queue.unshift(continuation(task, res, handoffs));
+            setPending(notes, queue);
+            run.say(
+              `The worker's context was nearly full (${res.maxInputTokens} tokens in one request, of ${caps.workerContextTokens} allowed). A fresh worker goes on from its hand-over.`,
+            );
+            run.save();
+            continue;
+          }
+          res.status = "failed";
+          res.error = `its context filled up ${handoffs} time${handoffs === 1 ? "" : "s"} without the task finishing: the task is too big for one worker`;
+          res.report = "";
         }
         const rep = parseReport(res.report);
         const sec = reportSections(res.report);
@@ -845,6 +762,35 @@ export async function runExperimental(run: Run): Promise<void> {
           setPending(notes, queue);
           continue;
         }
+        // What no plan gets past. (1) The last task reports the work as made (PARTIAL, not
+        // BLOCKED) and what is left as something that cannot be run or installed here (a missing
+        // tool, no network): the answer says "not verified". (2) The plan was already revised and its tasks
+        // since changed nothing: a further revision would only look again. In the second
+        // benchmark round one job spent three revisions and 26 of its 39 model calls this way,
+        // hunting for a SPARQL engine after its query was written.
+        const produced = notes.deliverables.length
+          ? notes.deliverables.every((d) => existsSync(path.resolve(run.cwd, d)))
+          : turnFiles.size > 0;
+        const settled =
+          res.status === "completed" && !res.budget && !idleWorker && !contradicted && produced;
+        const envBlocked =
+          settled &&
+          rep.status === "partial" &&
+          queue.length === 0 &&
+          ENV_BLOCK_RE.test(`${sec.blockers} ${sec.unchecked}`);
+        const stale = settled && replans > 0 && changes === changesAtReplan;
+        if (envBlocked || stale) {
+          finished.push(task);
+          if (stale) queue = [];
+          setPending(notes, queue);
+          run.say(
+            envBlocked
+              ? `Part of this cannot be run here (${clip(sec.blockers || sec.unchecked, 200)}). Going on without it: it will be reported as not verified.`
+              : `The revised plan changed nothing (${clip(why, 160)}). Not planning again: what is left will be reported as not verified.`,
+          );
+          run.save();
+          continue;
+        }
         if (replans >= caps.replans)
           throw new StopTurn(
             "cap",
@@ -860,6 +806,7 @@ export async function runExperimental(run: Run): Promise<void> {
           );
         }
         replans++;
+        changesAtReplan = changes;
         const revised = parsePlan(
           await run.model(
             "revise",
@@ -885,64 +832,62 @@ export async function runExperimental(run: Run): Promise<void> {
         setPending(notes, queue);
         run.say(`That hit a problem (${clip(why, 200)}). Revised plan:\n\n${list(queue)}`);
       }
-      // The list is done. The finish check, once per turn: first what code can tell (is every
-      // file the request names there, under exactly that name; was anything written outside the
-      // folder; did the last check pass), then one fresh reader of the request against what was
-      // recorded. What is open becomes one more task, written by code from the findings.
-      if (gaveUp || checked) break;
+      // The list is done. The finish check, once per turn (finish.ts): what code can tell (is
+      // every file the request names there, under exactly that name; was anything written
+      // outside the folder; did the last check pass); a reviewer only when it can add something
+      // (the job was split, the work names something unchecked, nothing ran the result), and
+      // its checks are commands that code runs. Only a check that fails, or what code found,
+      // becomes one bounded fix task, written by code; afterwards the failing commands are run
+      // again, by code.
+      if (gaveUp) break;
+      if (checked) {
+        const failed = checks.filter((c) => c.state === "failed");
+        if (followUp?.ran && failed.length) await runChecks(run, failed, job);
+        break;
+      }
       checked = true;
       ownReports = reports.length;
       const code = found();
       const lines = findingLines(code);
       const changed = turnFiles.size > 0 || turnCommands.length > 0;
-      const have = run.left();
-      if (changed && have.calls > RESERVE_CALLS - 1 && have.ms > RESERVE_MS / 3) {
-        try {
-          review = parseReview(
-            await run.model(
-              "review",
-              reviewPrompt({
-                request: job,
-                exact,
-                files: filesEvidence(
-                  [...turnFiles].map(([p, kind]) => ({ path: p, kind })),
-                  notes.deliverables,
-                  run.cwd,
-                ),
-                commands: turnCommands
-                  .slice(-14)
-                  .map((c) => `- ${c.ok ? "ok" : "FAILED"}: ${clip(c.cmd, 150)}`)
-                  .join("\n"),
-                found: lines.map((l) => `- ${l}`).join("\n"),
-                claims: reports
-                  .slice(-3)
-                  .map((r) => {
-                    const s = reportSections(r);
-                    return `- ${clip(s.result || r, 150)}${s.unchecked ? ` NOT CHECKED: ${clip(s.unchecked, 120)}` : ""}`;
-                  })
-                  .join("\n"),
-              }),
-              REVIEW_TOKENS,
-            ),
-          );
-          if (!review.items.length) {
-            // (cut off, or not in the form asked for: no verdicts to act on, and the answer says so)
-            review = null;
-            skipped = "the reviewer's reply could not be read";
-          } else open = review.open;
-        } catch (e) {
-          if (!(e instanceof StopTurn) || run.interrupted) throw e;
-          skipped = "the reviewer could not be reached";
-        }
-      } else if (changed) skipped = "too little of the turn's budget was left";
+      // (what the last worker says it left unchecked; a hand-over's list is the next worker's job)
+      const unchecked = reportSections(reports.at(-1) ?? "").unchecked;
+      const rv = await review(run, {
+        // (what code found goes straight to the fix: a reviewer adds nothing to a missing file)
+        why: lines.length
+          ? null
+          : reviewWorth({
+              changed,
+              split: split || replans > 0 || finished.length > 1,
+              unchecked,
+              commands: turnCommands.filter((c) => !lookOnly(c.cmd)),
+            }),
+        request: job,
+        deliverables: notes.deliverables,
+        files: [...turnFiles].map(([p, kind]) => ({ path: p, kind })),
+        commands: turnCommands,
+        unchecked,
+      });
+      reviewed = rv.reviewed;
+      checks = rv.checks;
+      skipped = rv.skipped;
+      const failed = checks.filter((c) => c.state === "failed");
       run.stats.finish = {
-        requirements: review?.items.length ?? 0,
-        open: open.length,
+        requirements: checks.length,
+        open: checks.filter((c) => c.state !== "passed").length,
         code: findingCount(code),
         followUps: 0,
+        reviewed,
+        passed: checks.filter((c) => c.state === "passed").length,
       };
-      if (!open.length && !lines.length) break;
-      queue = [followUpTask(open, lines)];
+      if (!failed.length && !lines.length) break;
+      // A fix that cannot finish is not started: the answer says "not verified" instead.
+      const have = room();
+      if (!enough(have)) {
+        fixWhy = `${short(have)}; too little was left to start a fix that could finish`;
+        break;
+      }
+      queue = [followUpTask(failed, lines)];
       run.stats.finish.followUps = 1;
       setPending(notes, queue);
     }
@@ -959,7 +904,17 @@ export async function runExperimental(run: Run): Promise<void> {
   showPlan(null);
 
   const facts = verdict();
-  const finish = finishText({ review, open, followUp, skipped });
+  if (run.stats.finish) {
+    run.stats.finish.passed = checks.filter((c) => c.state === "passed").length;
+    run.stats.finish.open = checks.filter((c) => c.state !== "passed").length;
+    run.stats.finish.code = findingCount(found());
+  }
+  const finish = finishText({
+    reviewed,
+    checks,
+    fix: followUp || fixWhy ? { ran: !!followUp?.ran, why: fixWhy || followUp?.why || "" } : null,
+    skipped,
+  });
   const needs = notes.approvals.length
     ? `Needs approval (asked and declined, so not run): ${notes.approvals.map((a) => `\`${clip(a, 140)}\``).join("; ")}.`
     : "";
@@ -977,7 +932,7 @@ export async function runExperimental(run: Run): Promise<void> {
     run.say(withTail(clean(own.at(-1)!)));
     return;
   }
-  const checks = [
+  const recorded = [
     ...notes.deliverables.map((d) => {
       const size = fileSize(path.resolve(run.cwd, d));
       return `${d}: ${size === null ? "MISSING" : `exists (${size} bytes)`}`;
@@ -986,9 +941,12 @@ export async function runExperimental(run: Run): Promise<void> {
       ? [`last check: ${lastCheck.ok ? "passed" : "FAILED"}: ${clip(lastCheck.cmd, 160)}`]
       : []),
     ...findingLines(found()).filter((l) => /near miss|outside the working folder/.test(l)),
-    ...(open.length
+    ...(checks.some((c) => c.state !== "passed")
       ? [
-          `finish check, NOT SHOWN or VIOLATED: ${open.map((o) => clip(o.requirement, 120)).join("; ")}${followUp?.done ? " (a follow-up task then ran for these)" : ""}`,
+          `finish check, FAILED or NOT VERIFIED: ${checks
+            .filter((c) => c.state !== "passed")
+            .map((c) => clip(c.requirement, 120))
+            .join("; ")}`,
         ]
       : []),
   ].join("\n");
@@ -999,7 +957,7 @@ export async function runExperimental(run: Run): Promise<void> {
     try {
       answer = await run.model(
         "final",
-        finalPrompt(job, notesText(notes), lastReport, checks),
+        finalPrompt(job, notesText(notes), lastReport, recorded),
         600,
       );
     } catch (e) {
@@ -1044,6 +1002,7 @@ export async function runWorker(
     threadId: null,
     ran: 0,
     declined: [],
+    handoff: false,
   };
   run.stats.workers++;
   let wid: string;
@@ -1066,12 +1025,16 @@ export async function runWorker(
   let capStop: StopTurn | null = null;
   let harnessFailed = false;
   let settle!: (status: WorkerResult["status"]) => void;
-  const done = new Promise<WorkerResult["status"]>((res) => (settle = res));
+  let done = new Promise<WorkerResult["status"]>((res) => (settle = res));
+  /** The worker has been told to wrap up (its context is full): no budget stops it now. */
+  let wrapping = false;
   const interruptWorker = () => {
     if (workerTurn)
       as.request("turn/interrupt", { threadId: wid, turnId: workerTurn }).catch(() => {});
     // If it doesn't confirm, don't wait for it.
-    setTimeout(() => settle("interrupted"), 4000).unref();
+    // (the turn being interrupted now: a hand-over turn started later is not this timer's)
+    const s = settle;
+    setTimeout(() => s("interrupted"), 4000).unref();
   };
 
   // For the idle guard: when the worker last said anything (on the monotonic clock: a wall clock
@@ -1137,7 +1100,13 @@ export async function runWorker(
             ? null
             : { cmd, output: clipMiddle(String(item.aggregatedOutput ?? "").trim(), 500) };
           // Looking around and writing files (those are under FILES) are not worth a line of notes.
-          if (!ok || !LOOKING_RE.test(cmd)) out.commands.push({ cmd, ok });
+          if (!ok || !lookOnly(cmd))
+            out.commands.push({
+              cmd,
+              ok,
+              exit: typeof item.exitCode === "number" ? item.exitCode : null,
+              tail: tailOf(String(item.aggregatedOutput ?? "")),
+            });
           out.ran++;
           out.recent.push({ cmd, ok });
           if (out.recent.length > 5) out.recent.shift();
@@ -1169,8 +1138,20 @@ export async function runWorker(
             interruptWorker();
           }
         }
+        // Its context: a request this large is close to what the web chat takes. The worker is
+        // stopped here and asked for its hand-over (below), before the bridge has to cut.
+        if (
+          !capStop &&
+          !out.budget &&
+          !out.handoff &&
+          (usage?.last?.inputTokens ?? 0) >= run.caps.workerContextTokens
+        ) {
+          out.handoff = true;
+          interruptWorker();
+          return;
+        }
         // Its own budget: a worker that has not finished in this many requests is circling.
-        if (!capStop && !out.budget && out.calls >= budget.calls) {
+        if (!capStop && !out.budget && !wrapping && !out.handoff && out.calls >= budget.calls) {
           out.budget = "calls";
           interruptWorker();
         }
@@ -1213,6 +1194,7 @@ export async function runWorker(
   }, 1000);
   // (a timer, so on the monotonic clock)
   const timer = setTimeout(() => {
+    if (wrapping || out.handoff) return;
     out.budget ??= "minutes";
     interruptWorker();
   }, budget.ms);
@@ -1230,6 +1212,34 @@ export async function runWorker(
     workerTurn = String((t.turn as Json | undefined)?.id ?? "");
     if (run.signal.aborted) interruptWorker();
     out.status = await done;
+    if (out.handoff && !run.signal.aborted && !capStop && out.status !== "completed") {
+      // The hand-over: one more request on the same thread, asking only for the report. What it
+      // says is what the next worker starts from; if nothing comes, the record has to do.
+      wrapping = true;
+      out.report = "";
+      done = new Promise<WorkerResult["status"]>((res) => (settle = res));
+      const giveUp = setTimeout(
+        () => interruptWorker(),
+        Math.max(5000, Math.min(WRAP_UP_MS, run.left().ms - 10_000)),
+      );
+      try {
+        const w = await as.request("turn/start", {
+          threadId: wid,
+          input: [{ type: "text", text: WRAP_UP, text_elements: [] }],
+          approvalPolicy: run.thread.approvalPolicy,
+          sandboxPolicy: pageSandboxPolicy(run.thread.sandbox),
+        });
+        workerTurn = String((w.turn as Json | undefined)?.id ?? "");
+        await done;
+      } catch {
+        // (no hand-over: the notes carry what was recorded)
+      } finally {
+        clearTimeout(giveUp);
+      }
+      out.status = "completed";
+      out.error = null;
+      harnessFailed = false;
+    }
   } catch (e) {
     if (e instanceof Interrupted || run.signal.aborted) out.status = "interrupted";
     else {
@@ -1255,6 +1265,11 @@ export async function runWorker(
     );
   // It finished in the same moment the budget ran out: it finished.
   if (out.budget && out.status === "completed") out.budget = null;
+  if (out.handoff) {
+    // (a worker that finished in the same moment needs no hand-over)
+    if (!wrapping) out.handoff = false;
+    out.budget = null;
+  }
   if (out.budget) {
     out.status = "failed";
     out.error =

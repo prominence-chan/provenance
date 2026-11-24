@@ -1,24 +1,39 @@
-// Hyperexperimental: every step is three new chats and one execution, and the only thing carried
-// from step to step (and from turn to turn) is a summary.
+// Hyperexperimental: a job done one step at a time by a model that keeps nothing between steps,
+// with a working memory that code keeps for it.
 //
-//   a. think      a new chat, no tools: the goal, a one-line listing of the folder, the summary
-//                 and the last step's results -> free-form text saying what to do next, or
-//                 "FINISHED: <answer for the user>". A file it wants written it gives once, whole,
-//                 in a block fenced ```file:<path>.
-//   b. translate  another new chat: that text, the folder and the platform -> actions in a small
-//                 fixed vocabulary (RUN, READ, LIST, SEARCH, WRITE, REPLACE; parse.ts reads it
-//                 forgivingly). It never sees the goal, the summary or any history, and it never
-//                 copies a file: the bodies are lifted out of the think text first (parse.ts
-//                 liftFiles; a complete `cat > f <<'EOF'` heredoc counts too) and attached to the
-//                 WRITE that names them, verbatim. Translate only decides the actions.
+//   a. think      a new chat, no tools: the goal word for word, a one-line listing of the folder,
+//                 the working memory, the pinned files and the last step's results -> what to do
+//                 next (several actions when they are independent: look, change, check), or
+//                 "FINISHED: <answer>", or "BLOCKED: <what is missing>". A file it wants written
+//                 it gives once, whole, in a block fenced ```file:<path>; commands in ```bash
+//                 blocks; looks and small changes as READ / LIST / SEARCH / REPLACE lines. A line
+//                 "KEEP: <fact>" goes into the memory as written.
+//   b. actions    file bodies and shell blocks are lifted out of that text verbatim (parse.ts
+//                 liftFiles, liftCommands). When the text then holds nothing but those blocks and
+//                 plain action lines, the actions are read straight from it (parse.ts directPlan):
+//                 no model call. Only a reply that says what to do in prose goes to the translate
+//                 chat (the folder, the platform and the text with markers for the lifted blocks;
+//                 it never sees the goal or the memory and never copies a file).
 //   c. execute    each action runs through the orchestrators' app-server as a sandboxed command
-//                 (command/exec with the thread's sandbox as an explicit policy; exec below), never
-//                 a shell of our own. Rows appear in the thread as commands and file changes.
-//                 A WRITE with no content, or a `cat > f` with no heredoc body, is refused before
-//                 anything runs: what came before it in the step runs, the rest doesn't, and the
-//                 next think is told what was refused and how to give the file.
-//   d. summarize  a third new chat folds the step (what was intended, the actions and their cut
-//                 results) into the summary, which is then cut to SUMMARY_LIMIT. Back to a.
+//                 (exec.ts), in order, stopped at the first that fails or is refused. Before it
+//                 runs, code checks it: a path is read against the working folder and the
+//                 request's own paths (a bare name the request gives in a subfolder is written
+//                 there; a write outside the folder that the request does not name is refused);
+//                 a leading `cd <the folder>` is dropped (every command starts there); an action
+//                 that repeats an earlier one with nothing changed since is answered from memory
+//                 instead of being run; and after `lookSteps` steps that only looked, a step that
+//                 only looks again is refused.
+//   d. remember   by code (memory.ts): a line in the log for the step (what was meant, each
+//                 action and how it ended), the files written or read pinned and re-read from
+//                 disk before the next Think, long outputs saved whole with the path and line
+//                 range in the result. No model summarizes a step. When the log outgrows its
+//                 share its oldest half is folded into a digest by one model call (the only
+//                 "summarize" left), or by code when no call can be had.
+//
+// In the second benchmark round every step cost three model calls (think, translate, summarize)
+// and four of six failed runs ended at the step limit re-reading a file or an output: the summary
+// could not hold a file, its rewrite lost what earlier steps had found, and a long output was
+// shown cut in the middle. Nine in ten translate replies only named the lifted blocks.
 //
 // Sandbox and approvals (the composer's preset, kept on the thread):
 //   - Reading (READ, LIST, SEARCH) always runs under the read-only policy.
@@ -32,101 +47,251 @@
 //     file changes, in this thread until the app restarts. Auto / Read only / Full access don't
 //     ask: the sandbox is the limit.
 //
-// Environment: a RUN sees what a command of the stock harness's shell tool sees (shellEnv below),
-// not what a bare login shell gives.
-//
-// Guards (backend.ts Caps): steps per turn, model calls per turn, time per command; and the turn
-// stops when a step is the same as the one before it twice, or two steps in a row yield no action
-// (a step whose only fault was a refused write is fed back once without counting).
+// How long a turn runs: there is no fixed number of steps to use up. A run that is advancing
+// goes on until the turn's model calls or minutes are spent (Caps.modelCalls, turnMs; `steps` is
+// a far backstop); one that is circling stops early: `noProgressSteps` steps in a row that change
+// no file and run nothing new end the turn with what it has, said plainly. Two steps in a row
+// that yield no action end it too.
 //
 // The request travels word for word: every Think gets it as written (whole when it fits its share
 // of the prompt, else its head and tail with the path of a file that holds all of it), with the
-// exact names code copied out of it (request.ts). Neither it nor anything exact passes through
-// the translate step: file bodies and shell blocks are lifted out of the Think text and attached
-// to the actions that name them, and a one-line command or a path the translator did retype is
-// set back to the Think step's spelling where characters were lost (parse.ts restoreCommand).
+// exact names code copied out of it (request.ts). Nothing exact passes through a model on the
+// way to the machine.
 //
-// FINISHED is checked before it is the answer, once per turn that changed something: by code
-// (every file the request names exists under exactly that name; nothing was written outside the
-// folder to a path the request does not name; the last recorded command did not fail), then by
-// one fresh chat that reads the request against what was recorded (prompts.ts reviewPrompt).
-// What is open goes to the next Think as its results, for at most two more steps; the answer
-// says what code found and what stayed not verified.
+// FINISHED is checked before it is the answer, once per turn that changed something (finish.ts):
+// by code (every file the request names exists under exactly that name; nothing was written
+// outside the folder; the last recorded command did not fail); a reviewer only when the answer
+// names something as not checked or nothing ran the result, and then its checks are commands that
+// code runs. Only a check that fails (or something code found) goes back to Think, with the
+// command and its output, for at most FOLLOW_UP_STEPS more steps; the failing commands are then
+// run again by code, and the answer says what stayed not verified.
 //
-// A summary holds a few lines of a file, never the file. The Think prompt says so (what a step
-// reads is shown once: use it now), the summarizer is asked to keep the facts the job needs from
-// what was read, and after two steps in a row that only looked the next Think is told that
-// nothing has been written yet and that reading again will not help.
-//
-// A turn that ends without FINISHED (no model after the retries, a guard, an interrupt) leaves
-// the summary and the request on the thread: the next message, "continue" or anything else, is
-// thought about with both.
+// A turn that ends without FINISHED (no model after the retries, a guard, an interrupt, BLOCKED)
+// leaves the memory and the request on the thread: the next message, "continue" or anything
+// else, is thought about with both.
 
-import { userInfo } from "node:os";
-import { command, fileChange, type Item } from "../fallback/items.ts";
-import type { AppServer } from "./appserver.ts";
-import {
-  folderBrief,
-  Interrupted,
-  platformName,
-  sandboxPolicyFor,
-  StopTurn,
-  errText,
-  type Run,
-} from "./backend.ts";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { folderBrief, platformName, StopTurn, type Run } from "./backend.ts";
 import { mono } from "./clock.ts";
+import { execute } from "./exec.ts";
+import { deliverablesIn, requestFile } from "./experimental.ts";
 import {
   codeFindings,
-  deliverablesIn,
-  filesEvidence,
   findingCount,
   findingLines,
   finishText,
-  LOOKING_RE,
-  requestFile,
-  REVIEW_TOKENS,
-} from "./experimental.ts";
+  fixLines,
+  FIX_RULES,
+  review,
+  reviewWorth,
+  runChecks,
+  tailOf,
+  uncheckedOf,
+  type Check,
+  type Evidence,
+} from "./finish.ts";
+import {
+  addKept,
+  addLog,
+  emptyMemory,
+  fingerprint,
+  foldByCode,
+  foldWith,
+  MEMORY_LIMIT,
+  needsFold,
+  pin,
+  PINS_LIMIT,
+  renderMemory,
+  renderPins,
+  RESULTS_MAX,
+  reviveMemory,
+  saveOutput,
+  seenNote,
+  showOutput,
+  takeForFold,
+  outputDir,
+  type Memory,
+} from "./memory.ts";
 import { clip, clipMiddle, ORIGINAL_LIMIT } from "./notes.ts";
 import {
-  describeAction,
-  isContinue,
   balanceFences,
+  describeAction,
+  directPlan,
+  isContinue,
+  keepLines,
   liftCommands,
   liftFiles,
+  lookOnly,
   parseActions,
   parseThought,
-  tidyFences,
   restoreCommand,
   restorePath,
+  tidyFences,
   type Action,
 } from "./parse.ts";
 import {
-  RESULTS_LIMIT,
-  reviewPrompt,
+  foldPrompt,
   SUMMARY_LIMIT,
-  summarizePrompt,
+  THINK_BUDGET,
   thinkPrompt,
+  thinkRoom,
   translatePrompt,
 } from "./prompts.ts";
-import {
-  exactNames,
-  parseReview,
-  requestExcerpt,
-  type Review,
-  type ReviewItem,
-} from "./request.ts";
+import { exactNames, requestExcerpt, strayPaths } from "./request.ts";
 
-type Json = Record<string, unknown>;
+export {
+  captureScript,
+  lineDiff,
+  mustAsk,
+  parseCapturedEnv,
+  replaceIn,
+  userShell,
+} from "./exec.ts";
 
-const MAX_WRITE_CHARS = 200_000;
-const READ_LINES = 250;
-/** Steps the finish check may add after a FINISHED it did not accept (then the turn ends anyway). */
-const FOLLOW_UP_STEPS = 2;
-/** Kept back from the steps' budget: the finish check's one call. */
+/** Steps a failed check (or something code found) may take after a FINISHED that was not accepted. */
+const FOLLOW_UP_STEPS = 4;
+/** Kept back from the steps' budget: the closing of the turn. */
 const RESERVE_MS = 30_000;
+/** A file larger than this is not pinned (it is read in ranges). */
+const PIN_MAX_BYTES = 200_000;
+
+interface Job {
+  original: string;
+  exact: string[];
+  deliverables: string[];
+}
+
+// ---- where an action points -------------------------------------------------------------------------
+
+/**
+ * A path an action names, read against the working folder and the request:
+ *   - relative paths are relative to the folder; one that repeats the folder's own last
+ *     segments ("app/src/a.py" in …/app, where only src/a.py exists) loses them;
+ *   - a file that is not there under the name given, while the request names exactly one path
+ *     with that file name elsewhere, is that path (the request said /…/polyglot/main.py.c, the
+ *     step said `main.py.c`): the request's place is the right one;
+ *   - a path outside the folder that the request does not name is refused for anything but a
+ *     READ (temp folders, where long outputs and the request's own file are kept, are allowed).
+ */
+export function resolveTarget(
+  p: string,
+  cwd: string,
+  job: Job,
+  kind: Action["kind"],
+): { path: string; note?: string; refuse?: string } {
+  const root = cwd.replace(/\/+$/, "");
+  const inside = (abs: string) => abs === root || abs.startsWith(`${root}/`);
+  const shown = (abs: string) => (inside(abs) ? path.relative(root, abs) || "." : abs);
+  const home = process.env.HOME || "";
+  const abs = p.startsWith("~/") && home ? path.join(home, p.slice(2)) : path.resolve(root, p);
+  if (!inside(abs)) {
+    if (kind === "read") return { path: abs };
+    const stray = strayPaths({ files: [abs], commands: [], reports: [] }, root, job.original);
+    if (stray.length)
+      return {
+        path: p,
+        refuse: `${p} is outside the working folder ${root}, and the request does not name it. Paths are relative to the working folder: give one inside it.`,
+      };
+    return { path: abs };
+  }
+  if (existsSync(abs)) return { path: shown(abs) };
+  // The folder's own last segments repeated in front of a relative path.
+  if (!path.isAbsolute(p)) {
+    const segs = p.replace(/^\.\//, "").split("/").filter(Boolean);
+    const tail = root.split("/").filter(Boolean);
+    for (let n = Math.min(segs.length - 1, tail.length, 3); n >= 1; n--) {
+      if (segs.slice(0, n).join("/") !== tail.slice(-n).join("/")) continue;
+      const cand = path.resolve(root, segs.slice(n).join("/"));
+      const fits =
+        existsSync(cand) ||
+        (kind === "write" && existsSync(path.dirname(cand)) && !existsSync(path.dirname(abs)));
+      if (fits)
+        return {
+          path: shown(cand),
+          note: `(${p} was read as ${shown(cand)}: paths are relative to the working folder, which already ends in ${tail.slice(-n).join("/")})`,
+        };
+    }
+  }
+  // The request's own path for a file of this name.
+  if (kind === "write" || kind === "replace" || kind === "read") {
+    const base = path.basename(abs);
+    const targets = new Set<string>();
+    for (const name of [...job.exact, ...job.deliverables]) {
+      if (/\s/.test(name) || !/[./]/.test(name) || name.endsWith("/")) continue;
+      if (path.basename(name) !== base) continue;
+      const t =
+        name.startsWith("~/") && home ? path.join(home, name.slice(2)) : path.resolve(root, name);
+      if (t !== abs) targets.add(t);
+    }
+    if (targets.size === 1) {
+      const t = [...targets][0];
+      if (kind === "write" || existsSync(t))
+        return {
+          path: shown(t),
+          note: `(the request names this file as ${shown(t)}: ${kind === "write" ? "it was written" : "it was taken from"} there, not at ${shown(abs)})`,
+        };
+    }
+  }
+  return { path: shown(abs) };
+}
+
+/** A RUN without a leading `cd <the working folder>`: every command starts there already. */
+export function normaliseRun(command: string, cwd: string): string {
+  const esc = cwd.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `^\\s*cd\\s+(["']?)${esc}/?\\1\\s*(?:\\|\\|\\s*exit(?:\\s+\\d+)?\\s*)?(?:&&|;|\\n)\\s*`,
+  );
+  const rest = command.replace(re, "");
+  return rest.trim() ? rest : command;
+}
+
+/**
+ * The files a command that only looks printed (cat, nl, head, tail, sed -n 'a,bp'), with the
+ * range where it gave one: what a step read with a RUN is pinned like what it read with a READ.
+ * `VAR="…"` lines of the same script are filled in first.
+ */
+export function filesLooked(script: string): { path: string; start: number; end: number | null }[] {
+  const vars = new Map<string, string>();
+  for (const m of script.matchAll(/^\s*([A-Za-z_]\w*)=(["']?)([^"'\n$`]*)\2\s*$/gm))
+    vars.set(m[1], m[3]);
+  const text = script.replace(
+    /\$\{?([A-Za-z_]\w*)\}?/g,
+    (all, name: string) => vars.get(name) ?? all,
+  );
+  const out: { path: string; start: number; end: number | null }[] = [];
+  const re =
+    /(?:^|[\n;&|]\s*)(?:cat(?:\s+-[A-Za-z]+)*|nl(?:\s+-[A-Za-z]+(?:\s+[a-z])?)*|head(?:\s+-n?\s*(\d+))?|tail(?:\s+-n?\s*\+?\d+)?|sed\s+-n\s+(["'])(\d+),(\d+|\$)p\2)\s+(["']?)([^\s"'|;&<>$`*?]+)\5/g;
+  for (const m of text.matchAll(re)) {
+    const start = m[3] ? Number(m[3]) : 1;
+    const end = m[3] ? (m[4] === "$" ? null : Number(m[4])) : m[1] ? Number(m[1]) : null;
+    if (!out.some((o) => o.path === m[6])) out.push({ path: m[6], start, end });
+  }
+  return out;
+}
+
+/** A command as a result line shows it: its first lines, not all of a long script. */
+function echo(command: string): string {
+  const lines = command.split("\n");
+  const head = lines.slice(0, 3).join("\n");
+  const cut = head.length > 260 ? `${head.slice(0, 259)}…` : head;
+  return lines.length > 3 ? `${cut}\n… (${lines.length} lines)` : cut;
+}
+
+function isText(file: string): string | null {
+  try {
+    const st = statSync(file);
+    if (!st.isFile() || st.size > PIN_MAX_BYTES) return null;
+    const text = readFileSync(file, "utf8");
+    return /[\u0000-\u0008\u000e-\u001f]/.test(text.slice(0, 4000)) ? null : text;
+  } catch {
+    return null;
+  }
+}
 
 export async function runHyper(run: Run): Promise<void> {
   const caps = run.caps;
+  const cwd = run.cwd;
   // The request: this message, or, when the last turn stopped short, that turn's request with
   // this message after it ("continue" alone means just: go on). It is kept word for word, with
   // what code reads out of it on arrival: the exact names, and the files it names that are not
@@ -138,7 +303,7 @@ export async function runHyper(run: Run): Promise<void> {
     run.thread.job = {
       original: original.length > ORIGINAL_LIMIT ? clipMiddle(original, ORIGINAL_LIMIT) : original,
       exact: exactNames(original),
-      deliverables: deliverablesIn(original, run.cwd),
+      deliverables: deliverablesIn(original, cwd),
     };
   }
   const job = run.thread.job;
@@ -149,188 +314,239 @@ export async function runHyper(run: Run): Promise<void> {
       : "";
   run.thread.openGoal = resuming ? open : clipMiddle(run.text.trim(), 1500);
   const wholeAt = requestExcerpt(goal, 2200).whole ? null : requestFile(run.threadId, goal);
-  run.save();
-  let summary = run.thread.summary;
+  const mem: Memory = reviveMemory(run.thread.memory, run.thread.summary);
+  run.thread.memory = mem;
+  const store = () => {
+    const keys = Object.keys(mem.seen);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 60))) delete mem.seen[k];
+    run.thread.summary = balanceFences(clipMiddle(renderMemory(mem), SUMMARY_LIMIT));
+    run.save();
+  };
+  store();
   let results = "";
-  let lastSig = "";
-  let repeats = 0;
   let empty = 0;
   let refusedBefore = false;
   /** What this turn changed and ran: the finish check's material. */
   const turnFiles = new Map<string, string>();
-  const turnCommands: { cmd: string; ok: boolean }[] = [];
+  const turnCommands: Evidence[] = [];
   let lastCheck: { cmd: string; ok: boolean } | null = null;
-  /** The finish check, once per turn: what it left open, and the steps run for it since. */
-  let review: Review | null = null;
-  let openItems: ReviewItem[] = [];
+  /** Results of commands that were more than a look, as seen so far (a new one is progress). */
+  const ran = new Set<string>();
+  /** The finish check, once per turn: its checks, and the steps run since for what failed. */
   let checked = false;
+  let reviewed = false;
+  let checks: Check[] = [];
   let skipped: string | null = null;
+  let fixing = false;
+  let fixWhy = "";
   let followSteps = 0;
-  /** Steps in a row that only looked (read, listed, searched): the job is not moving. */
+  let pendingFinal = "";
+  /** Steps in a row that only looked, and steps in a row that changed nothing and ran nothing new. */
   let looked = 0;
+  let idle = 0;
   const found = () =>
     codeFindings({
       deliverables: job.deliverables,
-      cwd: run.cwd,
+      cwd,
       request: goal,
       files: [...turnFiles.keys()],
       commands: turnCommands.map((c) => c.cmd),
       reports: [],
       lastCheck,
     });
-  /** The answer: what code found first, then the model's words, then what the check left open. */
-  const finish = (answer: string, settled: boolean) => {
-    const lines = findingLines(found());
+  const failedChecks = () => checks.filter((c) => c.state === "failed");
+  /** The answer: what code found first, then the model's words, then what the check came to. */
+  const finish = async (answer: string) => {
+    // What failed is run once more, by code: the record decides, not the answer's words.
+    if (fixing && followSteps > 0 && failedChecks().length)
+      await runChecks(run, failedChecks(), goal);
+    const f = found();
+    const lines = findingLines(f);
     const facts = lines.length
-      ? `**${found().gone.length ? "Not finished" : "Not verified"}.** ${lines.map((l) => `${l[0].toUpperCase()}${l.slice(1)}.`).join(" ")}\n\n`
+      ? `**${f.gone.length ? "Not finished" : "Not verified"}.** ${lines.map((l) => `${l[0].toUpperCase()}${l.slice(1)}.`).join(" ")}\n\n`
       : "";
     const tail = finishText({
-      review,
-      open: openItems,
-      followUp: followSteps
-        ? {
-            ran: true,
-            done: settled,
-            result: "",
-            why: "the steps allowed for it ran out",
-          }
-        : null,
+      reviewed,
+      checks,
+      fix: fixing || fixWhy ? { ran: followSteps > 0, why: fixWhy } : null,
       skipped,
       steps: true,
     });
+    if (run.stats.finish) {
+      run.stats.finish.passed = checks.filter((c) => c.state === "passed").length;
+      run.stats.finish.open = checks.filter((c) => c.state !== "passed").length;
+      run.stats.finish.code = findingCount(f);
+    }
     run.say(`${facts}${answer}${tail ? `\n\n${tail}` : ""}`);
-    run.thread.summary = clipMiddle(
-      `${summary}\n\nThe request "${clip(goal, 300)}" was answered: ${clip(answer, 400)}`.trim(),
-      SUMMARY_LIMIT,
+    // The job is over: its log and pins go, what it came to stays as what came before.
+    const closing = `The request "${clip(goal, 300)}" was answered: ${clip(answer, 400)}`;
+    run.thread.memory = emptyMemory(
+      `${mem.carried ? `${mem.carried}\n\n` : ""}${closing}`.slice(-1400),
     );
+    run.thread.summary = clipMiddle(`${renderMemory(mem)}\n\n${closing}`.trim(), SUMMARY_LIMIT);
     run.thread.openGoal = null;
     run.thread.job = null;
     run.save();
   };
-  let pendingFinal = "";
-  for (let step = 1; ; step++) {
-    run.check();
-    if (step > caps.steps) {
-      // (the steps ran out while the finish check's points were being settled: an answer, not a guard)
-      if (followSteps) return finish(pendingFinal, false);
-      throw new StopTurn(
-        "cap",
-        `Stopped after ${caps.steps} steps, the limit for one message. Send another message to go on from the summary.`,
-      );
-    }
-    if (run.left().ms < RESERVE_MS) {
-      if (followSteps) return finish(pendingFinal, false);
-      throw new StopTurn(
-        "cap",
-        `Stopped with the job partly done: ${Math.round((mono.now() - run.t0) / 60_000)} of this turn's ${Math.round(caps.turnMs / 60_000)} minutes are used. Send "continue" to go on from the summary.`,
-      );
-    }
-    run.stats.steps = step;
-    // a. think
-    const stepsLeft = followSteps
-      ? Math.min(caps.steps - step, FOLLOW_UP_STEPS - followSteps)
-      : caps.steps - step;
-    const thinking = thinkPrompt({
+  const frame = (step: number, nudge = "") => {
+    const l = run.left();
+    return {
       goal,
       exact: job.exact,
       requestFile: wholeAt,
       before,
-      folder: folderBrief(run.cwd),
-      summary,
-      results,
+      folder: folderBrief(cwd),
       step,
-      stepsLeft,
-    });
+      left: `${Math.max(0, l.calls)} model call${l.calls === 1 ? "" : "s"}, ${Math.max(0, Math.round(l.ms / 60_000))} minute${Math.round(l.ms / 60_000) === 1 ? "" : "s"}`,
+      nudge,
+    };
+  };
+  for (let step = 1; ; step++) {
+    run.check();
+    // The guards: a backstop on steps, the turn's minutes and calls, and a job that is not moving.
+    const stop = (message: string) => {
+      store();
+      return new StopTurn("cap", message);
+    };
+    if (step > caps.steps) {
+      if (fixing) return finish(pendingFinal);
+      throw stop(
+        `Stopped after ${caps.steps} steps, the limit for one message. Send another message to go on from where things stand.`,
+      );
+    }
+    if (run.left().ms < RESERVE_MS || run.left().calls < 1) {
+      if (fixing) return finish(pendingFinal);
+      throw stop(
+        run.left().calls < 1
+          ? `Stopped with the job partly done: this turn's ${caps.modelCalls} model calls are used. Send "continue" to go on from where things stand.`
+          : `Stopped with the job partly done: ${Math.round((mono.now() - run.t0) / 60_000)} of this turn's ${Math.round(caps.turnMs / 60_000)} minutes are used. Send "continue" to go on from where things stand.`,
+      );
+    }
+    if (idle >= caps.noProgressSteps) {
+      if (fixing) return finish(pendingFinal);
+      throw stop(
+        `Stopped: ${idle} steps in a row changed no file and ran nothing new, so the job was not moving. What was done so far is below; say what to do differently, or send "continue" to try again from there.`,
+      );
+    }
+    run.stats.steps = step;
+    // a. think
+    const mustAct = looked >= caps.lookSteps;
+    const nudge = mustAct
+      ? `(recorded) The last ${looked} steps only looked. This step must write a file, make a change or run something, or reply BLOCKED: with what is missing. A step that only looks again will not be run. What was read is in MEMORY, the PINNED FILES and the saved outputs.`
+      : "";
+    const fr = frame(step, nudge);
+    const room = thinkRoom(fr);
+    const memory = renderMemory(mem, Math.max(600, Math.min(MEMORY_LIMIT, room - 1500)));
+    const contents = new Map<string, string | null>();
+    for (const p of mem.pins) contents.set(p.path, isText(path.resolve(cwd, p.path)));
+    const shownResults = results
+      ? clipMiddle(results, Math.max(900, Math.min(RESULTS_MAX, room - memory.length - 300)))
+      : "";
+    const pins = renderPins(
+      mem,
+      contents,
+      Math.min(PINS_LIMIT, room - memory.length - shownResults.length - 40),
+    );
+    const thinking = thinkPrompt({ ...fr, memory, pins, results: shownResults });
     // The reply's fences are put in order before anything is read out of it, and a line that
     // only repeats the end of our own prompt is not the model's (parse.ts tidyFences).
     const promptTail = thinking.input
       .split("\n")
       .filter((l) => l.trim())
       .slice(-2);
-    const thought = parseThought(tidyFences(await run.model("think", thinking), promptTail));
+    const reply = tidyFences(
+      await run.model("think", thinking, undefined, THINK_BUDGET),
+      promptTail,
+    );
+    addKept(mem, keepLines(reply));
+    const thought = parseThought(reply);
+    if (thought.blocked !== null) {
+      // The job cannot go on, and says why: the turn ends with that, and the request stays open.
+      if (fixing) return finish(pendingFinal);
+      const lines = findingLines(found());
+      store();
+      run.say(
+        `**Not finished.** ${thought.blocked}${lines.length ? `\n\n${lines.map((l) => `${l[0].toUpperCase()}${l.slice(1)}.`).join(" ")}` : ""}\n\nWhere things stand:\n\n${renderMemory(mem)}`,
+      );
+      return;
+    }
     if (thought.final !== null) {
-      // The finish check, once per turn that changed something: what code can tell, then one
-      // fresh reader of the request against what was recorded. What is open goes back to the
-      // next Think as its results, for at most FOLLOW_UP_STEPS more steps.
+      // The finish check, once per turn that changed something (finish.ts): what code can tell;
+      // a reviewer only when it can add something, its checks run by code; and only what fails
+      // goes back to Think, for at most FOLLOW_UP_STEPS more steps.
       const changed = turnFiles.size > 0 || turnCommands.length > 0;
-      if (checked || !changed) return finish(thought.final, true);
+      if (checked || !changed) return finish(thought.final);
       checked = true;
       const code = found();
       const lines = findingLines(code);
-      if (run.left().calls >= 1) {
-        try {
-          review = parseReview(
-            await run.model(
-              "review",
-              reviewPrompt({
-                request: goal,
-                exact: job.exact,
-                files: filesEvidence(
-                  [...turnFiles].map(([p, kind]) => ({ path: p, kind })),
-                  job.deliverables,
-                  run.cwd,
-                ),
-                commands: turnCommands
-                  .slice(-14)
-                  .map((c) => `- ${c.ok ? "ok" : "FAILED"}: ${clip(c.cmd, 150)}`)
-                  .join("\n"),
-                found: lines.map((l) => `- ${l}`).join("\n"),
-                claims: `- ${clip(thought.final, 400)}`,
-              }),
-              REVIEW_TOKENS,
-            ),
-          );
-          if (!review.items.length) {
-            review = null;
-            skipped = "the reviewer's reply could not be read";
-          } else openItems = review.open;
-        } catch (e) {
-          if (!(e instanceof StopTurn) || run.interrupted) throw e;
-          skipped = "the reviewer could not be reached";
-        }
-      } else skipped = "this turn's model calls were used up";
+      const unchecked = uncheckedOf(thought.final);
+      const rv = await review(run, {
+        // (what code found goes straight to a fix: a reviewer adds nothing to a missing file)
+        why: lines.length
+          ? null
+          : reviewWorth({
+              changed,
+              split: false,
+              unchecked,
+              commands: turnCommands.filter((c) => !lookOnly(c.cmd)),
+            }),
+        request: goal,
+        deliverables: job.deliverables,
+        files: [...turnFiles].map(([p, kind]) => ({ path: p, kind })),
+        commands: turnCommands,
+        unchecked,
+      });
+      reviewed = rv.reviewed;
+      checks = rv.checks;
+      skipped = rv.skipped;
+      const failed = failedChecks();
       run.stats.finish = {
-        requirements: review?.items.length ?? 0,
-        open: openItems.length,
+        requirements: checks.length,
+        open: checks.filter((c) => c.state !== "passed").length,
         code: findingCount(code),
         followUps: 0,
+        reviewed,
+        passed: checks.filter((c) => c.state === "passed").length,
       };
-      const canGoOn = caps.steps - step >= 1 && run.left().calls >= 4;
-      if ((!openItems.length && !lines.length) || !canGoOn) {
-        if (openItems.length || lines.length) skipped ??= "no step was left for it";
-        return finish(thought.final, true);
+      if (!failed.length && !lines.length) return finish(thought.final);
+      const l = run.left();
+      if (step >= caps.steps || l.calls < 3 || l.ms < 60_000 + RESERVE_MS) {
+        fixWhy = "too little of this turn's budget was left to fix it";
+        return finish(thought.final);
       }
       pendingFinal = thought.final;
+      fixing = true;
+      idle = 0;
+      looked = 0;
+      const n = failed.length + lines.length;
       run.say(
-        `**Finish check:** ${openItems.length + lines.length} point${openItems.length + lines.length === 1 ? "" : "s"} not shown by what was recorded. Going on to settle ${openItems.length + lines.length === 1 ? "it" : "them"}.`,
+        `**Finish check:** ${n} thing${n === 1 ? "" : "s"} found after FINISHED (${[lines.length ? `${lines.length} by code` : "", failed.length ? `${failed.length} check${failed.length === 1 ? "" : "s"} failed` : ""].filter(Boolean).join(", ")}). Going on to fix ${n === 1 ? "it" : "them"}.`,
       );
-      results = clipMiddle(
-        [
-          "You said FINISHED. Before the answer goes out, a reviewer read the request against what was recorded. These points are open:",
-          ...lines.map((l) => `- (recorded) ${l}`),
-          ...openItems.map(
-            (o) =>
-              `- ${o.verdict === "violated" ? "VIOLATED" : "NOT SHOWN"}: ${clip(o.requirement, 200)}${o.note ? ` — ${clip(o.note, 200)}` : ""}`,
-          ),
-          "Run the check named for each (or a better one) on the real result, the way the request says it will be used. Where a check fails or a point is violated, fix the work and check again. A file the request names must exist under exactly that name and place. Then reply FINISHED: with the answer, saying which points were checked and how, and which were not.",
-        ].join("\n"),
-        RESULTS_LIMIT,
-      );
+      results = [
+        "You said FINISHED. Before the answer went out it was checked, and this was found:",
+        ...fixLines(failed, lines),
+        `${FIX_RULES} Then reply FINISHED: with the answer, saying what was fixed and what was not checked.`,
+      ].join("\n");
       continue;
     }
-    if (followSteps >= FOLLOW_UP_STEPS) return finish(pendingFinal, false);
-    if (checked) {
+    if (fixing && followSteps >= FOLLOW_UP_STEPS) return finish(pendingFinal);
+    if (fixing) {
       followSteps++;
       run.stats.finish!.followUps = followSteps;
     }
     run.say(thought.next);
-    // b. translate: the file bodies and the shell blocks stay here; the translator sees a marker
-    // for each, and what it does copy (a one-line command, a path) is set back to the Think
-    // step's own spelling where the copy lost or changed characters.
+    // b. the actions. File bodies and shell blocks stay here, verbatim; when the text holds
+    // nothing else that could be an instruction, the actions are read from it directly. Only
+    // prose goes to the translator, which sees a marker for each block, and what it does copy
+    // (a one-line command, a path) is set back to the Think step's own spelling.
     const lifted = liftFiles(thought.next);
     const cmds = liftCommands(lifted.plan);
+    const direct = directPlan(cmds.plan);
+    if (direct.sure) run.stats.direct = (run.stats.direct ?? 0) + 1;
     const parsed = parseActions(
-      await run.model("translate", translatePrompt(cmds.plan, run.cwd, platformName())),
+      direct.sure
+        ? direct.text
+        : await run.model("translate", translatePrompt(cmds.plan, cwd, platformName())),
       8,
       lifted.files,
       cmds.commands,
@@ -342,14 +558,15 @@ export async function runHyper(run: Run): Promise<void> {
       } else if (a.kind !== "search" && !lifted.files.some((f) => f.path === a.path))
         a.path = restorePath(a.path, thought.next, job.exact);
     }
-    // c. execute, up to the first refused action
+    // c. execute, in order, up to the first action that is refused or fails
     const lines: string[] = [];
+    const outcomes: string[] = [];
     for (const problem of parsed.problems) lines.push(`(not understood) ${problem}`);
     for (const f of lifted.flagged) lines.push(`(not written) ${f}`);
     for (const c of cmds.skipped) lines.push(`(not run) ${c}`);
     const stopAt = parsed.rejected.length ? parsed.rejected[0].at : parsed.actions.length;
     const todo = parsed.actions.slice(0, stopAt);
-    const skippedActions = parsed.actions.slice(stopAt);
+    let notRun = parsed.actions.slice(stopAt);
     if (!todo.length) {
       if (parsed.rejected.length && !refusedBefore) {
         // The first time, a refused write is only fed back: the next think can give the file.
@@ -358,540 +575,235 @@ export async function runHyper(run: Run): Promise<void> {
         empty++;
         if (!parsed.rejected.length)
           lines.push(
-            "No action could be read from the last plan. Say the commands concretely, and give file content in a file block.",
+            "No action could be read from the last reply. Give commands in ```bash blocks, files in ```file:<path> blocks, and looks as READ: / LIST: / SEARCH: lines.",
           );
         if (empty >= 2) {
-          if (followSteps) return finish(pendingFinal, false);
-          throw new StopTurn(
-            "cap",
-            "Stopped: two steps in a row produced nothing that could be run.",
-          );
+          if (fixing) return finish(pendingFinal);
+          throw stop("Stopped: two steps in a row produced nothing that could be run.");
         }
       }
     } else {
       empty = 0;
       refusedBefore = false;
     }
-    const sig = todo.map(signature).join("\n");
-    if (sig && sig === lastSig) {
-      repeats++;
-      if (repeats >= 2) {
-        if (followSteps) return finish(pendingFinal, false);
-        throw new StopTurn("cap", "Stopped: the same step came back three times in a row.");
-      }
-    } else repeats = 0;
-    lastSig = sig;
-    let onlyLooked = todo.length > 0;
-    for (const action of todo) {
+    const isLook = (a: Action) =>
+      a.kind === "read" ||
+      a.kind === "list" ||
+      a.kind === "search" ||
+      (a.kind === "run" && lookOnly(a.command));
+    const allLook = todo.length > 0 && todo.every(isLook);
+    let progressed = false;
+    let stopped = "";
+    // What the next Think has room for: the results are cut to it here, line by line, not later.
+    const nextRoom = thinkRoom(frame(step + 1, nudge));
+    const budget = Math.max(
+      1200,
+      Math.min(
+        RESULTS_MAX,
+        nextRoom - Math.min(MEMORY_LIMIT, renderMemory(mem).length + 500) - 1500,
+      ),
+    );
+    const share = Math.max(500, Math.floor((budget - 200) / Math.max(1, todo.length)) - 120);
+    const refuse = (a: Action, why: string) => {
+      run.stats.refused = (run.stats.refused ?? 0) + 1;
+      lines.push(`${describe(a)}\n${why}`);
+    };
+    const describe = (a: Action) =>
+      a.kind === "run" ? `RUN: ${echo(a.command)}` : describeAction(a);
+    for (let n = 0; n < todo.length; n++) {
+      const action = todo[n];
       run.check();
-      const result = await execute(run, action);
-      lines.push(`${describeAction(action)}\n${result.text}`);
-      if (
-        action.kind === "write" ||
-        action.kind === "replace" ||
-        (action.kind === "run" && !LOOKING_RE.test(action.command))
-      )
-        onlyLooked = false;
-      // Recorded, for the finish check: what was written, and the commands that were more than a look.
+      if (stopped) break;
+      // Where it points, and whether it is run at all.
+      let note = "";
       if (action.kind === "run") {
-        if (!result.declined && (!result.ok || !LOOKING_RE.test(action.command))) {
-          lastCheck = { cmd: action.command, ok: result.ok };
-          turnCommands.push(lastCheck);
+        action.command = normaliseRun(action.command, cwd);
+        const stray = strayPaths({ files: [], commands: [action.command], reports: [] }, cwd, goal);
+        if (stray.length) {
+          refuse(
+            action,
+            `(refused, not run) it writes to ${stray[0]}, which is outside the working folder ${cwd} and not named in the request.`,
+          );
+          outcomes.push(`REFUSED a command writing outside the folder (${stray[0]})`);
+          stopped = "refused";
+          notRun = [...todo.slice(n + 1), ...notRun];
+          break;
         }
-      } else if ((action.kind === "write" || action.kind === "replace") && result.ok)
-        turnFiles.set(action.path, result.created ? "add" : "update");
+      } else if (action.kind !== "search" || action.path) {
+        const at = resolveTarget(
+          action.kind === "search" ? action.path! : action.path,
+          cwd,
+          job,
+          action.kind,
+        );
+        if (at.refuse) {
+          refuse(
+            action,
+            `(refused, nothing was ${action.kind === "write" || action.kind === "replace" ? "written" : "read"}) ${at.refuse}`,
+          );
+          outcomes.push(
+            `REFUSED ${action.kind.toUpperCase()} ${clip(at.path, 80)} (outside the folder)`,
+          );
+          stopped = "refused";
+          notRun = [...todo.slice(n + 1), ...notRun];
+          break;
+        }
+        action.path = at.path;
+        note = at.note ?? "";
+      }
+      const look = isLook(action);
+      const sig =
+        action.kind === "write" || action.kind === "replace" ? "" : describeAction(action);
+      if (look && mustAct && allLook) {
+        refuse(
+          action,
+          `(not run) ${looked} steps in a row only looked. Write a file, make a change or run something in this step, or reply BLOCKED: with what is missing.`,
+        );
+        continue;
+      }
+      const prior = sig ? mem.seen[sig] : undefined;
+      if (prior && prior.version === mem.version) {
+        // The same action with nothing changed since: its result is known.
+        refuse(
+          action,
+          `(not run again: the same as in step ${prior.step}, and nothing has changed since) It came to: ${prior.note}`,
+        );
+        outcomes.push(
+          `${describeAction(action).split("\n")[0].slice(0, 70)}: a repeat of step ${prior.step}, not run`,
+        );
+        continue;
+      }
+      const result = await execute(run, action);
+      const short = clip(describeAction(action).split("\n")[0], 90);
+      if (action.kind === "write" || action.kind === "replace") {
+        lines.push(`${describeAction(action)}\n${result.text}${note ? `\n${note}` : ""}`);
+        outcomes.push(
+          `${short}: ${result.ok ? (result.changed ? "ok" : "ok, no change") : clip(result.text, 90)}`,
+        );
+        if (result.ok) {
+          turnFiles.set(action.path, result.created ? "add" : "update");
+          if (result.changed) {
+            progressed = true;
+            mem.version++;
+          }
+          // The file as it is now is pinned: nobody has to read it back.
+          let at = 1;
+          if (action.kind === "replace" && result.content) {
+            const first = action.with.split("\n").find((l) => l.trim()) ?? "";
+            const i = first
+              ? result.content.split("\n").findIndex((l) => l.includes(first.trim()))
+              : -1;
+            at = Math.max(1, i - 14);
+          }
+          pin(mem, action.path, step, at);
+        } else if (!result.declined) stopped = "failed";
+      } else {
+        const full = result.full ?? result.text;
+        const code = result.exitCode ?? (result.ok ? 0 : 1);
+        const saved = full.length > share ? saveOutput(run.threadId, step, n + 1, full) : null;
+        const body =
+          action.kind === "search" && result.ok && !full.trim()
+            ? "(no matches)"
+            : result.declined
+              ? result.text
+              : showOutput(full, share, saved);
+        const exit =
+          result.declined || code === 0 ? "" : `\n[exit ${code === 124 ? "124: timed out" : code}]`;
+        lines.push(`${describe(action)}\n${body}${exit}${note ? `\n${note}` : ""}`);
+        const end = clip(tailOf(full, 100, 1), 100);
+        outcomes.push(
+          `${short}: ${result.declined ? "declined" : code === 0 ? "ok" : `exit ${code}`}${!look && end ? ` "${end}"` : ""}`,
+        );
+        if (action.kind === "run" && !result.declined) {
+          if (!look) {
+            // More than a look: it may have changed things, and what it came to is evidence.
+            mem.version++;
+            const key = `${action.command}\u0000${code}\u0000${fingerprint(full)}`;
+            if (!ran.has(key)) progressed = true;
+            ran.add(key);
+          }
+          // The record: what was more than a look, and any command that failed. Only a command
+          // that was more than a look counts as "the last check" (a failed `ls` is not one).
+          if (!look) lastCheck = { cmd: action.command, ok: result.ok };
+          if (!look || !result.ok)
+            turnCommands.push({
+              cmd: action.command,
+              ok: result.ok,
+              exit: code,
+              tail: tailOf(full),
+            });
+          if (!result.ok && !look) stopped = "failed";
+        }
+        if (!result.declined)
+          mem.seen[sig] = { step, version: mem.version, note: seenNote(code, full, saved) };
+        // What was read is pinned too (never one of our own saved outputs).
+        if (result.ok) {
+          const inOut = (p: string) => path.resolve(cwd, p).startsWith(outputDir(run.threadId));
+          if (action.kind === "read" && !inOut(action.path))
+            pin(mem, action.path, step, action.start ?? 1, action.end);
+          else if (action.kind === "run" && look)
+            for (const f of filesLooked(action.command)) {
+              const at = resolveTarget(f.path, cwd, job, "read");
+              if (!inOut(at.path) && isText(path.resolve(cwd, at.path)) !== null)
+                pin(mem, at.path, step, f.start, f.end);
+            }
+        }
+      }
+      if (stopped === "failed") notRun = [...todo.slice(n + 1), ...notRun];
     }
     for (const r of parsed.rejected) lines.push(`(refused, nothing was written or run) ${r.text}`);
-    if (skippedActions.length)
+    if (notRun.length)
       lines.push(
-        `(not run, because of the refused action before ${skippedActions.length === 1 ? "it" : "them"}) ${skippedActions.map(describeAction).join("; ")}`,
+        `(not run, because the action before ${notRun.length === 1 ? "it" : "them"} ${stopped === "failed" ? "failed" : "was refused"}) ${notRun.map((a) => clip(describeAction(a).split("\n")[0], 80)).join("; ")}`,
       );
     if (parsed.unrun.length)
       lines.push(
-        `(not run: no action named the plan's command block${parsed.unrun.length === 1 ? "" : "s"} ${parsed.unrun.join(", ")})`,
+        `(not run: no action named the reply's command block${parsed.unrun.length === 1 ? "" : "s"} ${parsed.unrun.join(", ")})`,
       );
-    // A summary holds a few lines of a file, not the file: a Think that keeps reading to "have
-    // it all" before it writes never gets there. After two steps of only looking it is told so.
-    looked = onlyLooked ? looked + 1 : 0;
-    if (looked >= 2)
-      lines.unshift(
-        `(recorded) The last ${looked} steps only looked; nothing was written or run. What a step reads is shown once, here below, and will not be shown again: write the files or make the change now from what is here, rather than reading again.`,
-      );
-    results = balanceFences(clipMiddle(lines.join("\n\n"), RESULTS_LIMIT));
-    // d. summarize
-    let next: string;
-    try {
-      next = await run.model(
-        "summarize",
-        summarizePrompt({ goal, exact: job.exact, summary, intent: cmds.plan, results }),
-        900,
-      );
-    } catch (e) {
-      if (!(e instanceof StopTurn) || e.kind !== "router" || run.interrupted) throw e;
-      // Keep what happened even if nobody could write it up; the turn ends on this error.
-      run.thread.summary = clipMiddle(
-        `${summary}\n\nStep ${step} ran but was not summarized (no model): ${clipMiddle(results, 700)}`.trim(),
-        SUMMARY_LIMIT,
-      );
-      run.save();
-      throw e;
-    }
-    // (a summary never hands an open fence on: the next Think would write inside it)
-    summary = balanceFences(clipMiddle(next.trim(), SUMMARY_LIMIT));
-    run.thread.summary = summary;
-    run.save();
-  }
-}
-
-function signature(a: Action): string {
-  return a.kind === "write"
-    ? `write ${a.path} ${a.content.length}`
-    : a.kind === "replace"
-      ? `replace ${a.path} ${a.find.length} ${a.with.length}`
-      : describeAction(a);
-}
-
-// ---- execute ---------------------------------------------------------------------------
-
-interface ExecResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
-let processSeq = 0;
-
-/**
- * One sandboxed command through app-server (command/exec): `policy` is always explicit, the
- * thread's folder is the working directory, and an interrupt terminates the process.
- */
-async function sandboxed(
-  run: Run,
-  argv: string[],
-  policy: Json,
-  timeoutMs: number,
-  env?: Record<string, string>,
-): Promise<ExecResult> {
-  run.check();
-  const processId = `orc-${process.pid}-${++processSeq}`;
-  const as = run.appServer;
-  const onAbort = () => void as.request("command/exec/terminate", { processId }).catch(() => {});
-  run.signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    const r = await as.request("command/exec", {
-      command: argv,
-      processId,
-      cwd: run.cwd,
-      sandboxPolicy: policy,
-      timeoutMs,
-      outputBytesCap: 256 * 1024,
-      ...(env ? { env } : {}),
-    });
-    if (run.signal.aborted) throw new Interrupted();
-    return {
-      exitCode: typeof r.exitCode === "number" ? r.exitCode : -1,
-      stdout: typeof r.stdout === "string" ? r.stdout : "",
-      stderr: typeof r.stderr === "string" ? r.stderr : "",
-    };
-  } catch (e) {
-    if (e instanceof Interrupted || run.signal.aborted) throw new Interrupted();
-    return { exitCode: -1, stdout: "", stderr: `could not run: ${errText(e)}` };
-  } finally {
-    run.signal.removeEventListener("abort", onAbort);
-  }
-}
-
-const READ_ONLY: Json = { type: "readOnly", networkAccess: false };
-
-// ---- the environment of a RUN ------------------------------------------------------------------
-//
-// What a command of the stock harness's shell tool sees (codex-rs core: shell_snapshot.rs,
-// tools/runtimes/mod.rs maybe_wrap_shell_lc_with_snapshot, unified_exec/process_manager.rs):
-//   1. once per thread the harness runs the user's login shell (`$SHELL -lc`) with a prefix that
-//      also sources the interactive rc file (~/.zshrc, ~/.bashrc), and snapshots every exported
-//      variable (PATH included);
-//   2. each command then runs in a NON-login shell (`$SHELL -c`) with the snapshot's exports laid
-//      over the app-server's environment plus a few fixed values (no colours, no pager).
-// A bare `zsh -lc <command>`, which is what command/exec was given before, differs in both: it
-// never reads ~/.zshrc (where pyenv, nvm and the like usually put themselves on PATH), and macOS's
-// /etc/zprofile (path_helper) moves the system folders to the front of PATH on every command: the
-// user's python3 lost to /usr/bin/python3.
-//
-// command/exec has no snapshot and no switch for one, but it takes `env` overrides. So the same
-// two steps are done here: capture the exported environment once (per app-server and folder,
-// refreshed after ENV_TTL_MS) with the harness's own prefix, under the read-only policy, then run
-// each RUN as `$SHELL -c` with those exports as `env`. If the capture fails, RUN falls back to
-// `-lc` as before.
-
-/** The fixed values the shell tool sets (UNIFIED_EXEC_ENV); the captured exports go over them. */
-const TOOL_ENV: Record<string, string> = {
-  NO_COLOR: "1",
-  TERM: "dumb",
-  LANG: "C.UTF-8",
-  LC_CTYPE: "C.UTF-8",
-  LC_ALL: "C.UTF-8",
-  COLORTERM: "",
-  PAGER: "cat",
-  GIT_PAGER: "cat",
-  GH_PAGER: "cat",
-  CODEX_CI: "1",
-};
-/** The harness's rc prefixes (shell-command/src/startup.rs), their output dropped. */
-const RC_PREFIX: Record<string, string> = {
-  zsh: `{ if [[ -n "\${ZDOTDIR-}" ]]; then rc="$ZDOTDIR/.zshrc"; elif [[ -n "\${HOME-}" ]]; then rc="$HOME/.zshrc"; else rc=; fi; [[ -r "$rc" ]] && . "$rc"; } >/dev/null 2>&1 </dev/null`,
-  bash: `{ if [ -z "\${BASH_ENV-}" ] && [ -n "\${HOME-}" ] && [ -r "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi; } >/dev/null 2>&1 </dev/null`,
-};
-const ENV_MARK = "__ORC_ENV_BEGIN__";
-const ENV_TTL_MS = 10 * 60_000;
-/** Not carried over: the shell sets these itself for each command. */
-const ENV_SKIP = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
-
-/** The user's login shell, as the harness picks it; zsh on macOS and sh elsewhere if unknown. */
-export function userShell(): string {
-  let shell = "";
-  try {
-    shell = userInfo().shell ?? "";
-  } catch {
-    // no passwd entry
-  }
-  shell ||= process.env.SHELL ?? "";
-  if (/\/(?:zsh|bash)$/.test(shell)) return shell;
-  return process.platform === "darwin" ? "/bin/zsh" : "/bin/sh";
-}
-
-/** The script that prints the exported environment the shell tool's snapshot would hold. */
-export function captureScript(shell: string): string | null {
-  const prefix = RC_PREFIX[shell.split("/").pop() ?? ""];
-  if (!prefix) return null;
-  return `${prefix}\nprintf '\\n%s\\n' ${ENV_MARK}\nenv -0 | base64`;
-}
-
-/** `env -0 | base64` after the marker -> the variables (null when it can't be read). */
-export function parseCapturedEnv(stdout: string): Record<string, string> | null {
-  const at = stdout.lastIndexOf(ENV_MARK);
-  if (at === -1) return null;
-  const raw = Buffer.from(
-    stdout.slice(at + ENV_MARK.length).replace(/\s+/g, ""),
-    "base64",
-  ).toString("utf8");
-  const env: Record<string, string> = {};
-  for (const entry of raw.split("\0")) {
-    const eq = entry.indexOf("=");
-    if (eq <= 0) continue;
-    const key = entry.slice(0, eq);
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || ENV_SKIP.has(key)) continue;
-    if (key.startsWith("CODEX_SANDBOX")) continue; // set for the capture's own sandbox, not the user's
-    env[key] = entry.slice(eq + 1);
-  }
-  return env.PATH ? env : null;
-}
-
-interface ShellEnv {
-  shell: string;
-  /** null: the capture failed; RUN uses a login shell as before. */
-  env: Record<string, string> | null;
-  at: number;
-}
-const shellEnvs = new WeakMap<AppServer, Map<string, Promise<ShellEnv>>>();
-
-/** The shell and environment a RUN in this thread's folder gets (captured once, then reused). */
-async function shellEnv(run: Run): Promise<ShellEnv> {
-  const as = run.appServer;
-  let byCwd = shellEnvs.get(as);
-  if (!byCwd) shellEnvs.set(as, (byCwd = new Map()));
-  const cached = byCwd.get(run.cwd);
-  if (cached) {
-    const got = await cached;
-    if (mono.now() - got.at < ENV_TTL_MS) return got;
-  }
-  const shell = userShell();
-  const script = captureScript(shell);
-  const capture = (async (): Promise<ShellEnv> => {
-    if (!script) return { shell, env: null, at: mono.now() };
-    try {
-      const r = await as.request("command/exec", {
-        command: [shell, "-lc", script],
-        cwd: run.cwd,
-        sandboxPolicy: READ_ONLY,
-        timeoutMs: 15_000,
-        outputBytesCap: 1024 * 1024,
-      });
-      const env =
-        r.exitCode === 0 && typeof r.stdout === "string" ? parseCapturedEnv(r.stdout) : null;
-      if (!env)
-        run.backend.log(`couldn't read the shell environment (${shell}); RUN uses a login shell`);
-      return { shell, env: env ? { ...TOOL_ENV, ...env } : null, at: mono.now() };
-    } catch (e) {
-      run.backend.log(`couldn't read the shell environment: ${errText(e)}`);
-      return { shell, env: null, at: mono.now() };
-    }
-  })();
-  byCwd.set(run.cwd, capture);
-  const got = await capture;
-  run.check();
-  return got;
-}
-
-/** Does the thread's approval preset want the user asked before this? Unknown policies ask. */
-export function mustAsk(approvalPolicy: unknown): boolean {
-  return approvalPolicy !== "never" && approvalPolicy !== "on-request";
-}
-
-function output(r: ExecResult, limit = 1400): string {
-  const text = [r.stdout.trimEnd(), r.stderr.trimEnd()].filter(Boolean).join("\n");
-  const body = text ? clipMiddle(text, limit) : "(no output)";
-  return r.exitCode === 0
-    ? body
-    : `${body}\n[exit ${r.exitCode === 124 ? "124: timed out" : r.exitCode}]`;
-}
-
-/** What an action came to: the text the next Think is told, and whether it did what it was for. */
-interface Done {
-  text: string;
-  ok: boolean;
-  /** The user declined it (it did not run). */
-  declined?: boolean;
-  /** A write that made a new file. */
-  created?: boolean;
-}
-
-/** Run one action; returns what the next Think is told about it. */
-async function execute(run: Run, a: Action): Promise<Done> {
-  const cwd = run.cwd;
-  const policy = sandboxPolicyFor(run.thread.sandbox, cwd);
-  const ask = mustAsk(run.thread.approvalPolicy);
-  const session = (run.backend.sessionApprovals.get(run.threadId) ??
-    run.backend.sessionApprovals
-      .set(run.threadId, { commands: new Set(), files: false })
-      .get(run.threadId))!;
-  const id = run.nextId("act");
-  const t0 = mono.now();
-  switch (a.kind) {
-    case "read":
-    case "list":
-    case "search": {
-      const argv =
-        a.kind === "read"
-          ? [
-              "/bin/sh",
-              "-c",
-              'sed -n "$2,$3p" "$1" && printf "[lines %s-%s of %s]\\n" "$2" "$3" "$(wc -l < "$1" | tr -d " ")"',
-              "sh",
-              a.path,
-              String(a.start ?? 1),
-              String(a.end ?? (a.start ?? 1) + READ_LINES - 1),
-            ]
-          : a.kind === "list"
-            ? ["/bin/sh", "-c", 'ls -la "$1" | head -n 80', "sh", a.path]
-            : [
-                "/bin/sh",
-                "-c",
-                'grep -rnIE --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv -e "$1" "$2" | head -n 60',
-                "sh",
-                a.pattern,
-                a.path ?? ".",
-              ];
-      const shown = describeAction(a);
-      const actions =
-        a.kind === "read"
-          ? [
-              {
-                type: "read" as const,
-                command: shown,
-                name: a.path.split("/").pop() ?? a.path,
-                path: a.path,
-              },
-            ]
-          : a.kind === "list"
-            ? [{ type: "listFiles" as const, command: shown, path: a.path }]
-            : [{ type: "search" as const, command: shown, query: a.pattern, path: a.path }];
-      run.start(command(id, shown, cwd, { status: "inProgress", actions }));
-      const r = await sandboxed(run, argv, READ_ONLY, 30_000);
-      const text = output(r, a.kind === "read" ? 2400 : 1400);
-      run.complete(
-        command(id, shown, cwd, {
-          status: r.exitCode === 0 ? "completed" : "failed",
-          output: text,
-          exitCode: r.exitCode,
-          actions,
-          durationMs: Math.round(mono.now() - t0),
-        }),
-      );
-      return {
-        text: a.kind === "search" && r.exitCode === 0 && !r.stdout.trim() ? "(no matches)" : text,
-        ok: r.exitCode === 0,
-      };
-    }
-    case "run": {
-      run.start(command(id, a.command, cwd, { status: "inProgress" }));
-      if (ask && !session.commands.has(a.command)) {
-        const answer = await run.ask("item/commandExecution/requestApproval", {
-          itemId: id,
-          command: a.command,
-          cwd,
-          reason: null,
-        });
-        run.check();
-        if (answer.decision === "acceptForSession") session.commands.add(a.command);
-        else if (answer.decision !== "accept") {
-          run.complete(command(id, a.command, cwd, { status: "declined" }));
-          if (answer.decision === "cancel") run.interrupt();
-          run.check();
-          return { text: "[the user declined to run this command]", ok: false, declined: true };
-        }
-      }
-      // The shell tool's way: a non-login shell over the captured environment (see shellEnv).
-      const sh = await shellEnv(run);
-      const r = sh.env
-        ? await sandboxed(run, [sh.shell, "-c", a.command], policy, run.caps.commandMs, sh.env)
-        : await sandboxed(run, [sh.shell, "-lc", a.command], policy, run.caps.commandMs);
-      const text = output(r);
-      run.complete(
-        command(id, a.command, cwd, {
-          status: r.exitCode === 0 ? "completed" : "failed",
-          output: text,
-          exitCode: r.exitCode,
-          durationMs: Math.round(mono.now() - t0),
-        }),
-      );
-      return { text, ok: r.exitCode === 0 };
-    }
-    case "write":
-    case "replace": {
-      const before = await sandboxed(
-        run,
-        ["/bin/sh", "-c", 'cat "$1"', "sh", a.path],
-        READ_ONLY,
-        30_000,
-      );
-      const exists = before.exitCode === 0;
-      let content: string;
-      if (a.kind === "write") content = a.content;
-      else {
-        if (!exists) {
-          const item = fileChange(id, [{ path: a.path, kind: "update", diff: "" }], "failed");
-          run.complete(item, true);
-          return {
-            text: `[failed: ${a.path} does not exist or cannot be read; use WRITE to create it]`,
-            ok: false,
-          };
-        }
-        const replaced = replaceIn(before.stdout, a.find, a.with);
-        if (replaced === null) {
-          run.complete(
-            fileChange(id, [{ path: a.path, kind: "update", diff: "" }], "failed"),
-            true,
+    for (const r of parsed.rejected) outcomes.push(`REFUSED ${clip(r.text, 70)}`);
+    // A step that only looked (or did nothing) is not the job moving.
+    if (todo.length) looked = allLook ? looked + 1 : 0;
+    idle = progressed ? 0 : idle + 1;
+    results = balanceFences(clipMiddle(lines.join("\n\n"), RESULTS_MAX));
+    // d. remember: the step's line in the log, by code; a fold when the log outgrows its share.
+    // (what was meant: the reply's first line of prose; the blocks are not prose)
+    const intent =
+      cmds.plan
+        .split("\n")
+        .map((l) => l.trim())
+        .find(
+          (l) =>
+            l &&
+            !/^(?:`{3,}|~{3,}|KEEP\s*:|\[|<{3,}|>{3,}|={3,}|(?:READ|LIST|SEARCH|REPLACE)\s*:)/.test(
+              l,
+            ),
+        ) ?? "";
+    addLog(mem, step, intent, outcomes);
+    if (needsFold(mem)) {
+      const taken = takeForFold(mem);
+      const entries = taken.map((e) => `${e.step}. ${e.text}`).join("\n");
+      if (run.left().calls > 4) {
+        try {
+          foldWith(
+            mem,
+            taken,
+            await run.model(
+              "summarize",
+              foldPrompt({ goal, exact: job.exact, digest: mem.digest, kept: mem.kept, entries }),
+              500,
+            ),
           );
-          return {
-            text: `[failed: the old text was not found in ${a.path}; READ the file and copy the exact text]`,
-            ok: false,
-          };
+        } catch (e) {
+          if (!(e instanceof StopTurn) || e.kind !== "router" || run.interrupted) {
+            mem.log.unshift(...taken);
+            store();
+            throw e;
+          }
+          // (nobody to write it up: the entries themselves, shortened; the turn goes on)
+          foldByCode(mem, taken);
         }
-        content = replaced;
-      }
-      if (content && !content.endsWith("\n")) content += "\n";
-      if (content.length > MAX_WRITE_CHARS) {
-        run.complete(fileChange(id, [{ path: a.path, kind: "update", diff: "" }], "failed"), true);
-        return {
-          text: `[failed: ${content.length} characters is more than one write takes (${MAX_WRITE_CHARS})]`,
-          ok: false,
-        };
-      }
-      const kind = exists ? "update" : "add";
-      const change = [
-        { path: a.path, kind, diff: lineDiff(exists ? before.stdout : "", content) } as const,
-      ];
-      const item = (status: "inProgress" | "completed" | "failed" | "declined"): Item =>
-        fileChange(id, [...change], status);
-      run.start(item("inProgress"));
-      if (ask && !session.files) {
-        const answer = await run.ask("item/fileChange/requestApproval", {
-          itemId: id,
-          reason: null,
-          grantRoot: null,
-        });
-        run.check();
-        if (answer.decision === "acceptForSession") session.files = true;
-        else if (answer.decision !== "accept") {
-          run.complete(item("declined"));
-          if (answer.decision === "cancel") run.interrupt();
-          run.check();
-          return { text: "[the user declined this file change]", ok: false, declined: true };
-        }
-      }
-      const r = await sandboxed(
-        run,
-        [
-          "/bin/sh",
-          "-c",
-          'mkdir -p "$(dirname "$1")" && printf %s "$2" | base64 --decode > "$1"',
-          "sh",
-          a.path,
-          Buffer.from(content, "utf8").toString("base64"),
-        ],
-        policy,
-        30_000,
-      );
-      run.complete(item(r.exitCode === 0 ? "completed" : "failed"));
-      if (r.exitCode !== 0) return { text: `[failed: ${clip(output(r), 300)}]`, ok: false };
-      return {
-        text: `[${exists ? "updated" : "created"} ${a.path}, ${content.split("\n").length - 1} lines]`,
-        ok: true,
-        created: !exists,
-      };
+      } else foldByCode(mem, taken);
     }
+    store();
   }
-}
-
-/**
- * `find` replaced by `to` once: the exact text, else the same lines ignoring trailing spaces,
- * else ignoring indentation too (models re-indent what they quote). null when it isn't there.
- */
-export function replaceIn(text: string, find: string, to: string): string | null {
-  const at = text.indexOf(find);
-  if (at !== -1 && find) return text.slice(0, at) + to + text.slice(at + find.length);
-  const want = find.replace(/\n+$/, "").split("\n");
-  if (!want.some((l) => l.trim())) return null;
-  const lines = text.split("\n");
-  for (const norm of [(s: string) => s.trimEnd(), (s: string) => s.trim()]) {
-    const w = want.map(norm);
-    for (let i = 0; i + w.length <= lines.length; i++) {
-      let same = true;
-      for (let j = 0; j < w.length; j++)
-        if (norm(lines[i + j]) !== w[j]) {
-          same = false;
-          break;
-        }
-      if (!same) continue;
-      const repl = to.replace(/\n+$/, "");
-      return [
-        ...lines.slice(0, i),
-        ...(repl === "" ? [] : repl.split("\n")),
-        ...lines.slice(i + w.length),
-      ].join("\n");
-    }
-  }
-  return null;
-}
-
-/** A small diff for the file row: the changed middle between the common first and last lines. */
-export function lineDiff(before: string, after: string): string {
-  const a = before === "" ? [] : before.replace(/\n$/, "").split("\n");
-  const b = after === "" ? [] : after.replace(/\n$/, "").split("\n");
-  let head = 0;
-  while (head < a.length && head < b.length && a[head] === b[head]) head++;
-  let tail = 0;
-  while (
-    tail < a.length - head &&
-    tail < b.length - head &&
-    a[a.length - 1 - tail] === b[b.length - 1 - tail]
-  )
-    tail++;
-  const removed = a.slice(head, a.length - tail);
-  const added = b.slice(head, b.length - tail);
-  return [
-    `@@ -${head + 1},${removed.length} +${head + 1},${added.length} @@`,
-    ...removed.map((l) => `-${l}`),
-    ...added.map((l) => `+${l}`),
-  ].join("\n");
 }

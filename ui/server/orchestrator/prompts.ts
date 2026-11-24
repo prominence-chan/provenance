@@ -1,26 +1,30 @@
 // Every prompt the orchestrators write, in one place so they can be read and measured.
 //
-// Budget: a plain call (planner, revise, final, think, translate, summarize) is at most
-// PROMPT_BUDGET characters of instructions + input, about 2k tokens: a fraction of what a free
-// web chat takes (~15k tokens; some message boxes stop near 25k characters). run.model() enforces
-// it by cutting the middle of an over-long input. A worker's brief is at most BRIEF_BUDGET; what
-// the stock harness adds around it (its own instructions and tool list, ~25k characters) is the
-// harness's, and is the same for the first request of any thread.
+// Budget: a plain call (planner, revise, final, review, translate, the fold of Hyperexperimental's
+// log) is at most PROMPT_BUDGET characters of instructions + input, about 2k tokens: a fraction of
+// what a free web chat takes (~15k tokens; some message boxes stop near 25k characters). The Think
+// call alone gets THINK_BUDGET (about 3k tokens): it carries the working memory and the pinned
+// files that keep the job from reading the same thing step after step. run.model() enforces the
+// budget it is given by cutting the middle of an over-long input. A worker's brief is at most
+// BRIEF_BUDGET; what the stock harness adds around it (its own instructions and tool list) is the
+// harness's, and is the same for the first request of any thread. Every role's instructions stay
+// under the 3,000 characters above which the router's web path swaps them for its own prompt.
 
 import { clip, clipMiddle, notesView, type Notes } from "./notes.ts";
 import { ACTION_HELP, FILE_BLOCK_HELP, type MiniTask } from "./parse.ts";
+import { platformLabel } from "./platform.ts";
 import { exactLine, numbered, requestExcerpt } from "./request.ts";
 
 export const PROMPT_BUDGET = 8000;
-export const BRIEF_BUDGET = 4500;
-/** Hyperexperimental's carried summary. */
+/** The Think call's own budget: goal, working memory, pinned files and the last results. */
+export const THINK_BUDGET = 12_000;
+export const BRIEF_BUDGET = 4800;
+/** Hyperexperimental's working memory as it is stored on the thread for a reader (and a hand-over's share). */
 export const SUMMARY_LIMIT = 2500;
-/** The last step's results as they are kept (the next Think may be shown less: thinkPrompt). */
-export const RESULTS_LIMIT = 3500;
 /**
  * A request this long (with the one-line folder listing) is one worker's job without question:
- * it fits a brief whole, beside the rules and the report form (which take about 1,700 of the
- * brief's 4,500 characters). Of the benchmark's ten requests nine are under it (560 to 2,250
+ * it fits a brief whole, beside the rules and the report form (which take about 2,000 of the
+ * brief's 4,800 characters). Of the benchmark's ten requests nine are under it (560 to 2,250
  * characters; the tenth is 3,500).
  */
 export const ONE_WORKER_CHARS = 2700;
@@ -40,9 +44,13 @@ TASK 2: ...`;
 /**
  * The three rules of checking, in one sentence each (the same in a worker's brief and in the
  * Think prompt): run it as it will be used, keep a copy of an input a tool may change, hold the
- * result to the sizes the request states.
+ * result to the sizes the request states. Two things the second benchmark round added to the
+ * first: a failure case the request names is exercised for real (every arm "tested" a keyboard
+ * interrupt by cancelling a task, and every arm's result hung on a real one), and test inputs a
+ * worker writes vary what the request leaves open (a regex was checked only on lines that ended
+ * with the date, and matched no others).
  */
-export const VERIFY_RULES = `Before you call it done: (1) run the result the way the request says it will be used, including each failure case the request itself names (an interrupt, a missing argument, an extreme input; where it names none, invent none), and say what you ran; (2) keep a copy of any input before a tool that may change it opens it (sqlite3, an editor, a formatter, an installer), and prefer read-only modes; (3) check the result against every size, count or shape the request states, and do not hard-code what it says is unknown.`;
+export const VERIFY_RULES = `Before you call it done: (1) run the result the way the request says it will be used, and each failure case the request itself names for real (an interrupt as a real SIGINT to the running program while work is still queued, a missing argument, an extreme input; where it names none, invent none), and say what you ran; inputs you make up for a test must differ in what the request leaves open (where in a line or file a thing stands, what comes before and after it, order, how many), not repeat one shape; (2) keep a copy of any input before a tool that may change it opens it (sqlite3, an editor, a formatter, an installer), and prefer read-only modes; (3) check the result against every size, count or shape the request states, and do not hard-code what it says is unknown.`;
 
 // ---- Experimental ------------------------------------------------------------------------------
 
@@ -109,9 +117,15 @@ const REPORT_FORM = `End with a short report in exactly this form:
 RESULT: one or two sentences on what is true now
 CHANGES: files you created or edited
 VALIDATION: commands you ran and whether they passed
-NOT CHECKED: what the request asks for that you did not run (or: nothing)
+NOT CHECKED: what the request asks for that you did not run, and why (or: nothing)
 BLOCKERS: none, or what stopped you
-STATUS: DONE or BLOCKED or PARTIAL`;
+STATUS: DONE or BLOCKED or PARTIAL (DONE also when all that is left is a check that cannot be run here: name it under NOT CHECKED)`;
+
+/**
+ * What a worker is told when its thread has grown close to what a web chat takes: stop, and
+ * write the hand-over the next worker starts from (experimental.ts runWorker).
+ */
+export const WRAP_UP = `Stop here: this thread's context is nearly full, and another worker with a fresh one goes on from your report. Run no more commands. Write the report now in the form you were given, with STATUS: PARTIAL. Under RESULT say exactly what is finished and true now. Under BLOCKERS write "LEFT TO DO:" and then, precisely, what remains and what you learned that the next worker needs (file names, formats, values, the command that checks the result), so that it does not have to read again what you read.`;
 
 /**
  * A worker's brief. In order of what may never be cut: the rules and the report form; the
@@ -223,50 +237,72 @@ export function finalPrompt(
 }
 
 /**
- * The finish check: a fresh chat reads the request against what was recorded and answers per
- * requirement. It is given no account of the work in the workers' or the Think step's own words
- * beyond one line each: a claim is not evidence.
+ * The finish check's reviewer (finish.ts): a fresh chat that reads the request against the
+ * evidence and names at most three things the evidence does not show, each with the one command
+ * that settles it. It gives no verdicts: the commands are run by code, and their exit codes are
+ * the verdicts. It is given no account of the work in the workers' own words beyond what they
+ * say they did NOT check.
  */
 export function reviewPrompt(a: {
   request: string;
-  exact: string[];
+  cwd: string;
   /** Files changed this turn, with sizes and short excerpts. */
   files: string;
-  /** Commands run this turn with how they ended. */
+  /** Commands run this turn: exit code, command, the end of the output. */
   commands: string;
-  /** What code already found (a missing file, a near miss, a failed last check). */
-  found: string;
-  /** What the workers or the Think step claim, one line each. */
-  claims: string;
+  /** What code has already checked (not to be asked again). */
+  settled: string;
+  /** What the work itself says it did not check ("" for nothing). */
+  unchecked: string;
 }): Prompt {
-  const list = exactLine(a.exact, 500);
-  const instructions = `You check a finished coding job before the answer goes to the person. You run nothing. Read THE REQUEST and list its requirements: what must exist and under which exact name and place, what it must do, every size, count, format and case it names, and how it will be used. Judge each one only from RECORDED: a recorded command that passed, a file listing or an excerpt is evidence; a statement under CLAIMED is not. A check that ran on something other than what the request names (another file, a sample, another way of running it) does not show the requirement.
+  const instructions = `You check a finished coding job before the answer goes to the person. You cannot run anything yourself: the commands you name are run for you, exactly as written, in the working folder.
 
-Reply with one line per requirement, at most 10, in exactly this form and nothing else:
-R1: <the requirement, in the request's words> | MET | <the recorded evidence>
-R2: <requirement> | NOT SHOWN | CHECK: <the cheapest single command that would settle it>
-R3: <requirement> | VIOLATED | <what the record shows instead>`;
-  const room = PROMPT_BUDGET - instructions.length - 200;
-  const files = clipMiddle(a.files || "(none recorded)", 2200);
-  const commands = clipMiddle(a.commands || "(none recorded)", 1300);
-  const found = clipMiddle(a.found || "(nothing)", 500);
-  const claims = clipMiddle(a.claims || "(none)", 500);
+Read THE REQUEST and the EVIDENCE: the files that were changed, with excerpts, and every command that was run, with its exit code and the end of its output. A command that ran the result and exited 0 shows that it runs; a file listed with a size exists. Never ask for what the evidence shows or what SETTLED BY CODE lists.
+
+Name at most three things the request asks for that the evidence does NOT show and that decide whether the result works the way the request says it will be used: its stated usage never run on the real file; a case it names that no command exercised for real (an interrupt, a bad input, the edge of a format); a stated size, count or shape nobody checked. Most important first. A placeholder in an example of the request (testwordXY, N, <name>, ...) is not a literal: never require it.
+
+For each give ONE check: a shell command (a short script is fine) that exits 0 only if the requirement holds and prints what it found. It runs from the working folder, takes no input, finishes within 30 seconds, installs nothing and changes none of the job's files. In exactly this form:
+
+CHECK 1: <the requirement, in the request's words>
+\`\`\`bash
+<the command>
+\`\`\`
+
+If the evidence shows everything that matters, reply with only: ALL SHOWN`;
+  const room = PROMPT_BUDGET - instructions.length - 260;
+  const files = clipMiddle(a.files || "(none recorded)", 2000);
+  const commands = a.commands || "(none recorded)";
+  const settled = clipMiddle(a.settled || "(nothing)", 500);
+  const unchecked = a.unchecked ? clipMiddle(a.unchecked, 400) : "";
   const req = requestExcerpt(
     a.request,
     Math.max(
       900,
-      room - files.length - commands.length - found.length - claims.length - list.length,
+      room - files.length - commands.length - settled.length - unchecked.length - a.cwd.length,
     ),
   ).text;
   return {
     instructions,
-    input: `THE REQUEST, word for word:\n"""\n${req}\n"""${list ? `\n${list}` : ""}\n\nRECORDED, files changed:\n${files}\n\nRECORDED, commands run (latest result of each):\n${commands}\n\nRECORDED, found by code:\n${found}\n\nCLAIMED (not evidence):\n${claims}`,
+    input: `THE REQUEST, word for word:\n"""\n${req}\n"""\n\nWORKING FOLDER: ${a.cwd} (${platformLabel()})\n\nEVIDENCE, files changed:\n${files}\n\nEVIDENCE, commands run (exit code, command, end of output):\n${commands}\n\nSETTLED BY CODE (do not ask again):\n${settled}${unchecked ? `\n\nTHE WORK SAYS IT DID NOT CHECK:\n${unchecked}` : ""}`,
   };
 }
 
 // ---- Hyperexperimental -------------------------------------------------------------------------
 
-export function thinkPrompt(a: {
+const THINK_INSTRUCTIONS = `You direct a coding job one step at a time. You cannot touch the machine: you write what to do, an executor does exactly that, and you are shown the results. You remember nothing between steps; all that is known is below. MEMORY is kept by code: the steps so far and how each action ended. PINNED FILES are the files being worked on as they are on disk now, refreshed every step: never read them again. LAST RESULTS are shown this once: a fact from them you will need later, write as a line starting KEEP: and it stays in MEMORY. A long output is saved whole, and its result names the file and lines to READ: do not run a command again to see more of it. GOAL is the person's request word for word: use its names, paths and values exactly as written.
+
+A step is up to 6 actions, run in order and stopped at the first that fails. Put looking, changing and checking in ONE step when they do not need each other's output (write the file, run it, show the result). Every command starts in FOLDER (a cd does not carry to the next action); a path outside FOLDER that the goal does not name is refused. Do not search outside FOLDER for tools: when one is missing, use what is there (python3) or say so.
+- A command: in a \`\`\`bash block, run as one script exactly as written.
+- A file you create or rewrite: once, whole, in a block fenced exactly like this (saved as written; never in a heredoc or an echo):
+${FILE_BLOCK_HELP}
+- A small change: a line REPLACE: <path>, then <<<, the exact old text, ===, the new text, >>>.
+- Looking: READ: <path> <first>-<last> | LIST: <folder> | SEARCH: <regex> IN <path>
+An action that repeats an earlier one with nothing changed since is not run again. After three steps that only look, the next must change or run something.
+${VERIFY_RULES}
+
+When the goal is reached and checked, reply with a line starting FINISHED: and the answer for the user: what was run to check it, then a line NOT CHECKED: <what was not, or nothing>. If the job cannot go on, reply BLOCKED: <what is missing>.`;
+
+interface ThinkFrame {
   /** The request, as the person wrote it. */
   goal: string;
   exact?: string[];
@@ -275,52 +311,82 @@ export function thinkPrompt(a: {
   /** What came before this request in the thread, in a line ("" when nothing). */
   before?: string;
   folder: string;
-  summary: string;
-  results: string;
   step: number;
-  stepsLeft: number;
-}): Prompt {
-  const instructions = `You direct a coding job one small step at a time. You cannot touch the machine: you write, in plain words, what to do next, an executor does it, and you are shown the results. You have no memory; SUMMARY and LAST RESULTS below are everything known, and LAST RESULTS are shown this once: what you need from a file you read, use now (write the new file in this reply), because the summary keeps a few lines of it at most. Do not read the same thing twice. GOAL is the person's request word for word: use its names, paths and values exactly as written.
+  /** What the turn may still spend, in words ("31 model calls, 14 minutes"). */
+  left: string;
+  /** A line code adds when the job is not moving (the look limit, a finish check's findings). */
+  nudge?: string;
+}
 
-Say the next step concretely: the files to read and the commands to run, each command in a \`\`\`bash block (a block runs as one script, exactly as you write it). Give each file you create or rewrite once, whole, in a block fenced exactly like this (it is saved as written; never put file content in a heredoc, an echo or a command):
-
-${FILE_BLOCK_HELP}
-
-For a small change to an existing file give the exact old text and the new text instead. One small step, at most 5 actions. Do not repeat what the summary shows as done: a check it shows as passed is not run again. ${VERIFY_RULES}
-
-When the goal is reached and checked, reply instead with a line starting FINISHED: followed by the answer for the user, saying what was run to check it and what was not checked.`;
+function thinkFrame(a: ThinkFrame): { head: string; tail: string; names: string; whole: boolean } {
   const goal = requestExcerpt(a.goal, 2200);
   const pointer =
     !goal.whole && a.requestFile
       ? `\n(Shortened here. All of it is in ${a.requestFile}: READ there what you need.)`
       : "";
   const before = a.before ? `\n${a.before}` : "";
-  const summary = a.summary || "(nothing done yet)";
-  const tail = `This is step ${a.step}; ${a.stepsLeft} step${a.stepsLeft === 1 ? "" : "s"} left after it.`;
-  const base =
-    instructions.length +
-    goal.text.length +
-    pointer.length +
-    before.length +
-    a.folder.length +
-    summary.length +
-    tail.length +
-    90;
-  // The names stand for what a shortened goal lost. Beside the whole goal they only repeat it:
-  // then they are given when the last results lose nothing for it.
-  const list = exactLine(a.exact ?? [], 500);
-  const names =
-    !goal.whole || PROMPT_BUDGET - base - list.length >= Math.min(a.results.length, RESULTS_LIMIT)
-      ? list
-      : "";
-  const fixed = base + names.length;
-  // The last results take the room that is left (never less than a screenful).
-  const results = a.results
-    ? clipMiddle(a.results, Math.max(900, Math.min(RESULTS_LIMIT, PROMPT_BUDGET - fixed)))
-    : "(none yet)";
   return {
-    instructions,
-    input: `GOAL:\n${goal.text}${pointer}${before}${names ? `\n${names}` : ""}\n\nFOLDER: ${a.folder}\n\nSUMMARY SO FAR:\n${summary}\n\nLAST STEP RESULTS:\n${results}\n\n${tail}`,
+    head: `GOAL:\n${goal.text}${pointer}${before}`,
+    tail: `This is step ${a.step}. Left in this turn: ${a.left}.${a.nudge ? `\n${a.nudge}` : ""}`,
+    names: exactLine(a.exact ?? [], 500),
+    whole: goal.whole,
+  };
+}
+
+/**
+ * What a Think prompt has left for the working memory, the pinned files and the last results
+ * together, once the instructions, the goal, the folder line and the closing line are in.
+ */
+export function thinkRoom(a: ThinkFrame): number {
+  const f = thinkFrame(a);
+  const names = f.whole ? 0 : f.names.length + 1;
+  return (
+    THINK_BUDGET -
+    THINK_INSTRUCTIONS.length -
+    f.head.length -
+    names -
+    a.folder.length -
+    f.tail.length -
+    110
+  );
+}
+
+/**
+ * The Think prompt. The three variable parts share what thinkRoom leaves: the memory as it is
+ * given (hyper.ts renders it within its own bound), then the last results (shown once, so they
+ * come before the pins: never less than a screenful), then the pinned files in what is left.
+ */
+export function thinkPrompt(
+  a: ThinkFrame & {
+    /** The working memory, rendered (memory.ts renderMemory). */
+    memory: string;
+    /** The pinned files, rendered within the room the caller worked out (memory.ts renderPins). */
+    pins: string;
+    /** The last step's results (shown once). */
+    results: string;
+  },
+): Prompt {
+  const f = thinkFrame(a);
+  const room = thinkRoom(a);
+  const memory = a.memory || "(nothing done yet)";
+  // The names stand for what a shortened goal lost. Beside the whole goal they only repeat it:
+  // then they are given when nothing else loses room for them.
+  const need = memory.length + a.results.length + a.pins.length;
+  const names = !f.whole || room - need >= f.names.length + 1 ? f.names : "";
+  const left = room - (f.whole && names ? names.length + 1 : 0);
+  const results = a.results
+    ? clipMiddle(a.results, Math.max(900, left - memory.length - Math.min(a.pins.length, 300)))
+    : "(none yet)";
+  const pinRoom = left - memory.length - results.length;
+  const pins =
+    a.pins && a.pins.length <= pinRoom
+      ? a.pins
+      : a.pins
+        ? clipMiddle(a.pins, Math.max(0, pinRoom))
+        : "";
+  return {
+    instructions: THINK_INSTRUCTIONS,
+    input: `${f.head}${names ? `\n${names}` : ""}\n\nFOLDER: ${a.folder}\n\nMEMORY:\n${memory}${pins && pinRoom >= 200 ? `\n\nPINNED FILES:\n${pins}` : ""}\n\nLAST STEP RESULTS:\n${results}\n\n${f.tail}`,
   };
 }
 
@@ -335,17 +401,22 @@ Rules: copy commands exactly from the plan and add nothing the plan does not say
   };
 }
 
-export function summarizePrompt(a: {
+/**
+ * The fold of Hyperexperimental's log (the only "summarize" call left): when the log of steps
+ * outgrows its share of the memory, its oldest entries and the digest so far become a new digest.
+ */
+export function foldPrompt(a: {
   goal: string;
   exact?: string[];
-  summary: string;
-  intent: string;
-  results: string;
+  digest: string;
+  kept: string[];
+  /** The log entries being folded in, one per line. */
+  entries: string;
 }): Prompt {
   const names = exactLine(a.exact ?? [], 400);
   return {
-    instructions: `You keep the running summary of a coding job; it is the only memory the job has. Rewrite it to include the latest step. Record only what the results show (a command that failed, failed). Keep: files created or changed with one line on what each holds, files that were read with the facts the job needs from them (names of functions and columns, formats, values: enough that nobody has to read them again), commands that passed or failed with the key error text, decisions made, what was checked and how, and what is still left to do. Write names, paths and numbers exactly as they appear. Drop what no longer matters. Plain text, under 300 words, no preamble.`,
-    input: `GOAL: ${clip(a.goal, 500)}${names ? `\n${names}` : ""}\n\nPREVIOUS SUMMARY:\n${a.summary || "(empty)"}\n\nLATEST STEP, WHAT WAS INTENDED:\n${clipMiddle(a.intent.trim(), 900)}\n\nLATEST STEP, ACTIONS AND RESULTS:\n${a.results}`,
+    instructions: `You keep the digest of a coding job's earlier steps: with the KEPT FACTS it is all the job remembers of them. Rewrite the DIGEST so that it takes in STEPS TO FOLD IN. Keep: files created or changed with a few words on what each holds, what was found out (names of functions and columns, formats, values), what failed and why, what was decided, what is still open. Write names, paths and numbers exactly as they appear, and record only what the steps show (a command that failed, failed). Do not repeat a kept fact. Drop what no longer matters. Plain text, under 110 words, no preamble.`,
+    input: `GOAL: ${clip(a.goal, 500)}${names ? `\n${names}` : ""}\n\nKEPT FACTS (already remembered):\n${a.kept.length ? a.kept.map((k) => `- ${k}`).join("\n") : "(none)"}\n\nDIGEST SO FAR:\n${a.digest || "(empty)"}\n\nSTEPS TO FOLD IN:\n${clipMiddle(a.entries, 3000)}`,
   };
 }
 
@@ -358,9 +429,10 @@ export function summarizePrompt(a: {
 export const WORKER_BASE = `You are a coding agent working in a terminal on the user's machine. You are given one small task: do it with your tools, check it, report, and stop.
 
 - Use the shell tool to look around and to run things. Keep commands short and non-interactive: no editors, no pagers, nothing that waits for input. Look with ls, rg or grep, and sed -n; read a file before you change it.
+- Your context is small. Never print a long file or a long output whole: read ranges (sed -n '1,120p', head, tail, grep -n), and send a long command's output to a file and read the part you need.
 - Input files may be the evidence the job is about: before a tool that can change a file opens it (sqlite3, a database or archive tool, a formatter, an installer), copy the file and work on the copy, and prefer read-only modes.
 - Create or change files with apply_patch when you have it, otherwise with a heredoc. Keep changes small and in the style of the code around them. Use the names, paths and values of the request exactly as it writes them.
-- Stay inside the working folder. Do not commit, push, reset or discard with git, and do not install anything globally, unless the task says so. Commands that force-delete (rm -f), use sudo or write outside the folder need an approval that may never come: do without them. In zsh, status and path are reserved variable names.
-- When a command fails, read the error and fix the cause; never repeat the same command unchanged. If you are blocked (a missing tool, a refused permission, an unclear task), stop and say so.
+- Stay inside the working folder. Do not search the rest of the machine (the home folder, system folders, package caches) for tools or libraries: command -v <tool> or python3 -c "import <lib>" says at once whether one is there. If a check needs one that is missing, try once with what is there (python3 and its standard library); if that cannot do it, write "cannot execute: <tool> missing" under NOT CHECKED and finish the rest. Do not commit, push, reset or discard with git, and do not install anything globally, unless the task says so. Commands that force-delete (rm -f), use sudo or write outside the folder need an approval that may never come: do without them. In zsh, status and path are reserved variable names.
+- When a command fails, read the error and fix the cause; never repeat the same command unchanged. If you are blocked (a refused permission, an unclear task), stop and say so.
 - Before you report done, run the result the way the request says it will be used, including the failure cases it names, and check it against any size, count or shape the request states. Say what you ran and what you did not check.
 - Do not ask questions: make the reasonable choice and mention it. No plans or narration between tool calls; end with one short report in the form the task asks for.`;

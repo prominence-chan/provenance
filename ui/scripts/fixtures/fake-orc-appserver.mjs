@@ -16,7 +16,15 @@
 //   MAKES <name>  also writes that file in the folder (in the request or the task)
 //   PARTLY     reports STATUS: PARTIAL (its commands passed; the rest is the job's remainder)
 //   NEARMISS <name>  (in the task) also writes that file: a planner's respelling of the name asked for
-//   the finish check's follow-up task reports BLOCKED when the request says UNSETTLED
+//   the finish check's fix task reports BLOCKED when the request says UNSETTLED; otherwise it
+//              writes <word>.txt for "FIXES <word>" in the request (the first worker does not)
+//   GROWS      its requests grow past the context budget (12,000 input tokens) after its command
+//              and edit, until it is interrupted; asked to wrap up it reports PARTIAL with what is
+//              LEFT TO DO. A worker whose brief carries that hand-over finishes (GROWS <n>: the
+//              first n workers grow; GROWS DRY: always grows, before it has run or changed anything)
+//   LOOKSONLY  runs its command, changes no file, and reports BLOCKED
+//   UNCHECKED  its report names something under NOT CHECKED
+//   ENVBLOCK   reports PARTIAL: a tool is missing (its command passed, its file is written)
 //   ASKME      once its brief records a refused approval, it does without (ASKME ALWAYS: asks again)
 //   (anything else: a command, an edit, STATUS: DONE)
 // command/exec honours `env` (laid over this process's environment), like the real one.
@@ -126,6 +134,14 @@ async function workerTurn(threadId, turnId, brief) {
     content: [{ type: "text", text: brief }],
   });
   await sleep(10);
+  if (/^Stop here: this thread's context is nearly full/.test(brief)) {
+    // the hand-over a worker is asked for when its context is full
+    usage(threadId, turnId, 12500);
+    say(
+      "RESULT: the first half is written and its check passed\nCHANGES: f-half.txt\nVALIDATION: ran python3 check.py, passed\nNOT CHECKED: the second half\nBLOCKERS: LEFT TO DO: write the second half; the format is one row per line, id first\nSTATUS: PARTIAL",
+    );
+    return finish("completed");
+  }
   usage(threadId, turnId, 6000 + brief.length / 4);
   if (/NOTOOLS/.test(task) && (/ALWAYS/.test(task) || !/ran no command/.test(brief))) {
     say("BLOCKERS: Local terminal execution unavailable.\nSTATUS: BLOCKED");
@@ -164,6 +180,13 @@ async function workerTurn(threadId, turnId, brief) {
   if (/LOOPCALLS/.test(task)) {
     while (!th.interrupted) {
       usage(threadId, turnId, 7000);
+      await sleep(15);
+    }
+    return finish("interrupted");
+  }
+  if (/GROWS DRY/.test(task)) {
+    for (let n = 9000; !th.interrupted; n += 3000) {
+      usage(threadId, turnId, n);
       await sleep(15);
     }
     return finish("interrupted");
@@ -207,6 +230,13 @@ async function workerTurn(threadId, turnId, brief) {
   }
   note("item/commandExecution/outputDelta", { threadId, turnId, itemId: cid, delta: "out\n" });
   item("item/completed", cmdItem(cid, command, th.cwd, "completed", "out\n", 0));
+  if (/LOOKSONLY/.test(task)) {
+    usage(threadId, turnId, 7500 + brief.length / 4);
+    say(
+      "RESULT: looked again; nothing new\nCHANGES: none\nVALIDATION: none\nBLOCKERS: there is still nothing to run it with\nSTATUS: BLOCKED",
+    );
+    return finish("completed");
+  }
   const fid = randomUUID();
   const file = {
     id: fid,
@@ -218,13 +248,36 @@ async function workerTurn(threadId, turnId, brief) {
   item("item/completed", file);
   const makes = /MAKES ([\w.-]+)/.exec(`${task} ${brief}`)?.[1];
   if (makes) writeFileSync(`${th.cwd}/${makes}`, "[]\n");
+  const fixes = /FIXES (\w+)/.exec(brief)?.[1];
+  if (fixes && /Fix what the finish check found/.test(task) && !/UNSETTLED/.test(brief))
+    writeFileSync(`${th.cwd}/${fixes}.txt`, "fixed\n");
+  if (
+    /GROWS/.test(task) &&
+    !/GROWS DRY/.test(task) &&
+    Number(/\(hand-over (\d+)\)/.exec(brief)?.[1] ?? 0) < Number(/GROWS (\d+)/.exec(task)?.[1] ?? 1)
+  ) {
+    // a long job in one thread: each request larger than the last, until someone stops it
+    for (let n = 9000; !th.interrupted; n += 3000) {
+      usage(threadId, turnId, n);
+      await sleep(15);
+    }
+    return finish("interrupted");
+  }
   const near = /NEARMISS ([\w.-]+)/.exec(task)?.[1];
   if (near) writeFileSync(`${th.cwd}/${near}`, "a near miss\n");
   usage(threadId, turnId, 7500 + brief.length / 4);
   if (th.interrupted) return finish("interrupted");
-  if (/Settle the open points/.test(task) && /UNSETTLED/.test(brief))
+  if (/Fix what the finish check found/.test(task) && /UNSETTLED/.test(brief))
     say(
       "RESULT: the checks could not be run\nCHANGES: none\nVALIDATION: none\nNOT CHECKED: every open point\nBLOCKERS: wc is missing\nSTATUS: BLOCKED",
+    );
+  else if (/ENVBLOCK/.test(task))
+    say(
+      `RESULT: wrote the query; it could not be executed here\nCHANGES: f-${task.length}.txt\nVALIDATION: ran ${command}, passed\nNOT CHECKED: running the query: no SPARQL engine is installed, and pip install failed (no network)\nBLOCKERS: cannot execute: arq missing\nSTATUS: PARTIAL`,
+    );
+  else if (/UNCHECKED/.test(task))
+    say(
+      `RESULT: finished "${task}"\nCHANGES: f-${task.length}.txt\nVALIDATION: ran ${command}, passed\nNOT CHECKED: a real keyboard interrupt (a cancelled task was tested instead)\nBLOCKERS: none\nSTATUS: DONE`,
     );
   else if (/PARTLY/.test(task))
     say(

@@ -19,6 +19,16 @@
 // no content refused and fed back; a plan that only looks gets a producing task, and a missing
 // deliverable is said; a worker out of budget is stopped and the plan revised; a planner that
 // declines is asked again; guards that ignore a wall clock jumping a day; the PATH a RUN sees.
+// And what the second benchmark round asked for: the finish check (a reviewer only when it can
+// add something, given the evidence; its checks run by code; a fix task only for a check that
+// fails, and none when the budget is nearly gone); what a command is (a look, or more);
+// Hyperexperimental's working memory (the log, kept facts, pinned files that rotate, long outputs
+// saved and shown head and tail), actions read straight from the think text, repeats answered
+// from memory, the look limit and the no-progress stop, paths read against the folder and the
+// request; Experimental's revision discipline and a worker's context budget with its hand-over;
+// and two long jobs (twelve files with long outputs; a worker whose context fills up three times)
+// in which the largest prompt of every role and the largest request of every worker stay within
+// budget for the whole run.
 
 import {
   existsSync,
@@ -56,10 +66,13 @@ import {
 } from "../server/orchestrator/experimental.ts";
 import {
   captureScript,
+  filesLooked,
   lineDiff,
   mustAsk,
+  normaliseRun,
   parseCapturedEnv,
   replaceIn,
+  resolveTarget,
   userShell,
 } from "../server/orchestrator/hyper.ts";
 import {
@@ -76,6 +89,9 @@ import {
 } from "../server/orchestrator/notes.ts";
 import {
   balanceFences,
+  directPlan,
+  keepLines,
+  lookOnly,
   looksLikeShell,
   tidyFences,
   isContinue,
@@ -92,22 +108,49 @@ import {
 } from "../server/orchestrator/parse.ts";
 import {
   BRIEF_BUDGET,
+  foldPrompt,
   ONE_WORKER_CHARS,
   plannerPrompt,
   PROMPT_BUDGET,
   reviewPrompt,
   revisePrompt,
   SUMMARY_LIMIT,
+  THINK_BUDGET,
   thinkPrompt,
+  thinkRoom,
   translatePrompt,
   WORKER_BASE,
   workerBrief,
 } from "../server/orchestrator/prompts.ts";
 import {
+  commandsEvidence,
+  reviewWorth,
+  tailOf,
+  uncheckedOf,
+  unsafeCheck,
+  type Check,
+} from "../server/orchestrator/finish.ts";
+import {
+  addKept,
+  addLog,
+  emptyMemory,
+  foldByCode,
+  MAX_PINS,
+  MEMORY_LIMIT,
+  needsFold,
+  pin,
+  PINS_LIMIT,
+  renderMemory,
+  renderPins,
+  RESULTS_MAX,
+  showOutput,
+  takeForFold,
+} from "../server/orchestrator/memory.ts";
+import {
   exactNames,
   nearMiss,
   numbered,
-  parseReview,
+  parseChecks,
   requestExcerpt,
   requestLines,
   strayPaths,
@@ -453,8 +496,11 @@ log("plans: refusals, continue, a plan that only looks");
   );
   check(
     plannerPrompt("x", "y", "", true).instructions.length < 3000 &&
-      thinkPrompt({ goal: "", folder: "", summary: "", results: "", step: 1, stepsLeft: 1 })
+      thinkPrompt({ goal: "", folder: "", memory: "", pins: "", results: "", step: 1, left: "" })
         .instructions.length < 3000 &&
+      reviewPrompt({ request: "", cwd: "", files: "", commands: "", settled: "", unchecked: "" })
+        .instructions.length < 3000 &&
+      foldPrompt({ goal: "", digest: "", kept: [], entries: "" }).instructions.length < 3000 &&
       translatePrompt("", "", "").instructions.length < 3000 &&
       WORKER_BASE.length < 3000,
     "every role's instructions stay under the 3,000 characters the router's web path allows",
@@ -746,32 +792,55 @@ log("the request, word for word: exact names, numbered pieces, excerpts");
   const rev = revisePrompt(LONG, notesText(notes), { title: "t", done: "" }, "r", [], exact);
   const rvw = reviewPrompt({
     request: LONG,
-    exact,
-    files: "- a.ics (add, 300 bytes)\n".repeat(80),
-    commands: "- ok: python3 check.py\n".repeat(80),
-    found: "",
-    claims: "- done",
+    cwd: "/data/app",
+    files: "- a.ics (add, exists, 300 bytes)\n".repeat(80),
+    commands: commandsEvidence(
+      Array.from({ length: 80 }, (_, i) => ({
+        cmd: `python3 check.py --case ${i}`,
+        ok: true,
+        exit: 0,
+        tail: `case ${i}: ok\nall passed`,
+      })),
+    ),
+    settled: "- a.ics exists under exactly that name",
+    unchecked: "the 1e-6 tolerance",
   });
-  const thk = thinkPrompt({
+  const frameArgs = {
     goal: LONG,
     exact,
     requestFile: "/tmp/provenance-requests/t.txt",
     folder: "/data/app (macOS); contains: a.ics",
-    summary: "s".repeat(SUMMARY_LIMIT),
-    results: "r".repeat(3500),
     step: 3,
-    stepsLeft: 5,
+    left: "40 model calls, 12 minutes",
+  };
+  const thk = thinkPrompt({
+    ...frameArgs,
+    memory: "s".repeat(MEMORY_LIMIT),
+    pins: "p".repeat(PINS_LIMIT),
+    results: "r".repeat(RESULTS_MAX),
   });
   check(
-    [rev, rvw, thk].every((p) => p.instructions.length + p.input.length <= PROMPT_BUDGET),
-    `with the longest inputs the reviser's, the reviewer's and the think prompt stay within the budget (${[rev, rvw, thk].map((p) => p.instructions.length + p.input.length).join(", ")} <= ${PROMPT_BUDGET})`,
+    [rev, rvw].every((p) => p.instructions.length + p.input.length <= PROMPT_BUDGET) &&
+      thk.instructions.length + thk.input.length <= THINK_BUDGET,
+    `with the longest inputs the reviser's and the reviewer's prompt stay within the budget, and the think prompt within its own (${[rev, rvw].map((p) => p.instructions.length + p.input.length).join(", ")} <= ${PROMPT_BUDGET}; ${thk.instructions.length + thk.input.length} <= ${THINK_BUDGET})`,
   );
   check(
     thk.input.startsWith("GOAL:\nFind a 1-hour slot") &&
       thk.input.includes("(Shortened here. All of it is in /tmp/provenance-requests/t.txt") &&
       /MUST MATCH EXACTLY[^\n]*meeting_scheduled\.ics/.test(thk.input) &&
-      /LAST STEP RESULTS:\nr{300,}\n\[… \d+ characters left out …\]\nr{300,}/.test(thk.input),
-    "the think prompt has the request's own words, the exact names and where the rest is; the last results take the room that is left",
+      /LAST STEP RESULTS:\nr{300,}/.test(thk.input) &&
+      /MEMORY:\ns{300,}/.test(thk.input) &&
+      thinkRoom(frameArgs) > 4000,
+    `the think prompt has the request's own words, the exact names and where the rest is; memory, pins and results share what is left (${thinkRoom(frameArgs)} characters with the longest goal)`,
+  );
+  check(
+    /exit 0: python3 check\.py --case 79\n    \| case 79: ok\n    \| all passed$/.test(
+      rvw.input.split("\n\nSETTLED BY CODE")[0],
+    ) &&
+      /earlier commands? not listed/.test(rvw.input) &&
+      /THE WORK SAYS IT DID NOT CHECK:\nthe 1e-6 tolerance/.test(rvw.input) &&
+      !/MUST MATCH EXACTLY/.test(rvw.input),
+    "the reviewer is given each command with its exit code and the end of its output (the newest kept), what code settled and what the work says it did not check; not the must-match list",
   );
 }
 
@@ -823,48 +892,168 @@ log("the finish check: what code finds, what the reviewer says");
       /the last recorded check failed: `python3 validate\.py`/.test(fl[1]),
     "code flags the near miss by name, and a last check that failed",
   );
-  const rv = parseReview(`Here is the review:
+  const pc = parseChecks(`Here is what the evidence does not show:
 
-R1: file meeting_scheduled.ics exists | MET | listing shows 312 bytes
-- R2: exactly 60 minutes | NOT SHOWN | CHECK: grep DTSTART meeting_scheduled.ics
-**R3:** handles a missing argument - VIOLATED - prints a traceback
-4. tolerance 1e-6: not shown
-   Check: python3 check.py
+**CHECK 1:** the meeting is exactly 60 minutes
+\`\`\`bash
+python3 - <<'PY'
+import re
+print("ok")
+PY
+\`\`\`
+
+- R2: handles a missing argument | RUN: \`python3 slot.py; test $? -eq 2\`
+3. tolerance 1e-6
+   Run: python3 check.py --tol 1e-6
+CHECK 4: a fourth one
+RUN: true
+Check 5: no command for this one
 Overall the job looks fine.`);
   check(
-    rv.items.length === 4 &&
-      rv.open.map((o) => o.verdict).join() === "not-shown,violated,not-shown" &&
-      rv.open[0].note === "CHECK: grep DTSTART meeting_scheduled.ics" &&
-      rv.open[2].note === "CHECK: python3 check.py",
-    "the reviewer's lines are read in whatever shape: met, not shown with its check, violated",
+    pc.checks.length === 3 &&
+      pc.checks[0].requirement === "the meeting is exactly 60 minutes" &&
+      pc.checks[0].command === "python3 - <<'PY'\nimport re\nprint(\"ok\")\nPY" &&
+      pc.checks[1].command === "python3 slot.py; test $? -eq 2" &&
+      pc.checks[1].requirement === "handles a missing argument" &&
+      pc.checks[2].command === "python3 check.py --tol 1e-6",
+    "the reviewer's checks are read in whatever shape: a block under the check, a RUN on the line or under it; at most three",
   );
   check(
-    parseReview("Looks good to me!").items.length === 0,
-    "a reply with no verdicts is no review",
+    parseChecks("ALL SHOWN").allShown &&
+      !parseChecks("Looks good to me!").allShown &&
+      parseChecks("Looks good to me!").checks.length === 0 &&
+      parseChecks("| CHECK 1: the count | RUN: `wc -l a.csv` |").checks[0]?.command ===
+        "wc -l a.csv" &&
+      parseChecks("CHECK 1: something with no command").checks.length === 0,
+    "ALL SHOWN is a review with nothing to run; a reply with neither is no review; a check without a command is not a check",
   );
-  const t = followUpTask(rv.open, fl);
+  const ev = (cmd: string, ok = true) => ({ cmd, ok, exit: ok ? 0 : 1, tail: "" });
+  check(
+    reviewWorth({ changed: true, split: false, unchecked: "", commands: [ev("python3 t.py")] }) ===
+      null &&
+      reviewWorth({ changed: false, split: true, unchecked: "x", commands: [] }) === null &&
+      /split/.test(
+        reviewWorth({ changed: true, split: true, unchecked: "", commands: [ev("x")] }) ?? "",
+      ) &&
+      /did not check/.test(
+        reviewWorth({
+          changed: true,
+          split: false,
+          unchecked: "a real Ctrl+C",
+          commands: [ev("x")],
+        }) ?? "",
+      ) &&
+      /no recorded command/.test(
+        reviewWorth({ changed: true, split: false, unchecked: "", commands: [ev("x", false)] }) ??
+          "",
+      ),
+    "a reviewer is worth a call only for a split job, for work that names something unchecked, or when nothing ran the result",
+  );
+  check(
+    uncheckedOf("FINISHED: done.\nNOT CHECKED: nothing") === "" &&
+      uncheckedOf("All good.\n\nNot checked: Nothing.\n\nMore words.") === "" &&
+      uncheckedOf("Done.\n**NOT CHECKED:** a real keyboard interrupt\nin a terminal\n\nBye") ===
+        "a real keyboard interrupt in a terminal" &&
+      uncheckedOf("Wrote it and ran it.") === "",
+    "what an answer says it did not check is read from its NOT CHECKED line (nothing is nothing)",
+  );
+  check(
+    unsafeCheck("rm -rf build && make", dir, req) !== null &&
+      unsafeCheck("python3 -c 'import os; print(1)' > /etc/x", dir, req) !== null &&
+      unsafeCheck("pip install rdflib && python3 q.py", dir, req) !== null &&
+      unsafeCheck("git reset --hard", dir, req) !== null &&
+      unsafeCheck("", dir, req) !== null &&
+      unsafeCheck("python3 -c \"print('rm -rf nothing')\" && test -s meeting.ics", dir, req) ===
+        null &&
+      unsafeCheck("gcc main.c -o /tmp/m && /tmp/m 10 | grep -qx 55", dir, req) === null,
+    "a reviewer's command that would delete, install, reset or write outside the folder is not run as a check; one that only runs and looks is",
+  );
+  const failed: Check[] = [
+    {
+      requirement: "handles a keyboard interrupt",
+      command: "python3 sigint_test.py",
+      state: "failed",
+      output: "cleanup did not run\n[exit 1]",
+    },
+  ];
+  const t = followUpTask(failed, fl);
   check(
     t.followUp === true &&
       /- \(recorded\) `meeting_scheduled\.ics`, named in the request, does not exist/.test(
         t.detail ?? "",
       ) &&
-      /- NOT SHOWN: exactly 60 minutes — CHECK: grep DTSTART meeting_scheduled\.ics/.test(
+      /- CHECK FAILED: handles a keyboard interrupt\n  command: python3 sigint_test\.py\n  it printed: cleanup did not run/.test(
         t.detail ?? "",
       ) &&
-      /- VIOLATED: handles a missing argument — prints a traceback/.test(t.detail ?? ""),
-    "what is open becomes one task, written by code from the findings",
+      /whether the work or the check is wrong/.test(t.detail ?? ""),
+    "what failed becomes one task, written by code: the failing command, what it printed, and the rule that a wrong check is named, not satisfied",
+  );
+  const passed: Check = {
+    requirement: "it imports",
+    command: "python3 -c 'import run'",
+    state: "passed",
+    output: "",
+  };
+  const notRun: Check = {
+    requirement: "the query runs",
+    command: "arq --query q",
+    state: "not-run",
+    output: "it could not be run (exit 127): arq: command not found",
+  };
+  const ft = finishText({
+    reviewed: true,
+    checks: [passed, ...failed, notRun],
+    fix: { ran: false, why: "too little was left" },
+    skipped: null,
+  });
+  check(
+    /\*\*Finish check\.\*\* 1 further check was run on the result and passed:\n- it imports: `python3 -c 'import run'`\n1 check \*\*failed\*\*:\n- handles a keyboard interrupt: `python3 sigint_test\.py` → cleanup did not run[^\n]*\nNo fix task was run \(too little was left\): treat this as \*\*not verified\*\*[^\n]*\n\*\*Not verified\*\* \(the check could not be run\):\n- the query runs: it could not be run \(exit 127\)/.test(
+      ft,
+    ) &&
+      finishText({ reviewed: true, checks: [], fix: null, skipped: null }) === "" &&
+      finishText({ reviewed: false, checks: [], fix: null, skipped: null }) === "" &&
+      /not reviewed \(the reviewer could not be reached\)/.test(
+        finishText({
+          reviewed: false,
+          checks: [],
+          fix: null,
+          skipped: "the reviewer could not be reached",
+        }),
+      ),
+    "the answer says which checks passed, which failed and which could not be run (not verified); with nothing to say it adds nothing",
   );
   check(
-    /\*\*Finish check\.\*\* [^\n]*3 of 4 requirements were not shown met:\n- not shown: exactly 60 minutes[^\n]*\n- violated[^\n]*\n- not shown[^\n]*\nNo follow-up task was run for them \(too little was left\): treat them as \*\*not verified\*\*\./.test(
-      finishText({ review: rv, open: rv.open, followUp: null, skipped: "too little was left" }),
-    ) &&
-      finishText({
-        review: parseReview("R1: x | MET | y"),
-        open: [],
-        followUp: null,
-        skipped: null,
-      }) === "",
-    "the answer names what was not shown as not verified; when all is shown it adds nothing",
+    tailOf("a\n\nb\nc\n", 100, 2) === "b\nc" && tailOf("x".repeat(500), 50).length === 50,
+    "the end of an output is kept as evidence, bounded",
+  );
+}
+
+log("what a command is: a look, or more");
+{
+  const looks: [string, boolean][] = [
+    ["ls -la", true],
+    ["cd /app && python3 test.py", false],
+    ["cat > f.txt <<'EOF'\nhello\nEOF\npython3 x.py", false],
+    ["cat a.py | head -n 5", true],
+    ["pwd && ls -l x && sed -n '1,260p' x.ttl", true],
+    ["sed -i 's/a/b/' x", false],
+    ['TARGET="/a/b"\necho "=== x ==="\ncat "$TARGET"\nwc -l "$TARGET"', true],
+    ['for cmd in arq riot; do command -v "$cmd" || true; done\nls -l s.sparql', true],
+    ["python3 - <<'PY'\nimport re\nprint(1)\nPY", false],
+    ["grep -n foo x 2>/dev/null | head", true],
+    ["echo hi > out.txt", false],
+    ["mkdir -p x", false],
+    ["printf '%s\\n' '--- a ---'\ncat regex.txt\nls -l regex.txt", true],
+    ["gcc a.c -o a && ./a 10", false],
+    ['cd "/x y" || exit 1\ncat f', true],
+    ["if test -f s; then\n  wc -c s\n  cat -n s\nfi", true],
+    ["nl -ba \"$T\" | sed -n '1,70p'", true],
+    ["find . -name '*.pyc' -delete", false],
+  ];
+  const wrong = looks.filter(([c, want]) => lookOnly(c) !== want).map(([c]) => c);
+  check(
+    wrong.length === 0,
+    `a script only looks when every command in it does: a cd in front of a test, a cat that writes a heredoc and a python heredoc are more than a look (${wrong.length ? `wrong: ${JSON.stringify(wrong)}` : `${looks.length} cases`})`,
   );
 }
 
@@ -1096,21 +1285,194 @@ log("hyperexperimental: commands are lifted too, and a retyped name is set back"
 {
   log("finish check: a review that came back as a table is read");
   const table = [
-    "| R1: Recover as many rows as possible from `trunc.db` | MET | Recorded commands read `trunc.db`. |",
-    "| --- | --- | --- |",
-    '| R3: Output format `[{"word": "testwordXY", "value": M}]` | NOT SHOWN | CHECK: `python3 -m json.tool recover.json` |',
-    "| R4: Use the exact field names `word` and `value` | VIOLATED | The excerpt has `Word`. |",
+    '| CHECK 1: Output format `[{"word": "…", "value": M}]` | RUN: `python3 -m json.tool recover.json` |',
+    "| --- | --- |",
+    "| CHECK 2: Use the exact field names `word` and `value` | RUN: `grep -c '\"word\"' recover.json` |",
   ].join("\n");
-  const rv = parseReview(table);
+  const rv = parseChecks(table);
   check(
-    rv.items.length === 3 &&
-      rv.items[0].verdict === "met" &&
-      rv.items[1].verdict === "not-shown" &&
-      /CHECK: `python3 -m json\.tool recover\.json`$/.test(rv.items[1].note) &&
-      rv.items[2].verdict === "violated" &&
-      rv.open.length === 2 &&
-      !rv.items.some((i) => /\|/.test(i.requirement + i.note)),
-    "table rows give the same items as plain lines: three requirements, two open, no pipes left",
+    rv.checks.length === 2 &&
+      rv.checks[0].command === "python3 -m json.tool recover.json" &&
+      rv.checks[1].command === "grep -c '\"word\"' recover.json" &&
+      !rv.checks.some((c) => /\|/.test(c.requirement)),
+    "table rows give the same checks as plain lines: two commands, no pipes left in the requirements",
+  );
+}
+
+log("hyperexperimental: the working memory is kept by code and stays within its bounds");
+{
+  const m = emptyMemory("An earlier request was answered: made mathx.py.");
+  for (let step = 1; step <= 40; step++) {
+    addLog(m, step, `Step ${step}: write module_${step}.py and run its test, as planned before`, [
+      `WRITE: src/module_${step}.py (120 lines): ok`,
+      `RUN: python3 -m unittest tests.test_module_${step}: ${step % 5 ? "ok" : 'exit 1 "AssertionError: 3 != 4"'}`,
+    ]);
+    addKept(m, [`module_${step}.py exports run_${step}(rows) and needs the column id_${step}`]);
+    if (needsFold(m)) foldByCode(m, takeForFold(m));
+    pin(m, `src/module_${step}.py`, step);
+  }
+  const text = renderMemory(m);
+  check(
+    text.length <= MEMORY_LIMIT &&
+      m.log.length < 12 &&
+      m.folded + m.log.length === 40 &&
+      /STEPS \(recorded by code/.test(text) &&
+      /40\. Step 40: write module_40\.py/.test(text) &&
+      /EARLIER STEPS \(\d+, folded\)/.test(text) &&
+      /KEPT FACTS/.test(text) &&
+      /module_40\.py exports run_40/.test(text) &&
+      !/module_3\.py exports/.test(text) &&
+      /BEFORE THIS JOB:\nAn earlier request was answered/.test(text),
+    `after forty steps the memory is within its bound (${text.length} <= ${MEMORY_LIMIT}): the latest steps as lines, the older ones folded, the newest kept facts, what came before the job`,
+  );
+  check(
+    m.pins.length === MAX_PINS &&
+      m.pins.map((x) => x.path).join() === "src/module_39.py,src/module_40.py",
+    "the pins rotate: forty files were pinned, the last two are",
+  );
+  const big = Array.from(
+    { length: 400 },
+    (_, i) => `line ${i + 1} of the big file, with some words`,
+  ).join("\n");
+  const small = "def add(a, b):\n    return a + b\n";
+  const contents = new Map<string, string | null>([
+    ["src/module_39.py", big],
+    ["src/module_40.py", small],
+  ]);
+  const pinned = renderPins(m, contents, 2000);
+  check(
+    pinned.length <= 2000 &&
+      /--- src\/module_40\.py \(all 2 lines, as on disk now\) ---\n1\| def add\(a, b\):\n2\|     return a \+ b/.test(
+        pinned,
+      ) &&
+      /--- src\/module_39\.py \(lines 1-\d+ of 400, as on disk now; for others: READ: src\/module_39\.py <first>-<last>\) ---\n  1\| line 1 of/.test(
+        pinned,
+      ),
+    `pinned files are shown with line numbers within their share (${pinned.length} <= 2000): the newest whole, the older one as far as it fits, with how to read the rest`,
+  );
+  pin(m, "src/module_39.py", 41, 200, 240);
+  const moved = renderPins(m, contents, 2400);
+  check(
+    /--- src\/module_39\.py \(lines 200-2\d\d of 400/.test(moved) &&
+      /200\| line 200 of/.test(moved),
+    "a pin's window follows the range that was read",
+  );
+  contents.set("src/module_40.py", null);
+  renderPins(m, contents, 2400);
+  check(
+    m.pins.length === 1 && m.pins[0].path === "src/module_39.py",
+    "a pinned file that is gone (or no longer text) is unpinned",
+  );
+  const out = Array.from({ length: 300 }, (_, i) => `row ${i + 1}: ${"x".repeat(30)}`).join("\n");
+  const shown = showOutput(out, 900, "/tmp/provenance-requests/t-out/step3-1.txt");
+  const gap =
+    /\[… lines (\d+)-(\d+) of 300 are not shown; the whole output is saved: READ: \/tmp\/provenance-requests\/t-out\/step3-1\.txt (\d+)-(\d+) …\]/.exec(
+      shown,
+    );
+  check(
+    shown.length <= 900 &&
+      shown.startsWith("row 1: ") &&
+      shown.endsWith(`row 300: ${"x".repeat(30)}`) &&
+      !!gap &&
+      gap[1] === gap[3] &&
+      gap[2] === gap[4] &&
+      Number(gap[1]) > 5 &&
+      Number(gap[2]) < 296,
+    `a long output is shown once as its first and last whole lines, with the lines left out and the file and range that hold them (${shown.length} <= 900)`,
+  );
+  check(
+    showOutput("short\noutput\n", 900, null) === "short\noutput" &&
+      showOutput("", 900, null) === "(no output)",
+    "a short output is shown whole",
+  );
+}
+
+log("hyperexperimental: where an action points, and what needs no translator");
+{
+  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), "provenance-orc-target-")));
+  const app = path.join(dir, "app");
+  mkdirSync(path.join(app, "polyglot"), { recursive: true });
+  mkdirSync(path.join(app, "src"));
+  writeFileSync(path.join(app, "src", "a.py"), "x = 1\n");
+  const request = `Write me a single file in ${app}/polyglot/main.py.c which is a polyglot.`;
+  const job = {
+    original: request,
+    exact: exactNames(request),
+    deliverables: deliverablesIn(request, app),
+  };
+  const w = resolveTarget("main.py.c", app, job, "write");
+  check(
+    w.path === "polyglot/main.py.c" &&
+      /the request names this file as polyglot\/main\.py\.c/.test(w.note ?? ""),
+    "a bare file name the request gives in a subfolder is written at the request's own path, and the result says so (the benchmark's polyglot run wrote it one folder up and never recovered)",
+  );
+  check(
+    resolveTarget("app/polyglot/main.py.c", app, job, "write").path === "polyglot/main.py.c" &&
+      resolveTarget("app/src/a.py", app, job, "replace").path === "src/a.py" &&
+      resolveTarget("src/a.py", app, job, "read").path === "src/a.py" &&
+      resolveTarget(`${app}/src/a.py`, app, job, "replace").path === "src/a.py" &&
+      resolveTarget("notes/new.txt", app, job, "write").path === "notes/new.txt",
+    "a relative path that repeats the folder's own name loses it; paths inside the folder are shown relative to it",
+  );
+  const out = resolveTarget("/etc/hosts.new", app, job, "write");
+  const home = resolveTarget("~/tools/x.py", app, job, "write");
+  check(
+    /outside the working folder .* the request does not name it/.test(out.refuse ?? "") &&
+      !!home.refuse &&
+      !!resolveTarget("/usr/lib", app, job, "list").refuse &&
+      !resolveTarget("/usr/include/stdio.h", app, job, "read").refuse &&
+      !resolveTarget(`${tmpdir()}/provenance-requests/x-out/step1-1.txt`, app, job, "read")
+        .refuse &&
+      !resolveTarget("/tmp/scratch.txt", app, job, "write").refuse,
+    "a write, a listing or a search outside the folder that the request does not name is refused with the reason; a READ of one file, and temp folders, are not",
+  );
+  const named = { ...job, original: `${request} Also save a copy to /srv/out/copy.c.` };
+  check(
+    !resolveTarget("/srv/out/copy.c", app, named, "write").refuse,
+    "a path outside the folder that the request names is allowed",
+  );
+  check(
+    normaliseRun(`cd "${app}" && python3 t.py`, app) === "python3 t.py" &&
+      normaliseRun(`cd ${app} || exit 1\n\necho hi`, app) === "echo hi" &&
+      normaliseRun(`cd ${app}/polyglot && ls`, app) === `cd ${app}/polyglot && ls` &&
+      normaliseRun(`cd ${app}`, app) === `cd ${app}`,
+    "a leading cd into the working folder is dropped from a command (every command starts there); any other cd stays",
+  );
+  const fl = filesLooked(
+    'TARGET="polyglot/main.py.c"\necho "=== x ==="\ncat "$TARGET"\nsed -n \'85,115p\' src/a.py\nnl -ba src/b.py | head',
+  );
+  check(
+    fl.map((f) => `${f.path}:${f.start}-${f.end ?? ""}`).join() ===
+      "polyglot/main.py.c:1-,src/a.py:85-115,src/b.py:1-",
+    "the files a looking command printed are known (cat, sed -n with its range, nl; a variable set in the script is filled in): they are pinned like a READ",
+  );
+  const dp = directPlan(
+    'Write it and run it.\n\n[file block: a.py (3 lines) is held by the executor; for it output only "WRITE: a.py", with no content]\n\n[command block C1 (2 lines) is held by the executor; for it output only "RUN: C1"]\n- READ: b.py 1-40\nREPLACE: a.py\n<<<\nx\n===\ny\n>>>',
+  );
+  check(
+    dp.sure &&
+      dp.text === "WRITE: a.py\nRUN: C1\nREAD: b.py 1-40\nREPLACE: a.py\n<<<\nx\n===\ny\n>>>",
+    "a think text that holds only lifted blocks and plain action lines is its own action list, in the order written",
+  );
+  check(
+    !directPlan(
+      'Then run `python3 x.py` to check.\n[command block C1 (2 lines) is held by the executor; for it output only "RUN: C1"]',
+    ).sure &&
+      !directPlan("I think we should consider things carefully.").sure &&
+      !directPlan(
+        'Old:\n```c\n#if 0\n```\nNew:\n```c\n#if 1\n```\n[command block C1 (1 line) is held by the executor; for it output only "RUN: C1"]',
+      ).sure,
+    "a command given inside a sentence, a block that was not lifted, or no action at all still goes to the translator",
+  );
+  check(
+    keepLines(
+      "Found it.\nKEEP: the table is words(word, value)\n- KEEP: 10 rows, page size 4096\n```\nKEEP: not this\n```",
+    ).join("|") === "the table is words(word, value)|10 rows, page size 4096" &&
+      parseThought("BLOCKED: no SPARQL engine is installed and none can be").blocked ===
+        "no SPARQL engine is installed and none can be" &&
+      parseThought("Run it.\n```bash\nls\n```\nBLOCKED: later maybe").blocked === null &&
+      parseThought("FINISHED: done").blocked === null,
+    "KEEP: lines are the think step's own notes (outside code blocks); BLOCKED: ends the job only in a reply that gives nothing to run",
   );
 }
 
@@ -1131,7 +1493,7 @@ const ROLES: [string, string][] = [
   ["You check a finished coding job", "review"],
   ["You direct a coding job", "think"],
   ["Turn the PLAN into actions", "translate"],
-  ["You keep the running summary", "summarize"],
+  ["You keep the digest", "summarize"],
 ];
 /** Failures the stand-in router serves before it answers: by role and a word in the prompt. */
 type Fault = {
@@ -1186,7 +1548,7 @@ function answer(role: string, whole: string, instructions = ""): string | number
         return "LARGE: two stages, each with its own check\nTASK 1: Write the 20 rows to rows_final.csv NEARMISS rows_final.csv\nNEEDS: 1\nDONE WHEN: rows_final.csv has 20 rows\nTASK 2: Check the csv\nNEEDS: 2\nDONE WHEN: ok";
       if (/smalljob/.test(input))
         return "TASK 1: Look at the folder\nDONE WHEN: seen\nTASK 2: Tidy it\nDONE WHEN: tidy\nTASK 3: Check it\nDONE WHEN: ok";
-      if (/onejob/.test(input)) return "ONE";
+      if (/onejob|stalejob/.test(input)) return "ONE";
       if (/partlyjob/.test(input))
         return "LARGE: two stages\nTASK 1: PARTLY inspect the inputs\nDONE WHEN: seen\nTASK 2: Write the script\nDONE WHEN: it runs";
       if (/askalways/.test(input)) return "TASK 1: ASKME ALWAYS run it";
@@ -1212,17 +1574,25 @@ function answer(role: string, whole: string, instructions = ""): string | number
     case "revise":
       if (/BLOCKME forever/.test(input)) return "TASK 1: BLOCKME forever\nDONE WHEN: never";
       if (/REQUEST:\n\[1\] calls/.test(input)) return "TASK 1: LOOPCALLS more";
+      if (/REQUEST:\n\[1\] stalejob/.test(input))
+        return "TASK 1: LOOKSONLY verify it another way\nDONE WHEN: verified\nTASK 2: LOOKSONLY verify it once more\nDONE WHEN: verified";
       return "1. Do the thing another way\n   Done when: it works\n2. Use the thing";
     case "final":
       return "All done: the tasks finished.";
     case "review":
-      // The reviewer reads the request against the record: here it finds the count not shown.
-      if (/paraphrase/.test(input))
-        return "Here is my review:\n\nR1: write the rows to exact_rows_final.csv | VIOLATED | the record shows rows_final.csv instead\n- R2: 30 rows | NOT SHOWN | CHECK: wc -l exact_rows_final.csv\nR3: run it | MET | python3 check.py passed";
+      // The reviewer names what the evidence does not show, each with one command; code runs them.
       if (/mumble/.test(input)) return "R1: Make the thing the request";
+      if (/checkpass/.test(input))
+        return "Two things are not shown.\n\nCHECK 1: the folder still holds its README\n```bash\ntest -s README.md && echo readme ok\n```\n\nCHECK 2: the count is three | RUN: `printf 'a\\nb\\nc\\n' | wc -l | grep -q 3`";
+      if (/checkfail/.test(input)) {
+        const mark = /FIXES (\w+)/.exec(input)?.[1] ?? "fixedmark";
+        return `CHECK 1: the marker exists after the job\n\`\`\`bash\ntest -f ${mark}.txt || { echo ${mark}.txt is missing; exit 1; }\n\`\`\``;
+      }
+      if (/checkunsafe/.test(input))
+        return "CHECK 1: the build folder is clean\n```bash\nrm -rf build && test ! -d build\n```\nCHECK 2: a tool nobody has\n```bash\nno-such-tool-orc --version\n```";
       if (/hfinish/.test(input))
-        return "R1: hfin.txt holds 3 lines | NOT SHOWN | CHECK: wc -l hfin.txt\nR2: the file exists | MET | listed";
-      return "R1: what the request asks for | MET | the recorded commands passed";
+        return "CHECK 1: hfin.txt holds 4 lines\n```bash\ntest \"$(wc -l < hfin.txt | tr -d ' ')\" -eq 4 || { echo \"hfin.txt has $(wc -l < hfin.txt | tr -d ' ') lines, not 4\"; exit 1; }\n```";
+      return "ALL SHOWN";
     case "think":
       if (/module/.test(input)) {
         if (step === 1)
@@ -1235,18 +1605,46 @@ function answer(role: string, whole: string, instructions = ""): string | number
         if (step === 1) return "Write the file.\n\n```file:hfin.txt\na\nb\nc\n```";
         if (step === 2) return "FINISHED: wrote hfin.txt.";
         if (step === 3)
-          return "Count the lines, from the folder itself.\n\n```bash\ncd . && wc -l hfin.txt\necho __counted__ {a,b}\n```";
-        return "FINISHED: hfin.txt has 3 lines, counted with wc -l.";
+          return "Add the fourth line and count them, from the folder itself.\n\n```file:hfin.txt\na\nb\nc\nd\n```\n\n```bash\ncd . && wc -l hfin.txt\necho __counted__ {a,b}\n```";
+        return "FINISHED: hfin.txt has 4 lines, counted with wc -l.\nNOT CHECKED: nothing";
       }
       if (/hlooking/.test(input))
-        return step <= 3
+        return step <= 2
           ? `Read it again, part ${step}: run cat README.md | head -n ${step}.`
-          : "FINISHED: Looked.";
+          : "BLOCKED: README.md is all there is; nothing here says what to write.";
+      if (/hpoly/.test(input))
+        return step === 1
+          ? "Create `poly.txt` with this exact content:\n```\nhi\n```\n\nAnd a copy for the system:\n\n```file:/etc/orc-nope.txt\nx\n```"
+          : "FINISHED: wrote poly.txt.\nNOT CHECKED: nothing";
+      if (/hlong/.test(input)) {
+        if (step > 12)
+          return "FINISHED: all twelve modules are written and were run.\nNOT CHECKED: nothing";
+        const body = Array.from(
+          { length: 60 },
+          (_, i) =>
+            `def f${step}_${i}(rows):\n    return [r for r in rows if r % ${i + 2} == ${step}]`,
+        ).join("\n");
+        // (a long output was saved: one step reads a range of it instead of running the command again)
+        const saved = /saved: READ: (\S+step\d+-\d+\.txt) \d+-\d+/.exec(whole)?.[1];
+        return [
+          `Step ${step}: write mod_${step}.py and run it over the rows.`,
+          `KEEP: mod_${step}.py exports f${step}_0 … f${step}_59 and was written in step ${step}`,
+          "",
+          `\`\`\`file:src/mod_${step}.py`,
+          body,
+          "```",
+          "",
+          "```bash",
+          `python3 -c "for i in range(400): print('step ${step} row', i, 'x' * 40)"`,
+          "```",
+          ...(step === 3 && saved ? ["", `READ: ${saved} 100-102`] : []),
+        ].join("\n");
+      }
       if (/hmangle/.test(input))
         return step === 1 ? "Run `echo __init__ {a,b} done` now." : "FINISHED: Echoed.";
       if (/retryok/.test(input)) return "FINISHED: Got through.";
       if (/retryfail/.test(input))
-        return /SUMMARY v/.test(whole) ? "FINISHED: Resumed fine." : "Run echo one.";
+        return /\n1\. Run echo one\./.test(whole) ? "FINISHED: Resumed fine." : "Run echo one.";
       if (/emptyreply/.test(input)) return "FINISHED: After an empty reply.";
       if (/liftjob/.test(input)) return step === 1 ? LIFT_THINK : "FINISHED: Lifted.";
       if (/nobody/.test(input))
@@ -1260,7 +1658,7 @@ function answer(role: string, whole: string, instructions = ""): string | number
       if (/pathcheck/.test(input))
         return step === 1 ? "Run echo PATHIS $PATH" : "FINISHED: Path seen.";
       if (/again/.test(input)) return "Run echo same once more.";
-      if (/steps/.test(input)) return `Run echo step ${step}.`;
+      if (/steps/.test(input)) return `Run touch step-${step}.txt now.`;
       if (/nothing/.test(input)) return "I think we should consider things carefully.";
       if (/hslow/.test(input)) return "Run sleep 30.";
       if (/hask|hro/.test(input))
@@ -1271,8 +1669,6 @@ function answer(role: string, whole: string, instructions = ""): string | number
       return "FINISHED: Nothing to do.";
     case "translate":
       if (/h503/.test(input)) return 503;
-      if (/file block: hfin\.txt/.test(input)) return "WRITE: hfin.txt";
-      if (/command block C1/.test(input) && /Count the lines/.test(input)) return "RUN: C1";
       // (a chat page's rendering of the copy: the dunder as bold, the braces gone)
       if (/echo __init__/.test(input)) return "RUN: echo **init** a,b done";
       if (/Read it again, part (\d)/.test(input))
@@ -1288,7 +1684,8 @@ function answer(role: string, whole: string, instructions = ""): string | number
       if (/replace the return line/.test(input))
         return 'REPLACE: mathx.py\n<<<\nreturn a + b\n===\nreturn a + b  # sum\n>>>\nSEARCH: "def add" IN .\nLIST: .';
       if (/echo same/.test(input)) return "RUN: echo same";
-      if (/echo step/.test(input)) return `RUN: echo step ${/echo step (\d+)/.exec(input)?.[1]}`;
+      if (/touch step-/.test(input))
+        return `RUN: touch step-${/touch step-(\d+)/.exec(input)?.[1]}.txt`;
       if (/sleep 30/.test(input)) return "RUN: sleep 30";
       if (/notes\.txt/.test(input)) return "WRITE: notes.txt\n<<<\nhello\n>>>\nRUN: echo hi";
       return "NONE";
@@ -1412,6 +1809,8 @@ const CAPS = {
   attempts: 2,
   replans: 3,
   steps: 4,
+  noProgressSteps: 3,
+  lookSteps: 2,
   modelCalls: 30,
   workerCalls: 12,
   workerMs: 20_000,
@@ -1457,7 +1856,18 @@ type Turn = {
     workerCalls: number;
     steps: number;
     roles: Record<string, { calls: number; maxPromptChars: number }>;
-    finish?: { requirements: number; open: number; code: number; followUps: number };
+    workerMaxInputTokens: number;
+    finish?: {
+      requirements: number;
+      open: number;
+      code: number;
+      followUps: number;
+      reviewed?: boolean;
+      passed?: number;
+    };
+    handoffs?: number;
+    direct?: number;
+    refused?: number;
   };
 };
 type Msg = {
@@ -1689,10 +2099,11 @@ check(
   `the turn records what it cost: 9 model calls = planner + 3 workers x 2 + the finish check + final (${JSON.stringify(turn.orchestration)})`,
 );
 check(
-  turn.orchestration?.finish?.requirements === 1 &&
+  turn.orchestration?.finish?.reviewed === true &&
+    turn.orchestration.finish.requirements === 0 &&
     turn.orchestration.finish.open === 0 &&
     turn.orchestration.finish.followUps === 0,
-  "and what the finish check found: every requirement shown met, no follow-up task",
+  "and what the finish check came to: a split job is reviewed, the reviewer named nothing the evidence does not show, no fix task",
 );
 const exSeen = seen.slice();
 check(
@@ -1706,10 +2117,15 @@ check(
   /THE REQUEST, word for word:\n"""\nmulti: make a tiny module with a test and run it\n"""/.test(
     exSeen[1].input,
   ) &&
-    /RECORDED, files changed:\n- f-\d+\.txt \(add, /.test(exSeen[1].input) &&
-    /RECORDED, commands run[^\n]*\n- ok: python3 check\.py Create mathxpy/.test(exSeen[1].input) &&
-    /CLAIMED \(not evidence\):\n- finished/.test(exSeen[1].input),
-  "the finish check reads the request word for word against what was recorded; what the workers say is marked as a claim",
+    /EVIDENCE, files changed:\n- f-\d+\.txt \(add, /.test(exSeen[1].input) &&
+    /EVIDENCE, commands run[^\n]*\n- exit 0: python3 check\.py Create mathxpy[^\n]*\n    \| out/.test(
+      exSeen[1].input,
+    ) &&
+    /SETTLED BY CODE[^\n]*\n- nothing was written outside the working folder[^\n]*\n- the last recorded command exited 0/.test(
+      exSeen[1].input,
+    ) &&
+    !/CLAIMED|finished "/.test(exSeen[1].input),
+  "the reviewer reads the request word for word against the evidence: each command with its exit code and the end of its output, the files, what code settled; nothing in the workers' own words",
 );
 check(
   exSeen.every(
@@ -1747,8 +2163,10 @@ check(
 );
 check(!/STATUS:/.test(last(turn)), "without its STATUS line");
 check(
-  seen.map((s) => s.role).join(",") === "planner,review",
-  "two plain calls: the planner and the finish check",
+  seen.map((s) => s.role).join(",") === "planner" &&
+    turn.orchestration?.finish?.reviewed === false &&
+    turn.orchestration.modelCalls === 3,
+  "one plain call, the planner: a job one worker did whole, ran, and reports nothing unchecked about gets no reviewer (3 model calls: planner + the worker's 2; it was 4 with the review)",
 );
 check(
   /GOAL: multi: make a tiny module/.test(seen[0].input) &&
@@ -2079,9 +2497,8 @@ check(
   "SEARCH and LIST answer",
 );
 check(
-  seen.map((s) => s.role).join(",") ===
-    "think,translate,summarize,think,translate,summarize,think,review",
-  "three chats per step: think, translate, summarize; and one for the finish check before the answer",
+  seen.map((s) => s.role).join(",") === "think,translate,think,translate,think",
+  "per step a think, and a translate only because these replies give their actions in prose; no call to summarize a step, and no reviewer for a job that ran its result and names nothing unchecked",
 );
 check(
   seen.every(
@@ -2092,13 +2509,15 @@ check(
   ) && new Set(seen.map((s) => s.session)).size === seen.length,
   "every call is a single-message request with its own session key",
 );
+const within = (s: Seen) =>
+  s.instructions.length + s.input.length <= (s.role === "think" ? THINK_BUDGET : PROMPT_BUDGET);
 check(
-  seen.every((s) => s.instructions.length + s.input.length <= PROMPT_BUDGET),
-  `every prompt is within the budget (largest ${Math.max(...seen.map((s) => s.instructions.length + s.input.length))} <= ${PROMPT_BUDGET})`,
+  seen.every(within),
+  `every prompt is within its budget (largest think ${Math.max(...seen.filter((s) => s.role === "think").map((s) => s.instructions.length + s.input.length))} <= ${THINK_BUDGET}, largest other ${Math.max(...seen.filter((s) => s.role !== "think").map((s) => s.instructions.length + s.input.length))} <= ${PROMPT_BUDGET})`,
 );
 const tr = seen.filter((s) => s.role === "translate");
 check(
-  tr.every((s) => !s.input.includes("ZEBRA-GOAL") && !s.input.includes("SUMMARY")),
+  tr.every((s) => !s.input.includes("ZEBRA-GOAL") && !s.input.includes("MEMORY")),
   "translate sees only the plan in words, the folder and the platform",
 );
 check(
@@ -2108,28 +2527,44 @@ check(
 );
 const th2 = seen.filter((s) => s.role === "think")[1].input;
 check(
-  /SUMMARY SO FAR:\nSUMMARY v1: mathx\.py holds add\(\)/.test(th2) &&
+  /MEMORY:\nSTEPS \(recorded by code[^\n]*\n1\. First create mathx\.py with this content: → WRITE: mathx\.py \(2 lines\): ok; RUN: python3 -c [^\n]*: ok "5"; READ: mathx\.py 1-2: ok\n/.test(
+    th2,
+  ) &&
     /LAST STEP RESULTS:\nWRITE: mathx\.py \(2 lines\)\n\[created mathx\.py, 2 lines\]/.test(th2) &&
     /RUN: python3 [^\n]*\n5\n/.test(th2),
-  "the next think gets the summary and the last step's results, nothing else",
+  "the next think gets the memory code kept (one line for the step: what was meant, each action and how it ended) and the last step's results",
 );
-check(!th2.includes("First create mathx.py"), "not the earlier think's own words");
-const sm = seen.filter((s) => s.role === "summarize")[1].input;
 check(
-  /PREVIOUS SUMMARY:\nSUMMARY v1/.test(sm) &&
-    /REPLACE: mathx\.py\n\[updated mathx\.py, 2 lines\]/.test(sm),
-  "summarize folds the step into the previous summary",
+  /PINNED FILES:\n--- mathx\.py \(all 2 lines, as on disk now\) ---\n1\| def add\(a, b\):\n2\| {5}return a \+ b\n/.test(
+    th2,
+  ),
+  "and the file it wrote, pinned as it is on disk, with line numbers: nothing has to be read back",
+);
+check(!th2.includes("```python"), "not the earlier think's own text");
+const th3 = seen.filter((s) => s.role === "think")[2].input;
+check(
+  /2\. Now replace the return line[^\n]* → REPLACE: mathx\.py: ok; SEARCH: def add IN \.: ok; LIST: \.: ok/.test(
+    th3,
+  ) && /2\| {5}return a \+ b {2}# sum\n/.test(th3),
+  "after the REPLACE the pin shows the changed line, and the log has the step",
+);
+check(
+  /This is step 3\. Left in this turn: \d+ model calls, \d+ minutes?\./.test(th3),
+  "a think is told what the turn has left (calls and minutes), not a count of steps",
 );
 rec = stored(hy.id);
 check(
   rec.summary.length <= SUMMARY_LIMIT &&
-    rec.summary.startsWith("SUMMARY v2") &&
+    /^STEPS \(recorded by code/.test(rec.summary) &&
     /was answered: Created mathx\.py/.test(rec.summary),
-  `the stored summary is cut to its bound (${rec.summary.length} <= ${SUMMARY_LIMIT}) and ends with the answer given`,
+  `the stored summary is the memory as text, within its bound (${rec.summary.length} <= ${SUMMARY_LIMIT}), and ends with the answer given`,
 );
 check(
-  turn.orchestration?.modelCalls === 8 && turn.orchestration.steps === 3,
-  "8 model calls over 3 steps (the finish check is the eighth)",
+  turn.orchestration?.modelCalls === 5 &&
+    turn.orchestration.steps === 3 &&
+    turn.orchestration.finish?.reviewed === false &&
+    turn.orchestration.finish.code === 0,
+  "5 model calls over 3 steps (it was 8: a summarize call per step and a reviewer are gone)",
 );
 lines = fake();
 const execs = lines.filter((l) => l.exec).map((l) => l.exec!);
@@ -2204,9 +2639,12 @@ turn = await turnDone(hy.id);
 check(
   turn.status === "completed" &&
     seen.length === 1 &&
-    /SUMMARY SO FAR:\nSUMMARY v2/.test(seen[0].input) &&
+    /MEMORY:\nBEFORE THIS JOB:\nThe request "module ZEBRA-GOAL[^\n]*was answered: Created mathx\.py/.test(
+      seen[0].input,
+    ) &&
+    !/PINNED FILES|STEPS \(recorded/.test(seen[0].input) &&
     /GOAL:\nanything else\?/.test(seen[0].input),
-  "the next turn's first think gets the stored summary and the new message",
+  "the next turn's first think gets what the last job came to and the new message; that job's log and pins are gone",
 );
 
 log("hyperexperimental: a conversation moved here starts from its hand-over");
@@ -2219,8 +2657,9 @@ await say(hh.id, "anything else?", {
 });
 turn = await turnDone(hh.id);
 check(
-  turn.status === "completed" && /SUMMARY SO FAR:\nHANDOVER-QUUX/.test(seen[0]?.input ?? ""),
-  "its first think gets the hand-over as the summary so far",
+  turn.status === "completed" &&
+    /MEMORY:\nBEFORE THIS JOB:\nHANDOVER-QUUX/.test(seen[0]?.input ?? ""),
+  "its first think gets the hand-over as what came before",
 );
 const typedItem = turn.items[0] as { type: string; content?: { text: string }[] };
 check(
@@ -2238,12 +2677,29 @@ await say(ag.id, "again and again");
 turn = await turnDone(ag.id);
 check(
   turn.status === "completed" &&
-    /^Stopped: the same step came back three times in a row\./.test(last(turn)),
-  "the same step three times: stopped with a plain message",
+    /^Stopped: 3 steps in a row changed no file and ran nothing new, so the job was not moving\./.test(
+      last(turn),
+    ) &&
+    /Where things stand:\n\nSTEPS \(recorded by code[^\n]*\n1\. Run echo same once more\. → RUN: echo same: ok\n2\. [^\n]*a repeat of step 1, not run/.test(
+      last(turn),
+    ),
+  `a job that is circling stops early, with a plain message and what was done (${last(turn).split("\n")[0]})`,
 );
 check(
-  turn.items.filter((i) => i.type === "commandExecution").length === 2,
-  "(it ran twice, not the third time)",
+  turn.items.filter((i) => i.type === "commandExecution").length === 1 &&
+    turn.orchestration?.refused === 2 &&
+    turn.orchestration.steps === 3,
+  "the same look with nothing changed in between ran once: the repeats were answered from memory",
+);
+const agThinks = seen.filter((s) => s.role === "think" && /again and again/.test(s.input));
+check(
+  /LAST STEP RESULTS:\nRUN: echo same\n\(not run again: the same as in step 1, and nothing has changed since\) It came to: ok, 1 line, starting: same/.test(
+    agThinks[2]?.input ?? "",
+  ) &&
+    /\(recorded\) The last 2 steps only looked\. This step must write a file, make a change or run something, or reply BLOCKED:/.test(
+      agThinks[2]?.input ?? "",
+    ),
+  "the think is told the earlier result instead, and after the look limit that the next step must act or say what blocks it",
 );
 const sp = await start("hyperexperimental");
 await say(sp.id, "steps without end");
@@ -2251,7 +2707,7 @@ turn = await turnDone(sp.id);
 check(
   /^Stopped after 4 steps, the limit for one message\./.test(last(turn)) &&
     turn.items.filter((i) => i.type === "commandExecution").length === 4,
-  "steps per turn",
+  "a job that keeps advancing is not stopped for circling: only the backstop on steps (4 here, 40 in the app), the calls or the minutes end it",
 );
 const no = await start("hyperexperimental");
 await say(no.id, "nothing concrete");
@@ -2336,7 +2792,7 @@ check(
 check(!fake().some((l) => l.exec && isRun(l.exec)), "and it never ran");
 check(
   seen.some(
-    (s) => s.role === "summarize" && s.input.includes("[the user declined to run this command]"),
+    (s) => s.role === "think" && s.input.includes("[the user declined to run this command]"),
   ),
   "the model is told it was declined",
 );
@@ -2466,7 +2922,7 @@ check(
 
 log("retries used up: the turn ends, the summary is kept, and continue resumes");
 seen.length = 0;
-faults.push({ role: "think", match: /retryfail[\s\S]*This is step 2;/, kind: 503, times: 99 });
+faults.push({ role: "think", match: /retryfail[\s\S]*This is step 2\./, kind: 503, times: 99 });
 const rf = await start("hyperexperimental");
 await say(rf.id, "retryfail: do the two things");
 turn = await turnDone(rf.id);
@@ -2481,14 +2937,15 @@ check(
   "step 2 never gets a model: after the waits the turn ends with the plain message, and says how to go on",
 );
 check(
-  seen.map((s) => s.role).join(",") === "think,translate,summarize,think,think,think,think" &&
+  seen.map((s) => s.role).join(",") === "think,translate,think,think,think,think" &&
     turn.items.some((i) => i.command === "echo one" && i.status === "completed"),
   "step 1 ran in full; step 2's think was tried four times",
 );
 rec = stored(rf.id);
 check(
-  rec.summary.startsWith("SUMMARY v") && rec.openGoal === "retryfail: do the two things",
-  "the thread keeps the summary and the request it did not finish",
+  /^STEPS \(recorded by code[^\n]*\n1\. Run echo one\. → RUN: echo one: ok/.test(rec.summary) &&
+    rec.openGoal === "retryfail: do the two things",
+  "the thread keeps the memory (the step that ran, as code recorded it) and the request it did not finish",
 );
 faults.length = 0;
 seen.length = 0;
@@ -2499,8 +2956,8 @@ check(
     last(turn) === "Resumed fine." &&
     seen.length === 1 &&
     /GOAL:\nretryfail: do the two things\n/.test(seen[0].input) &&
-    /SUMMARY SO FAR:\nSUMMARY v/.test(seen[0].input),
-  '"continue" is thought about with the unfinished request and the summary, not started over',
+    /MEMORY:\nSTEPS \(recorded by code[^\n]*\n1\. Run echo one\./.test(seen[0].input),
+  '"continue" is thought about with the unfinished request and the memory, not started over',
 );
 check(stored(rf.id).openGoal === null, "once finished, nothing is left open");
 
@@ -2607,18 +3064,22 @@ check(
   ),
   "and the script runs",
 );
-{
-  const t = seen.find((s) => s.role === "translate")!;
-  check(
-    !t.input.includes("import os") &&
-      !t.input.includes("NOT_EXPANDED") &&
-      t.input.includes("[file block: lifted.py (3 lines)") &&
-      t.input.includes("[file block: here.txt (2 lines)"),
-    "the translator never saw the bodies, only a marker for each",
-  );
-  const sum = seen.find((s) => s.role === "summarize")!;
-  check(!sum.input.includes("import os"), "nor did the summarizer");
-}
+check(
+  seen.map((s) => s.role).join(",") === "think,think" &&
+    turn.orchestration?.direct === 1 &&
+    turn.orchestration.modelCalls === 2,
+  "a reply made of a file block and a shell block needs no translator: its actions are read straight from it (2 model calls for the turn; it was 5)",
+);
+check(
+  /PINNED FILES:\n[\s\S]*--- lifted\.py \(all 3 lines, as on disk now\) ---\n1\| import os/.test(
+    seen[1].input,
+  ) &&
+    /RUN: python3 lifted\.py\nlifted \$HOME `date` <<</.test(seen[1].input) &&
+    /1\. Create the script and a data file, then run it\. → WRITE: lifted\.py \(3 lines\): ok; WRITE: here\.txt \(2 lines\): ok; RUN: python3 lifted\.py: ok "lifted \$HOME `date` <<<"/.test(
+      seen[1].input,
+    ),
+  "the next think has the files as written (pinned), the run's output, and the step in the log",
+);
 
 log("hyperexperimental: a WRITE with no content is refused and fed back");
 seen.length = 0;
@@ -2636,7 +3097,7 @@ check(
       "(refused, nothing was written or run) WRITE: big.py was not done: no content came with it. Give the whole file in a file block (```file:big.py)",
     ) &&
       th[1].input.includes(
-        "(not run, because of the refused action before it) RUN: python3 big.py",
+        "(not run, because the action before it was refused) RUN: python3 big.py",
       ),
     "the next think is told what was refused, how to give the file, and what did not run",
   );
@@ -2682,15 +3143,13 @@ check(
   "a plan that only inspects does not narrow the job: the one worker's task is the request itself, with its names",
 );
 check(
-  seen.map((s) => s.role).join(",") === "planner,review" &&
-    /RECORDED, found by code:\n- `out-xyz\.json`, named in the request, does not exist/.test(
-      seen[1].input,
-    ) &&
-    /- out-xyz\.json \(named in the request\): MISSING/.test(seen[1].input),
-  "the task ran and the file is not there: code finds that, and the finish check is told",
+  seen.map((s) => s.role).join(",") === "planner" && turn.orchestration?.finish?.reviewed === false,
+  "the task ran and the file is not there: code finds that by itself, and no reviewer is asked about a job that is not finished",
 );
 check(
-  /YOUR TASK \(2 of 2\): Settle the open points of the finish check/.test(ioBriefs[1]) &&
+  /YOUR TASK \(2 of 2\): Fix what the finish check found, and run the failing check again/.test(
+    ioBriefs[1],
+  ) &&
     /- \(recorded\) `out-xyz\.json`, named in the request, does not exist/.test(ioBriefs[1]) &&
     turn.orchestration?.finish?.code === 1 &&
     turn.orchestration.finish.followUps === 1,
@@ -2716,10 +3175,11 @@ check(
   turn.status === "completed" &&
     existsSync(path.join(work, "out-ok.json")) &&
     ioBriefs.length === 1 &&
-    seen.map((s) => s.role).join(",") === "planner,review" &&
+    seen.map((s) => s.role).join(",") === "planner" &&
     /^Done\.\n\nRESULT: finished/.test(last(turn)) &&
-    /- out-ok\.json \(add, 3 bytes\)\n {4}\| \[\]/.test(seen[1].input),
-  "when the worker makes the file, the turn ends as usual (the finish check saw the file and its first lines)",
+    turn.orchestration?.finish?.code === 0 &&
+    turn.orchestration.finish.followUps === 0,
+  "when the worker makes the file, the turn ends as usual: the code check finds nothing, and nothing more is spent",
 );
 
 log("experimental: a worker out of budget is stopped, and the plan revised");
@@ -2753,7 +3213,7 @@ const dc = await start("experimental");
 await say(dc.id, "decline to plan");
 turn = await turnDone(dc.id);
 check(
-  seen.map((s) => s.role).join(",") === "planner,planner,review" &&
+  seen.map((s) => s.role).join(",") === "planner,planner" &&
     !seen[0].instructions.includes("Your last reply said") &&
     seen[1].instructions.includes("Your last reply said you cannot run commands"),
   '"I can\'t run commands on your computer" is not a plan: one more call, with a firmer prompt',
@@ -2769,7 +3229,7 @@ const dc2 = await start("experimental");
 await say(dc2.id, "declinetwice please");
 turn = await turnDone(dc2.id);
 check(
-  seen.map((s) => s.role).join(",") === "planner,planner,review" &&
+  seen.map((s) => s.role).join(",") === "planner,planner" &&
     turn.status === "completed" &&
     turn.orchestration?.workers === 1 &&
     /RESULT: finished "declinetwice please"/.test(last(turn)) &&
@@ -2857,46 +3317,33 @@ log("experimental: a planner that respells a file name and a count");
       ),
     "the planner wrote 20 rows and rows_final.csv (so a task that names the real file is added by code); every brief still carries the request word for word and the exact file name and count",
   );
-  const rvIn = seen.find((x) => x.role === "review")?.input ?? "";
   check(
-    seen.map((x) => x.role).join(",") === "planner,review,final" &&
-      /found by code:\n- `exact_rows_final\.csv`, named in the request, does not exist; `rows_final\.csv` was made instead: a near miss/.test(
-        rvIn,
-      ) &&
-      /- rows_final\.csv \(add, 12 bytes\)\n {4}\| a near miss/.test(rvIn),
-    "at the end code flags the near-miss file by name, and the reviewer is given that with the file's first lines",
-  );
-  check(
-    /YOUR TASK \(4 of 4\): Settle the open points of the finish check/.test(pb[3]) &&
-      /- \(recorded\) `exact_rows_final\.csv`, named in the request, does not exist; `rows_final\.csv` was made instead/.test(
+    seen.map((x) => x.role).join(",") === "planner,final" &&
+      /YOUR TASK \(4 of 4\): Fix what the finish check found, and run the failing check again/.test(
         pb[3],
       ) &&
-      /- NOT SHOWN: 30 rows — CHECK: wc -l exact_rows_final\.csv/.test(pb[3]) &&
-      /- VIOLATED: write the rows to exact_rows_final\.csv — the record shows rows_final\.csv instead/.test(
+      /- \(recorded\) `exact_rows_final\.csv`, named in the request, does not exist; `rows_final\.csv` was made instead: a near miss/.test(
         pb[3],
       ) &&
-      !seen.some((x) => x.role === "revise"),
-    'the reviewer\'s "not shown" and "violated" become one follow-up task with their checks; no planner rewrites them',
+      /A file the request names must exist under exactly that name and place\./.test(pb[3]),
+    "at the end code flags the near-miss file by name; that goes straight to one fix task, written by code: no reviewer and no planner in between",
   );
   const ans = last(turn);
   check(
     turn.status === "completed" &&
       ans.startsWith(
         "**Not finished.** `exact_rows_final.csv`, named in the request, does not exist; `rows_final.csv` was made instead: a near miss, not the file asked for",
-      ) &&
-      /\*\*Finish check\.\*\* [^\n]*2 of 3 requirements were not shown met:\n- violated: write the rows to exact_rows_final\.csv[^\n]*\n- not shown: 30 rows \(CHECK: wc -l exact_rows_final\.csv\)\nA follow-up task ran for them and did not settle them \(wc is missing\): treat them as \*\*not verified\*\*\./.test(
-        ans,
       ),
-    `the answer says first what is not there, and then plainly what is not verified (${ans.split("\n")[0].slice(0, 70)}…)`,
+    `the fix task could not settle it, and the answer says first what is not there (${ans.split("\n")[0].slice(0, 70)}…)`,
   );
   check(
-    turn.orchestration?.finish?.requirements === 3 &&
-      turn.orchestration.finish.open === 2 &&
+    turn.orchestration?.finish?.requirements === 0 &&
+      turn.orchestration.finish.reviewed === false &&
       turn.orchestration.finish.code === 1 &&
       turn.orchestration.finish.followUps === 1 &&
       turn.orchestration.workers === 4 &&
-      turn.orchestration.roles.review.calls === 1,
-    "one reviewer call and one follow-up task, both counted on the turn",
+      turn.orchestration.roles.review === undefined,
+    "one fix task and no reviewer call, both counted on the turn",
   );
   check(
     stored(pp.id).notes.original === REQ &&
@@ -2929,10 +3376,10 @@ log("experimental: a small job is one task");
     "a planner that lists three tasks for a request that fits one brief, without saying why the job is large: one worker gets the whole request, the list only as a suggestion",
   );
   check(
-    seen.map((x) => x.role).join(",") === "planner,review" &&
-      turn.orchestration?.modelCalls === 4 &&
+    seen.map((x) => x.role).join(",") === "planner" &&
+      turn.orchestration?.modelCalls === 3 &&
       /^Done\.\n\nRESULT: finished/.test(last(turn)),
-    "it costs 4 model calls: the planner, the worker's 2 requests and the finish check (1 call, no follow-up); the worker's report is the answer",
+    "it costs 3 model calls: the planner and the worker's 2 requests (the code check is free, and a job one worker ran whole gets no reviewer); the worker's report is the answer",
   );
   seen.length = 0;
   from = fake().filter((l) => l.turnStart).length;
@@ -2953,19 +3400,146 @@ log("experimental: a small job is one task");
   );
 }
 
+log(
+  "experimental: the finish check: a reviewer only when it can add something, its checks run by code",
+);
 {
+  const briefsFrom = (from: number) =>
+    fake()
+      .filter((l) => l.turnStart)
+      .slice(from)
+      .map((l) => l.turnStart!.brief);
   const mb = await start("experimental");
-  await say(mb.id, "onejob mumble: rename the thing");
+  await say(mb.id, "onejob mumble UNCHECKED: rename the thing");
   turn = await turnDone(mb.id);
   check(
     turn.status === "completed" &&
       /RESULT: finished/.test(last(turn)) &&
       last(turn).endsWith(
-        "Finish check: not run (the reviewer's reply could not be read); nothing beyond the recorded commands was verified.",
+        "Finish check: not reviewed (the reviewer's reply could not be read); nothing beyond the recorded commands was verified.",
       ) &&
       turn.orchestration?.finish?.requirements === 0 &&
       turn.orchestration.workers === 1,
-    "a reviewer's reply that is cut off or in no form is not a review: the answer says the check did not run, and no task is made of it",
+    "a reviewer's reply that is cut off or in no form is not a review: the answer says so, and no task is made of it",
+  );
+  // The work names something as not checked: a reviewer is asked, and its commands are run by code.
+  seen.length = 0;
+  let from = fake().filter((l) => l.turnStart).length;
+  const cp = await start("experimental");
+  await say(cp.id, "onejob checkpass UNCHECKED: make the runner");
+  turn = await turnDone(cp.id);
+  const cpReview = seen.find((x) => x.role === "review")?.input ?? "";
+  check(
+    seen.map((x) => x.role).join(",") === "planner,review" &&
+      /THE WORK SAYS IT DID NOT CHECK:\na real keyboard interrupt \(a cancelled task was tested instead\)/.test(
+        cpReview,
+      ) &&
+      /EVIDENCE, commands run[^\n]*\n- exit 0: python3 check\.py onejob checkpass[^\n]*\n {4}\| out/.test(
+        cpReview,
+      ),
+    "a worker that names something under NOT CHECKED gets a reviewer, which is told what that was and given the commands with their exit codes and output",
+  );
+  const cpRows = turn.items
+    .filter((i) => i.type === "commandExecution")
+    .map((i) => i.command ?? "");
+  check(
+    briefsFrom(from).length === 1 &&
+      turn.orchestration?.workers === 1 &&
+      turn.orchestration.modelCalls === 4 &&
+      cpRows.includes("test -s README.md && echo readme ok") &&
+      cpRows.includes("printf 'a\\nb\\nc\\n' | wc -l | grep -q 3") &&
+      turn.orchestration.finish?.reviewed === true &&
+      turn.orchestration.finish.requirements === 2 &&
+      turn.orchestration.finish.passed === 2 &&
+      turn.orchestration.finish.open === 0 &&
+      turn.orchestration.finish.followUps === 0,
+    `the reviewer's two checks were run by code, as rows in the thread, and passed: no worker and no further model call (4 calls: planner, the worker's 2, the review)`,
+  );
+  check(
+    /RESULT: finished[\s\S]*\n\n\*\*Finish check\.\*\* 2 further checks were run on the result and passed:\n- the folder still holds its README: `test -s README\.md && echo readme ok`\n- the count is three: `printf [^\n]*`$/.test(
+      last(turn),
+    ),
+    "the answer says which checks were run and that they passed",
+  );
+  // A check that fails buys one bounded fix task, with the failing command and its output as the brief.
+  seen.length = 0;
+  from = fake().filter((l) => l.turnStart).length;
+  const cf = await start("experimental");
+  await say(cf.id, "onejob checkfail UNCHECKED FIXES fixedmark: make the runner");
+  turn = await turnDone(cf.id);
+  let fb2 = briefsFrom(from);
+  check(
+    fb2.length === 2 &&
+      /YOUR TASK \(2 of 2\): Fix what the finish check found, and run the failing check again\nAfter the work was reported done, this was found:\n- CHECK FAILED: the marker exists after the job\n {2}command: test -f fixedmark\.txt \|\| \{ echo fixedmark\.txt is missing; exit 1; \}\n {2}it printed: fixedmark\.txt is missing\n\[exit 1\]/.test(
+        fb2[1],
+      ) &&
+      /decide from the request whether the work or the check is wrong/.test(fb2[1]) &&
+      fb2[1].length <= BRIEF_BUDGET,
+    "a check that failed becomes one fix task: its brief is the failing command and what it printed",
+  );
+  check(
+    seen.map((x) => x.role).join(",") === "planner,review" &&
+      existsSync(path.join(work, "fixedmark.txt")) &&
+      turn.items.filter((i) => i.command?.startsWith("test -f fixedmark.txt")).length === 2 &&
+      turn.orchestration?.finish?.followUps === 1 &&
+      turn.orchestration.finish.passed === 1 &&
+      turn.orchestration.finish.open === 0 &&
+      turn.orchestration.modelCalls === 6 &&
+      /\*\*Finish check\.\*\* 1 further check was run on the result and passed:\n- the marker exists after the job: `test -f fixedmark\.txt[^\n]*` \(failed at first; passes after the fix\)$/.test(
+        last(turn),
+      ),
+    "after the fix the failing command is run again, by code, and passes: the answer says it failed at first (6 calls: planner, worker 2, review, fix task 2)",
+  );
+  from = fake().filter((l) => l.turnStart).length;
+  const cu = await start("experimental");
+  await say(cu.id, "onejob checkfail UNCHECKED UNSETTLED FIXES unsettledmark: make the runner");
+  turn = await turnDone(cu.id);
+  check(
+    briefsFrom(from).length === 2 &&
+      turn.orchestration?.finish?.open === 1 &&
+      /\*\*Finish check\.\*\* 1 check \*\*failed\*\*:\n- the marker exists after the job: `test -f unsettledmark\.txt[^\n]*` → unsettledmark\.txt is missing \[exit 1\]\nA fix task was run for it, and it still fails: treat this as \*\*not verified\*\* \(the check itself may be what is wrong\)\.$/.test(
+        last(turn),
+      ) &&
+      !seen.some((x) => x.role === "revise"),
+    "a fix task that does not settle it is not planned around: the answer says the check still fails and calls it not verified",
+  );
+  // With too little left for a fix that could finish, none is started.
+  {
+    const caps = backend.caps as { modelCalls: number };
+    const keep = caps.modelCalls;
+    caps.modelCalls = 8;
+    from = fake().filter((l) => l.turnStart).length;
+    const cb = await start("experimental");
+    await say(cb.id, "onejob checkfail UNCHECKED FIXES nevermark: make the runner");
+    turn = await turnDone(cb.id);
+    caps.modelCalls = keep;
+    check(
+      briefsFrom(from).length === 1 &&
+        turn.status === "completed" &&
+        turn.orchestration?.modelCalls === 4 &&
+        !existsSync(path.join(work, "nevermark.txt")) &&
+        /1 check \*\*failed\*\*:[\s\S]*\nNo fix task was run \(4 of this turn's 8 model calls are used; too little was left to start a fix that could finish\): treat this as \*\*not verified\*\*/.test(
+          last(turn),
+        ),
+      "with the budget nearly gone no fix is started: the answer reports the failed check as not verified",
+    );
+  }
+  // A reviewer's command is not run when it would change things, and a check that cannot run is not a failure.
+  from = fake().filter((l) => l.turnStart).length;
+  mkdirSync(path.join(work, "build"), { recursive: true });
+  const cx = await start("experimental");
+  await say(cx.id, "onejob checkunsafe UNCHECKED: make the runner");
+  turn = await turnDone(cx.id);
+  check(
+    briefsFrom(from).length === 1 &&
+      existsSync(path.join(work, "build")) &&
+      !turn.items.some((i) => /rm -rf build/.test(i.command ?? "")) &&
+      turn.orchestration?.finish?.open === 2 &&
+      turn.orchestration.finish.followUps === 0 &&
+      /\*\*Finish check\.\*\* \*\*Not verified\*\* \(the check could not be run\):\n- the build folder is clean: it would change things \(`rm`\), and a check only looks and runs\n- a tool nobody has: it could not be run \(exit 127\)/.test(
+        last(turn),
+      ),
+    "a reviewer's command that deletes is never run, and one whose tool is missing did not fail: both are reported as not verified, and no fix task is spent on them",
   );
 }
 
@@ -3074,57 +3648,49 @@ log("hyperexperimental: FINISHED is checked before it is the answer");
 {
   seen.length = 0;
   const hf = await start("hyperexperimental");
-  await say(hf.id, "hfinish: put 3 lines in hfin.txt");
+  await say(hf.id, "hfinish: put 4 lines in hfin.txt");
   turn = await turnDone(hf.id);
   check(
-    seen.map((x) => x.role).join(",") ===
-      "think,translate,summarize,think,review,think,translate,summarize,think",
-    `the first FINISHED goes to the finish check; what is open goes back to think (${seen.map((x) => x.role).join(",")})`,
+    seen.map((x) => x.role).join(",") === "think,think,review,think,think",
+    `nothing ran the file that was written, so the first FINISHED goes to a reviewer; its check is run by code, fails, and goes back to think (${seen.map((x) => x.role).join(",")})`,
   );
   const rvIn = seen.find((x) => x.role === "review")!.input;
   check(
-    /THE REQUEST, word for word:\n"""\nhfinish: put 3 lines in hfin\.txt\n"""\nMUST MATCH EXACTLY[^\n]*hfin\.txt \| 3 lines/.test(
-      rvIn,
-    ) &&
-      /- hfin\.txt \(add, 6 bytes\)\n {4}\| a\n {4}\| b\n {4}\| c/.test(rvIn) &&
-      /CLAIMED \(not evidence\):\n- wrote hfin\.txt\./.test(rvIn),
-    "the reviewer gets the request word for word, the file with its first lines, and the claim as a claim",
+    /THE REQUEST, word for word:\n"""\nhfinish: put 4 lines in hfin\.txt\n"""/.test(rvIn) &&
+      /- hfin\.txt \(add, exists, 6 bytes\)\n {4}\| a\n {4}\| b\n {4}\| c/.test(rvIn) &&
+      /EVIDENCE, commands run[^\n]*\n\(none recorded\)/.test(rvIn) &&
+      /SETTLED BY CODE[^\n]*\n- hfin\.txt exists under exactly that name/.test(rvIn),
+    "the reviewer gets the request word for word, the file with its first lines, that no command was run, and what code has settled",
   );
   const th3 = seen.filter((x) => x.role === "think")[2].input;
   check(
-    /LAST STEP RESULTS:\nYou said FINISHED\. Before the answer goes out, a reviewer read the request against what was recorded\. These points are open:\n- NOT SHOWN: hfin\.txt holds 3 lines — CHECK: wc -l hfin\.txt/.test(
+    /LAST STEP RESULTS:\nYou said FINISHED\. Before the answer went out it was checked, and this was found:\n- CHECK FAILED: hfin\.txt holds 4 lines\n {2}command: test "\$\(wc -l < hfin\.txt[^\n]*\n {2}it printed: hfin\.txt has 3 lines, not 4\n\[exit 1\]/.test(
       th3,
-    ) && /This is step 3; 1 step left after it\./.test(th3),
-    "the next think is told the open point and its check, and how few steps are left for it",
+    ) && /PINNED FILES:\n--- hfin\.txt \(all 3 lines/.test(th3),
+    "the next think is told the check that failed, with its command and what it printed (and still has the file pinned)",
   );
-  const trIn = seen.filter((x) => x.role === "translate")[1].input;
   const ran = turn.items.find(
-    (i) => i.type === "commandExecution" && /wc -l/.test(i.command ?? ""),
+    (i) => i.type === "commandExecution" && /__counted__/.test(i.command ?? ""),
   );
   check(
-    !trIn.includes("wc -l") &&
-      !trIn.includes("__counted__") &&
-      trIn.includes(
-        '[command block C1 (2 lines) is held by the executor; for it output only "RUN: C1"]',
-      ) &&
+    !seen.some((x) => x.role === "translate") &&
       ran?.command === "cd . && wc -l hfin.txt\necho __counted__ {a,b}" &&
-      /3 hfin\.txt\n__counted__/.test(ran.aggregatedOutput ?? ""),
-    "the check's shell block never passed through translate: it ran as one script, as the think step wrote it",
+      /4 hfin\.txt\n__counted__/.test(ran.aggregatedOutput ?? ""),
+    "the fix step's file block and shell block ran as the think step wrote them, with no translate call",
   );
   check(
     turn.status === "completed" &&
-      /^hfin\.txt has 3 lines, counted with wc -l\.\n\n\*\*Finish check\.\*\* [^\n]*1 of 2 requirements was not shown met:\n- not shown: hfin\.txt holds 3 lines \(CHECK: wc -l hfin\.txt\)\nMore steps were then run for it; the answer above says what was checked and what was not\.$/.test(
+      /^hfin\.txt has 4 lines, counted with wc -l\.\nNOT CHECKED: nothing\n\n\*\*Finish check\.\*\* 1 further check was run on the result and passed:\n- hfin\.txt holds 4 lines: `test [^\n]*` \(failed at first; passes after the fix\)$/.test(
         last(turn),
       ) &&
-      turn.orchestration?.finish?.open === 1 &&
+      turn.orchestration?.finish?.open === 0 &&
+      turn.orchestration.finish.passed === 1 &&
       turn.orchestration.finish.followUps === 1 &&
-      turn.orchestration.roles.review.calls === 1,
-    `the answer carries what the check left open and that more steps were run for it (${last(turn).split("\n")[0]})`,
+      turn.orchestration.roles.review.calls === 1 &&
+      turn.orchestration.modelCalls === 5,
+    `after the fix the failing check is run again by code and passes, and the answer says so (${last(turn).split("\n")[0]}); 5 model calls for the turn (it was 9)`,
   );
-  check(
-    seen.every((x) => x.instructions.length + x.input.length <= PROMPT_BUDGET),
-    "every prompt of the turn is within the budget",
-  );
+  check(seen.every(within), "every prompt of the turn is within its budget");
   seen.length = 0;
   const hl = await start("hyperexperimental");
   await say(hl.id, "hlooking");
@@ -3133,13 +3699,19 @@ log("hyperexperimental: FINISHED is checked before it is the answer");
     const th = seen.filter((x) => x.role === "think");
     check(
       turn.status === "completed" &&
-        th.length === 4 &&
+        th.length === 3 &&
         !/only looked/.test(th[1].input) &&
-        /LAST STEP RESULTS:\n\(recorded\) The last 2 steps only looked; nothing was written or run\. What a step reads is shown once/.test(
+        /\(recorded\) The last 2 steps only looked\. This step must write a file, make a change or run something, or reply BLOCKED: with what is missing\./.test(
           th[2].input,
         ) &&
-        /\(recorded\) The last 3 steps only looked/.test(th[3].input),
-      "after two steps that only read, the next think is told that nothing was written and that reading again will not help",
+        /PINNED FILES:\n--- README\.md \(all \d+ lines?, as on disk now\)/.test(th[2].input),
+      "after the look limit (2 here, 3 in the app) the think is told that the next step must act or say what blocks it; what it read with a command is pinned",
+    );
+    check(
+      /^\*\*Not finished\.\*\* README\.md is all there is; nothing here says what to write\.\n\nWhere things stand:\n\nSTEPS \(recorded by code/.test(
+        last(turn),
+      ) && stored(hl.id).openGoal === "hlooking",
+      "BLOCKED: ends the turn with what is missing and where things stand; the request stays open for the next message",
     );
   }
   seen.length = 0;
@@ -3149,8 +3721,226 @@ log("hyperexperimental: FINISHED is checked before it is the answer");
   check(
     turn.items.some(
       (i) => i.command === "echo __init__ {a,b} done" && /__init__/.test(i.aggregatedOutput ?? ""),
-    ) && seen.map((x) => x.role).join(",") === "think,translate,summarize,think",
-    "a one-line command the translator sent back with its marks lost runs as the think step wrote it (and a turn that changed nothing has no finish check)",
+    ) && seen.map((x) => x.role).join(",") === "think,translate,think",
+    "a one-line command given inside a sentence goes to the translator, and what it sent back with its marks lost runs as the think step wrote it (a turn that changed nothing has no finish check)",
+  );
+}
+
+// ---- what the second benchmark round asked for -----------------------------------------------------
+log("hyperexperimental: a write lands where the request says, and never outside the folder");
+{
+  seen.length = 0;
+  mkdirSync(path.join(work, "polysub"), { recursive: true });
+  const hp = await start("hyperexperimental");
+  await say(hp.id, `hpoly: write ${work}/polysub/poly.txt holding hi`);
+  turn = await turnDone(hp.id);
+  const th = seen.filter((x) => x.role === "think");
+  check(
+    turn.status === "completed" &&
+      readFileSync(path.join(work, "polysub", "poly.txt"), "utf8") === "hi\n" &&
+      !existsSync(path.join(work, "poly.txt")) &&
+      /WRITE: polysub\/poly\.txt \(1 lines\)\n\[created polysub\/poly\.txt, 1 lines\]\n\(the request names this file as polysub\/poly\.txt: it was written there, not at poly\.txt\)/.test(
+        th[1].input,
+      ),
+    "a file the step named by its bare name is written at the path the request gives for it, and the result says so",
+  );
+  check(
+    !existsSync("/etc/orc-nope.txt") &&
+      /WRITE: \/etc\/orc-nope\.txt \(1 lines\)\n\(refused, nothing was written\) \/etc\/orc-nope\.txt is outside the working folder [^\n]*, and the request does not name it\. Paths are relative to the working folder/.test(
+        th[1].input,
+      ) &&
+      turn.orchestration?.refused === 1 &&
+      !fake().some((l) => l.exec?.command.join(" ").includes("orc-nope")),
+    "a write outside the folder that the request does not name is refused before anything runs, with the reason",
+  );
+}
+
+log("hyperexperimental: a long job (twelve files, long outputs) stays within every budget");
+{
+  seen.length = 0;
+  const caps = backend.caps as { steps: number; modelCalls: number };
+  const keep = { ...caps };
+  caps.steps = 20;
+  caps.modelCalls = 60;
+  const hlj = await start("hyperexperimental");
+  await say(hlj.id, "hlong: write the twelve parts under src/ and run each");
+  turn = await turnDone(hlj.id, 60_000);
+  caps.steps = keep.steps;
+  caps.modelCalls = keep.modelCalls;
+  const th = seen.filter((x) => x.role === "think");
+  const size = (x: Seen) => x.instructions.length + x.input.length;
+  const largest = (role: string) => Math.max(0, ...seen.filter((x) => x.role === role).map(size));
+  check(
+    turn.status === "completed" &&
+      /^all twelve modules are written and were run\./.test(last(turn)) &&
+      th.length === 13 &&
+      existsSync(path.join(work, "src", "mod_12.py")),
+    `the job ran to its end: twelve steps and FINISHED (${last(turn).split("\n")[0]})`,
+  );
+  check(
+    largest("think") <= THINK_BUDGET &&
+      seen.filter((x) => x.role !== "think").every((x) => size(x) <= PROMPT_BUDGET),
+    `the largest prompt of each role stayed within its budget for the whole run: think ${largest("think")} <= ${THINK_BUDGET}, fold ${largest("summarize")} <= ${PROMPT_BUDGET}`,
+  );
+  const pinHeads = th.map((x) => (x.input.match(/^--- src\/mod_\d+\.py[ :]/gm) ?? []).length);
+  check(
+    Math.max(...pinHeads) <= MAX_PINS &&
+      /--- src\/mod_11\.py \(lines 1-\d+ of 120, as on disk now; for others: READ: src\/mod_11\.py <first>-<last>\) ---\n {2}1\| def f11_0\(rows\):/.test(
+        th[11].input,
+      ) &&
+      /^--- src\/mod_10\.py: pinned, no room to show it this step/m.test(th[11].input) &&
+      !/^--- src\/mod_9\.py/m.test(th[11].input),
+    `the pinned files rotate instead of growing: never more than ${MAX_PINS} in a prompt (${pinHeads.join("")}), the newest first in line for the room`,
+  );
+  const memOf = (x: Seen) =>
+    /\n\nMEMORY:\n([\s\S]*?)\n\n(?:PINNED FILES|LAST STEP RESULTS):/.exec(x.input)?.[1] ?? "";
+  check(
+    th.every((x) => memOf(x).length <= MEMORY_LIMIT) &&
+      /EARLIER STEPS \(\d+, folded\):\nSUMMARY v\d+/.test(memOf(th[12])) &&
+      /KEPT FACTS[^\n]*\n(?:- [^\n]*\n)*- mod_12\.py exports f12_0/.test(memOf(th[12])) &&
+      /\n12\. Step 12: write mod_12\.py and run it over the rows\. → WRITE: src\/mod_12\.py \(120 lines\): ok; RUN: python3 -c [^\n]*: ok "step 12 row 399 x+"/.test(
+        memOf(th[12]),
+      ),
+    `the memory stays within its bound in every prompt (largest ${Math.max(...th.map((x) => memOf(x).length))} <= ${MEMORY_LIMIT}): the latest steps by code, the older ones folded, the facts the think step asked to keep`,
+  );
+  const gap =
+    /\[… lines (\d+)-(\d+) of 400 are not shown; the whole output is saved: READ: (\S+step2-2\.txt) \d+-\d+ …\]/.exec(
+      th[2].input,
+    );
+  check(
+    !!gap &&
+      readFileSync(gap[3], "utf8").split("\n").length === 401 &&
+      /step 2 row 0 x+\n/.test(th[2].input) &&
+      /step 2 row 399 x+/.test(th[2].input),
+    "a long output is shown once, as its first and last lines, with the lines left out and the file that holds all of it",
+  );
+  check(
+    new RegExp(
+      `READ: ${gap?.[3].replace(/[.*+?^$\{\}()|[\]\\]/g, "\\$&")} 100-102\\nstep 2 row 99 x+\\nstep 2 row 100 x+\\nstep 2 row 101 x+\\n\\[lines 100-102 of 400\\]`,
+    ).test(th[3].input),
+    "and a later step reads a range of the saved output instead of running the command again",
+  );
+  const folds = seen.filter((x) => x.role === "summarize").length;
+  check(
+    !seen.some((x) => x.role === "translate" || x.role === "review") &&
+      turn.orchestration?.direct === 12 &&
+      folds >= 1 &&
+      folds <= 4 &&
+      turn.orchestration.modelCalls === 13 + folds,
+    `twelve steps cost ${turn.orchestration?.modelCalls} model calls (13 think + ${folds} folds of the log; three chats a step and a review made it 38): no translate call, no summary per step, no reviewer for a job that ran its results`,
+  );
+}
+
+log("experimental: a worker whose context fills up hands over to a fresh one");
+{
+  const briefsFrom = (from: number) =>
+    fake()
+      .filter((l) => l.turnStart)
+      .slice(from)
+      .map((l) => l.turnStart!.brief);
+  seen.length = 0;
+  let from = fake().filter((l) => l.turnStart).length;
+  let tracesFrom = traces.length;
+  const lj = await start("experimental");
+  await say(lj.id, "onejob GROWS 3: build the long thing, part by part");
+  turn = await turnDone(lj.id, 60_000);
+  let lb = briefsFrom(from);
+  const budget = backend.caps.workerContextTokens;
+  check(
+    turn.status === "completed" &&
+      lb.length === 7 &&
+      [1, 3, 5].every((i) => lb[i].startsWith("Stop here: this thread's context is nearly full")) &&
+      turn.orchestration?.handoffs === 3 &&
+      turn.orchestration.workers === 4,
+    "a long job in one worker: three times its requests reach the context budget, it is stopped and asked for its hand-over on the same thread, and a fresh worker goes on",
+  );
+  const workerTraces = traces.slice(tracesFrom).filter((t) => t.type === "worker");
+  check(
+    workerTraces.every((t) => t.type === "worker" && t.maxInputTokens < budget + 3000) &&
+      (turn.orchestration?.workerMaxInputTokens ?? 1e9) < budget + 3000 &&
+      workerTraces
+        .slice(0, 3)
+        .every((t) => t.type === "worker" && t.status === "handed over (context)"),
+    `no worker's request grew past its budget by more than the step that crossed it (largest ${turn.orchestration?.workerMaxInputTokens} tokens, budget ${budget}): the bridge never has to cut a worker's thread`,
+  );
+  check(
+    [2, 4, 6].every(
+      (i, n) =>
+        new RegExp(
+          `YOUR TASK \\(1 of 1\\): onejob GROWS 3: build the long thing, part by part\\n\\(recorded\\) An earlier worker on this task was stopped when its context was nearly full \\(hand-over ${n + 1}\\)\\. Its report:\\nRESULT: the first half is written and its check passed`,
+        ).test(lb[i]) &&
+        /BLOCKERS: LEFT TO DO: write the second half; the format is one row per line, id first/.test(
+          lb[i],
+        ) &&
+        /Go on from the files as they are now\. Do not redo what is finished/.test(lb[i]),
+    ) && lb.filter((_, i) => i % 2 === 0).every((b) => b.length <= BRIEF_BUDGET),
+    `each fresh worker's brief carries the hand-over in the stopped worker's own words (what is done, what is left, what it learned), within the brief's budget (largest ${Math.max(...lb.filter((_, i) => i % 2 === 0).map((b) => b.length))} <= ${BRIEF_BUDGET})`,
+  );
+  check(
+    seen.map((x) => x.role).join(",") === "planner" &&
+      /RESULT: finished "onejob GROWS 3: build the long thing, part by part/.test(last(turn)) &&
+      notesText(stored(lj.id).notes).length <= NOTES_LIMIT &&
+      stored(lj.id).notes.done.length === 4,
+    "no planner call was spent on it: the job stayed one task, carried by the notes and the hand-overs; the last worker's report is the answer",
+  );
+  // A context that fills up twice with nothing changed is a task too big for a worker: the planner splits it.
+  seen.length = 0;
+  from = fake().filter((l) => l.turnStart).length;
+  const dj = await start("experimental");
+  await say(dj.id, "onejob GROWS DRY: read everything first");
+  turn = await turnDone(dj.id, 60_000);
+  lb = briefsFrom(from);
+  const dryRevise = seen.find((x) => x.role === "revise")?.input ?? "";
+  check(
+    turn.status === "completed" &&
+      seen.map((x) => x.role).join(",") === "planner,revise,review,final" &&
+      /the worker stopped: its context filled up 2 times without the task finishing: the task is too big for one worker/.test(
+        dryRevise,
+      ) &&
+      /YOUR TASK \(1 of 2\): Do the thing another way/.test(lb.at(-2) ?? ""),
+    "a worker that fills its context twice without changing anything is not handed over a third time: the planner is asked to split what is left",
+  );
+}
+
+log("experimental: what no plan gets past is not planned around");
+{
+  seen.length = 0;
+  let from = fake().filter((l) => l.turnStart).length;
+  const eb = await start("experimental");
+  await say(eb.id, "onejob ENVBLOCK MAKES envq.sparql: write the query to envq.sparql and run it");
+  turn = await turnDone(eb.id);
+  check(
+    turn.status === "completed" &&
+      seen.map((x) => x.role).join(",") === "planner,review" &&
+      fake().filter((l) => l.turnStart).length === from + 1 &&
+      turn.orchestration?.modelCalls === 4 &&
+      turn.items.some((i) =>
+        /^Part of this cannot be run here \(cannot execute: arq missing\)\. Going on without it: it will be reported as not verified\.$/.test(
+          i.text ?? "",
+        ),
+      ) &&
+      /NOT CHECKED: running the query: no SPARQL engine is installed/.test(last(turn)) &&
+      !/^\*\*Not finished/.test(last(turn)),
+    "a worker that made the file and reports PARTIAL only because a tool is missing is not sent back to the planner: 4 model calls, and the answer says what was not checked (the benchmark's SPARQL job spent 3 revisions and 26 more calls here)",
+  );
+  check(
+    /THE WORK SAYS IT DID NOT CHECK:\nrunning the query: no SPARQL engine is installed/.test(
+      seen[1].input,
+    ),
+    "the reviewer is told what the work could not check",
+  );
+  seen.length = 0;
+  from = fake().filter((l) => l.turnStart).length;
+  const sj = await start("experimental");
+  await say(sj.id, "stalejob BLOCKME MAKES stale.json: make stale.json and verify it");
+  turn = await turnDone(sj.id);
+  check(
+    turn.status === "completed" &&
+      seen.map((x) => x.role).join(",") === "planner,revise,review,final" &&
+      fake().filter((l) => l.turnStart).length === from + 2 &&
+      turn.items.some((i) => /^The revised plan changed nothing \(/.test(i.text ?? "")) &&
+      stored(sj.id).notes.pending.length === 0,
+    "a revised plan whose first task changes nothing and does not finish is not revised again, and its remaining tasks are not run: one revision, two workers",
   );
 }
 
