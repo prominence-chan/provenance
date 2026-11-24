@@ -1,7 +1,7 @@
 #!/bin/sh
 # poll.sh: block up to ~170 s for a new result line; print it (or one dot line)
 B=/private/tmp/claude-501/-Users-yufan/9e37ff0b-60f0-4144-b9a3-f4cc70335caf/scratchpad/bench-luna-v2
-P=': (PASS|FAIL) |budget|REVIEW|done|STOP|suspicious: [1-9]|COULD NOT|INVALID|WAIT|signed out'
+P=': (PASS|FAIL) |budget|REVIEW|done|STOP|suspicious: [1-9]|COULD NOT|INVALID|signed out|battery at'
 c0=$(cat $B/.pollcount 2>/dev/null || echo 0); n=0
 while [ "$(grep -cE "$P" $B/driver.log)" = "$c0" ] && [ $n -lt 34 ] && pgrep -f bench-luna-v2/harness/driver.py >/dev/null; do sleep 5; n=$((n+1)); done
 c1=$(grep -cE "$P" $B/driver.log); echo $c1 > $B/.pollcount
