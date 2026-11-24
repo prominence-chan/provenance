@@ -160,8 +160,9 @@ export const DEFAULT_CAPS: Caps = {
 /**
  * Caps set from the environment (the app passes its own): PROVENANCE_ORC_RETRY_S="5,20,60,120"
  * (seconds before each retry; "0" or "off" for none), PROVENANCE_ORC_WORKER_CALLS,
- * PROVENANCE_ORC_WORKER_MINUTES, PROVENANCE_ORC_TURN_MINUTES, PROVENANCE_ORC_WORKER_TOKENS (a
- * worker's context budget, input tokens). Anything unreadable is ignored.
+ * PROVENANCE_ORC_WORKER_MINUTES, PROVENANCE_ORC_TURN_MINUTES, PROVENANCE_ORC_MODEL_CALLS (a
+ * turn's model calls), PROVENANCE_ORC_WORKER_TOKENS (a worker's context budget, input tokens).
+ * Anything unreadable is ignored.
  */
 export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const out: Partial<Caps> = {};
@@ -182,6 +183,8 @@ export function capsFromEnv(env: NodeJS.ProcessEnv): Partial<Caps> {
   const tokens = Number(env.PROVENANCE_ORC_WORKER_TOKENS);
   if (Number.isInteger(tokens) && tokens >= 2000 && tokens <= 1_000_000)
     out.workerContextTokens = tokens;
+  const all = Number(env.PROVENANCE_ORC_MODEL_CALLS);
+  if (Number.isInteger(all) && all >= 5 && all <= 5000) out.modelCalls = all;
   const turn = Number(env.PROVENANCE_ORC_TURN_MINUTES);
   if (Number.isFinite(turn) && turn >= 1 && turn <= 600) out.turnMs = Math.round(turn * 60_000);
   return out;

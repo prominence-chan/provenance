@@ -535,14 +535,21 @@ log("router errors: which are worth waiting for; caps");
     PROVENANCE_ORC_RETRY_S: "1, 2.5",
     PROVENANCE_ORC_WORKER_CALLS: "9",
     PROVENANCE_ORC_WORKER_MINUTES: "3",
+    PROVENANCE_ORC_WORKER_TOKENS: "9000",
+    PROVENANCE_ORC_MODEL_CALLS: "200",
+    PROVENANCE_ORC_TURN_MINUTES: "90",
   });
   check(
     c.retryDelaysMs?.join() === "1000,2500" &&
       c.workerCalls === 9 &&
       c.workerMs === 180_000 &&
+      c.workerContextTokens === 9000 &&
+      c.modelCalls === 200 &&
+      c.turnMs === 90 * 60_000 &&
+      capsFromEnv({ PROVENANCE_ORC_WORKER_TOKENS: "12" }).workerContextTokens === undefined &&
       capsFromEnv({ PROVENANCE_ORC_RETRY_S: "off" }).retryDelaysMs?.length === 0 &&
       Object.keys(capsFromEnv({ PROVENANCE_ORC_RETRY_S: "soon" })).length === 0,
-    "the waits and the worker budget can be set from the environment; nonsense is ignored",
+    "the waits, the worker's budgets (requests, minutes, context) and the turn's (model calls, minutes) can be set from the environment; nonsense is ignored",
   );
 }
 

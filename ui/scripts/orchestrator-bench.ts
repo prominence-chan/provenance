@@ -24,7 +24,11 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { AppServerProcess } from "../server/orchestrator/appserver.ts";
-import { OrchestratorBackend, type TraceEvent } from "../server/orchestrator/backend.ts";
+import {
+  capsFromEnv,
+  OrchestratorBackend,
+  type TraceEvent,
+} from "../server/orchestrator/backend.ts";
 import { makeCallModel } from "../server/orchestrator/router.ts";
 
 const mode = process.argv[2];
@@ -206,6 +210,10 @@ const backend = new OrchestratorBackend({
   dir: path.join(out, "data"),
   appServer: () => appServer,
   callModel: makeCallModel(() => ({ url: routerUrl, token })),
+  // The app's own way to set the guards: PROVENANCE_ORC_TURN_MINUTES, PROVENANCE_ORC_MODEL_CALLS,
+  // PROVENANCE_ORC_WORKER_TOKENS … (backend.ts capsFromEnv). A long job needs the first two
+  // raised: the defaults are 22 minutes and 80 model calls for one message.
+  caps: capsFromEnv(process.env),
   log: () => {},
   trace,
 });
