@@ -4,16 +4,30 @@
 // format exactly: numbering, bullets, bold, code fences, lowercase keywords and stray prose are
 // all tolerated, and what can't be read is reported instead of thrown.
 
+import { parseNeeds } from "./request.ts";
+
 export interface MiniTask {
   title: string;
   /** What "done" means for this task ("" when the planner gave none). */
   done: string;
+  /** The pieces of the request this task depends on, by number (request.ts requestLines). */
+  needs?: number[];
+  /** More than fits a title: the points a follow-up task has to settle (written by code). */
+  detail?: string;
+  /** The task is the whole request, for one worker. */
+  whole?: boolean;
+  /** The task that settles what the finish check found: it is not revised when it fails. */
+  followUp?: boolean;
 }
 
 export interface Plan {
   /** The planner answered the user directly: nothing to do in the folder. */
   answer: string | null;
   tasks: MiniTask[];
+  /** The planner said one worker can do the whole job ("ONE"). */
+  one: boolean;
+  /** The planner's reason why one worker is not enough ("LARGE: …"), when it gave one. */
+  large: string | null;
 }
 
 /** Leading list / markdown decoration: "- ", "* ", "3.", "3)", "#", ">", "**". */
@@ -37,6 +51,10 @@ const DONE_RE =
 const INLINE_DONE_RE =
   /\s*[(\[;.\-–—|]*\s*\b(?:done when|done if|done criteria|acceptance|definition of done)\s*[:\-–—]?\s*([^)\]]*)[)\]]?\s*$/i;
 const ANSWER_RE = /^(?:answer|final answer|reply|no tasks?(?: needed)?)\s*[:\-–—]+\s*(.*)$/i;
+const NEEDS_RE =
+  /^(?:needs?|request (?:lines?|pieces?)|pieces?|depends on|from the request)\s*[:\-–—]+\s*(.*)$/i;
+const ONE_RE = /^(?:one(?: task| worker)?|single(?: task)?|size\s*[:\-–—]\s*small|small)\s*[.!]?$/i;
+const LARGE_RE = /^(?:large|size\s*[:\-–—]\s*large|split)\s*[:\-–—]+\s*(.*)$/i;
 
 /**
  * "TASK 1: … / DONE WHEN: …" in whatever shape it came back. Also takes "1. …", "- Task: …",
@@ -46,15 +64,23 @@ const ANSWER_RE = /^(?:answer|final answer|reply|no tasks?(?: needed)?)\s*[:\-�
 export function parsePlan(text: string, maxTasks = 12): Plan {
   const tasks: MiniTask[] = [];
   let answer: string | null = null;
+  let one = false;
+  let large: string | null = null;
   let answerOpen = false;
   let inDone = false;
   /** Still inside the last task's lines (a blank line ends it: what follows is prose). */
   let open = false;
+  /**
+   * After that blank line, bullets still belong to the task ("Write a query that:", a blank
+   * line, then its conditions as a list) until a line of prose comes.
+   */
+  let bullets = false;
   const lines = text.replace(/\r/g, "").split("\n");
   for (const raw of lines) {
     if (/^\s*```/.test(raw)) continue; // a fence around the whole list
     const line = strip(raw);
     if (!line) {
+      bullets = open || bullets;
       open = false;
       continue;
     }
@@ -62,6 +88,24 @@ export function parsePlan(text: string, maxTasks = 12): Plan {
     if (a && !tasks.length) {
       answer = a[1].trim();
       answerOpen = true;
+      continue;
+    }
+    if (!tasks.length && ONE_RE.test(line)) {
+      one = true;
+      continue;
+    }
+    const big = LARGE_RE.exec(line);
+    if (big && !tasks.length) {
+      large = big[1].trim() || "it does not fit one worker";
+      answerOpen = false;
+      continue;
+    }
+    const needs = NEEDS_RE.exec(line);
+    if (needs && tasks.length) {
+      const got = parseNeeds(needs[1]);
+      if (got.length) tasks[tasks.length - 1].needs = got;
+      inDone = false;
+      open = false;
       continue;
     }
     const t = TASK_RE.exec(line);
@@ -92,7 +136,9 @@ export function parsePlan(text: string, maxTasks = 12): Plan {
       continue;
     }
     // A continuation of the task or of its done-criteria (wrapped lines, sub-bullets).
-    if (tasks.length && open) {
+    const bullet = /^\s*[-*•]\s+\S/.test(raw);
+    if (!open && !(bullets && bullet)) bullets = false;
+    if (tasks.length && (open || (bullets && bullet))) {
       const cur = tasks[tasks.length - 1];
       if (inDone) cur.done = `${cur.done} ${line}`.trim();
       else if (!cur.title) cur.title = line;
@@ -101,10 +147,14 @@ export function parsePlan(text: string, maxTasks = 12): Plan {
   }
   const kept = tasks
     .filter((t) => t.title)
-    .map((t) => ({ title: clip(t.title, 500), done: clip(t.done, 300) }))
+    .map((t) => ({
+      title: clip(t.title, 500),
+      done: clip(t.done, 300),
+      ...(t.needs ? { needs: t.needs } : {}),
+    }))
     .slice(0, maxTasks);
-  if (kept.length) return { answer: null, tasks: kept };
-  return { answer: answer && answer.trim() ? answer.trim() : null, tasks: [] };
+  if (kept.length) return { answer: null, tasks: kept, one, large };
+  return { answer: answer && answer.trim() && !one ? answer.trim() : null, tasks: [], one, large };
 }
 
 function clip(s: string, n: number): string {
@@ -201,6 +251,8 @@ export interface ParsedActions {
   none: boolean;
   /** Lines that looked like actions but couldn't be read (shown to the next Think). */
   problems: string[];
+  /** Lifted command blocks that no action named (not run; the next Think is told). */
+  unrun: string[];
   /**
    * Actions refused before anything runs: a WRITE with no content, a `cat > file` with no
    * heredoc body (it would wait for input forever). `at` is how many actions precede it: the
@@ -284,8 +336,14 @@ export function liftFiles(text: string): Lifted {
       const p = cleanPath(direct[1]);
       return p && !/\s/.test(p) ? p : null;
     }
-    if (!/\bcontents?\b|\bfollowing code\b|\bcode below\b/i.test(label) || !/[:：]\s*$/.test(label))
-      return null;
+    // "Create `fix.py` with this content:" or "Action 1 - Create probe.py" (a line that says a
+    // file is made and names exactly one); never a line about running something or its output.
+    const saysContent =
+      /\bcontents?\b|\bfollowing code\b|\bcode below\b/i.test(label) && /[:：]\s*$/.test(label);
+    const saysMake =
+      /\b(?:create|write|save|add|put|make)\b/i.test(label) &&
+      !/\b(?:run|execute|output|prints?|expected|result|shows?)\b/i.test(label);
+    if (!saysContent && !saysMake) return null;
     const found = new Set<string>();
     for (const m of label.matchAll(FILE_TOKEN)) found.add(cleanPath(m[1] ?? m[2]));
     return found.size === 1 ? [...found][0] : null;
@@ -346,6 +404,148 @@ export function liftFiles(text: string): Lifted {
     files: [...files].map(([path, content]) => ({ path, content })),
     plan: out.join("\n"),
   };
+}
+
+/** A shell block of the Think step, lifted out of its text (liftCommands). */
+export interface LiftedCommand {
+  id: string;
+  script: string;
+}
+
+function commandMarker(id: string, script: string): string {
+  const n = script.split("\n").length;
+  return `[command block ${id} (${n} line${n === 1 ? "" : "s"}) is held by the executor; for it output only "RUN: ${id}"]`;
+}
+
+/**
+ * Take the shell blocks out of the Think step's text (after liftFiles), so that no later step
+ * copies a command: a chat page renders `__name__` as bold and drops what is in braces, and a
+ * translator that retypes a twenty-line script loses a character somewhere. Lifted, verbatim: a
+ * closed fenced block marked as shell (```bash, ```sh, ```console …), and an unmarked one right
+ * under a line that says to run it. The block runs as one script, so a `cd` in it holds for the
+ * lines after it. A block that holds a file marker is left for the translator.
+ */
+export function liftCommands(plan: string): { plan: string; commands: LiftedCommand[] } {
+  const lines = plan.split("\n");
+  const out: string[] = [];
+  const commands: LiftedCommand[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = /^\s*(`{3,}|~{3,})\s*(.*?)\s*$/.exec(line);
+    if (!fence) {
+      out.push(line);
+      i++;
+      continue;
+    }
+    let close = -1;
+    for (let k = i + 1; k < lines.length; k++) {
+      const t = lines[k].trim();
+      if (t.startsWith(fence[1]) && t.replace(/[`~]/g, "") === "" && t[0] === fence[1][0]) {
+        close = k;
+        break;
+      }
+    }
+    const lang = /^[\w+#.-]*/.exec(fence[2])?.[0] ?? "";
+    let k = out.length - 1;
+    while (k >= 0 && !out[k].trim()) k--;
+    const label = k >= 0 && out.length - 1 - k <= 1 ? strip(out[k]) : "";
+    const shell =
+      SHELL_LANGS.test(lang) ||
+      (fence[2] === "" &&
+        /\b(?:run|execute|command|commands|shell|terminal)\b/i.test(label) &&
+        !/\b(?:output|prints?|expected|shows?)\b[^:]*[:：]\s*$/i.test(label));
+    const body = close === -1 ? [] : lines.slice(i + 1, close);
+    // (a console transcript's "$ " prompts come off; its output lines are not there to tell apart)
+    const script = body
+      .map((l) => l.replace(/^\s*\$\s+/, ""))
+      .join("\n")
+      .replace(/^\n+|\s+$/g, "");
+    if (!shell || close === -1 || !script.trim()) {
+      // not ours: copy the block through untouched
+      const end = close === -1 ? i : close;
+      for (let j = i; j <= end; j++) out.push(lines[j]);
+      i = end + 1;
+      continue;
+    }
+    // A file lifted out of the block (a heredoc) stays where it was, as its marker; the commands
+    // before and after it are blocks of their own.
+    let part: string[] = [];
+    const flush = () => {
+      const text = part.join("\n").replace(/^\n+|\s+$/g, "");
+      part = [];
+      if (!text.trim()) return;
+      const id = `C${commands.length + 1}`;
+      commands.push({ id, script: text });
+      out.push(commandMarker(id, text));
+    };
+    for (const l of script.split("\n")) {
+      if (l.startsWith("[file block: ")) {
+        flush();
+        out.push(l);
+      } else part.push(l);
+    }
+    flush();
+    i = close + 1;
+  }
+  return { plan: out.join("\n"), commands };
+}
+
+/** What a model's retyping changes without meaning to: emphasis marks, braces, quotes, spacing. */
+function skeleton(s: string): string {
+  return s.replace(/[*_`{}\\"'\s]/g, "");
+}
+
+function isSubsequence(small: string, big: string): boolean {
+  let j = 0;
+  for (let i = 0; i < big.length && j < small.length; i++) if (big[i] === small[j]) j++;
+  return j === small.length;
+}
+
+/**
+ * A one-line command as the Think step wrote it, when the translator's copy is that command with
+ * characters lost or turned into markdown (`np.__version__` came back as `np.**version**`, a set
+ * literal without its braces). The candidates are the plan's own code: its backticked spans and
+ * the lines of its code blocks. Returned unchanged when the plan holds it as it is, or when no
+ * single candidate is clearly the same command.
+ */
+export function restoreCommand(command: string, plan: string): string {
+  const cmd = command.trim();
+  if (!cmd || cmd.includes("\n") || plan.includes(cmd)) return command;
+  const candidates = new Set<string>();
+  for (const m of plan.matchAll(/`([^`\n]{4,})`/g)) candidates.add(m[1].trim());
+  let fenced = false;
+  for (const raw of plan.split("\n")) {
+    if (/^\s*(?:`{3,}|~{3,})/.test(raw)) {
+      fenced = !fenced;
+      continue;
+    }
+    const line = raw.replace(/^\s*\$\s+/, "").trim();
+    if (line.length >= 4 && (fenced || /^\s{4,}\S/.test(raw))) candidates.add(line);
+  }
+  const want = skeleton(cmd);
+  if (want.length < 6) return command;
+  const same = [...candidates].filter((c) => skeleton(c) === want);
+  if (same.length === 1) return same[0];
+  if (same.length > 1) return command;
+  const close = [...candidates].filter((c) => {
+    const have = skeleton(c);
+    return have.length >= 12 && want.length / have.length >= 0.8 && isSubsequence(want, have);
+  });
+  return close.length === 1 ? close[0] : command;
+}
+
+/**
+ * A path as the plan (or the request's must-match list) spells it, when the translator's copy is
+ * that name with marks lost or changed. Unchanged when it is there as written or nothing matches.
+ */
+export function restorePath(p: string, plan: string, exact: string[] = []): string {
+  if (!p || plan.includes(p) || exact.includes(p)) return p;
+  const candidates = new Set<string>(exact.filter((e) => /[./]/.test(e) && !/\s/.test(e)));
+  for (const m of plan.matchAll(FILE_TOKEN)) candidates.add(cleanPath(m[1] ?? m[2]));
+  const want = skeleton(p);
+  const same = [...candidates].filter((c) => skeleton(c) === want);
+  return same.length === 1 ? same[0] : p;
 }
 
 function normPath(p: string): string {
@@ -532,12 +732,18 @@ function parseSearch(arg: string): Action | null {
  * lifted file no action mentions is written first. A WRITE with no content and nothing lifted
  * for it, or a `cat >` with no heredoc body, is not an action: it goes to `rejected`.
  */
-export function parseActions(text: string, max = 8, files: LiftedFile[] = []): ParsedActions {
+export function parseActions(
+  text: string,
+  max = 8,
+  files: LiftedFile[] = [],
+  commands: LiftedCommand[] = [],
+): ParsedActions {
   const lines = text.replace(/\r/g, "").split("\n");
   const actions: Action[] = [];
   const problems: string[] = [];
   const rejected: { at: number; text: string }[] = [];
   const used = new Set<string>();
+  const usedCommands = new Set<string>();
   const writeLifted = (f: LiftedFile) => {
     if (!used.has(f.path)) actions.push({ kind: "write", path: f.path, content: f.content });
     used.add(f.path);
@@ -560,6 +766,14 @@ export function parseActions(text: string, max = 8, files: LiftedFile[] = []): P
     switch (kind) {
       case "run": {
         let command = unquote(arg);
+        // A lifted block, named by its marker: the script as the Think step wrote it.
+        const held = /^\[?(?:command )?(?:block )?(C\d+)\]?$/i.exec(command.trim());
+        const lifted = held ? commands.find((c) => c.id === held[1].toUpperCase()) : undefined;
+        if (lifted) {
+          usedCommands.add(lifted.id);
+          actions.push({ kind, command: lifted.script });
+          break;
+        }
         if (!command) {
           const b = readBlock(lines, i);
           if (b) {
@@ -683,7 +897,47 @@ export function parseActions(text: string, max = 8, files: LiftedFile[] = []): P
     problems.push(`${actions.length - max} action(s) beyond the limit of ${max} were dropped`);
     actions.length = max;
   }
-  return { actions, none: none && !actions.length && !rejected.length, problems, rejected };
+  // A translator that typed a lifted block's command out instead of naming the block: the
+  // block's own text is what runs.
+  const flat = (t: string) => t.replace(/\s+/g, " ").trim();
+  for (const c of commands) {
+    if (usedCommands.has(c.id)) continue;
+    const typed = actions.find(
+      (a) =>
+        a.kind === "run" &&
+        (flat(a.command) === flat(c.script) || skeleton(a.command) === skeleton(c.script)),
+    );
+    if (typed && typed.kind === "run") {
+      typed.command = c.script;
+      usedCommands.add(c.id);
+      continue;
+    }
+    // Or typed it out line by line, one RUN each (a `cd` would then hold for nothing): the lines
+    // become the one script again, where the first of them stood.
+    const want = c.script.split("\n").map(flat).filter(Boolean);
+    const at = want.map((l) =>
+      actions.findIndex(
+        (a) => a.kind === "run" && (flat(a.command) === l || skeleton(a.command) === skeleton(l)),
+      ),
+    );
+    if (want.length > 1 && at.every((n) => n !== -1) && new Set(at).size === at.length) {
+      const first = Math.min(...at);
+      actions[first] = { kind: "run", command: c.script };
+      for (const n of at.filter((x) => x !== first).sort((a, b) => b - a)) {
+        actions.splice(n, 1);
+        for (const r of rejected) if (r.at > n) r.at--;
+      }
+      usedCommands.add(c.id);
+    }
+  }
+  const unrun = commands.filter((c) => !usedCommands.has(c.id)).map((c) => c.id);
+  return {
+    actions,
+    none: none && !actions.length && !rejected.length,
+    problems,
+    rejected,
+    unrun,
+  };
 }
 
 /** One line for an action (rows, notes, prompts). */

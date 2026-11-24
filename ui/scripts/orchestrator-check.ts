@@ -46,7 +46,11 @@ import {
 } from "../server/orchestrator/backend.ts";
 import {
   changedSince,
+  codeFindings,
   deliverablesIn,
+  findingLines,
+  finishText,
+  followUpTask,
   snapshot,
   unwrap,
 } from "../server/orchestrator/experimental.ts";
@@ -59,6 +63,7 @@ import {
   userShell,
 } from "../server/orchestrator/hyper.ts";
 import {
+  addApproval,
   addCommand,
   addDone,
   addFile,
@@ -71,6 +76,7 @@ import {
 } from "../server/orchestrator/notes.ts";
 import {
   isContinue,
+  liftCommands,
   liftFiles,
   looksLikeRefusal,
   parseActions,
@@ -78,16 +84,31 @@ import {
   parseReport,
   parseThought,
   planProduces,
+  restoreCommand,
+  restorePath,
 } from "../server/orchestrator/parse.ts";
 import {
   BRIEF_BUDGET,
+  ONE_WORKER_CHARS,
   plannerPrompt,
   PROMPT_BUDGET,
+  reviewPrompt,
+  revisePrompt,
   SUMMARY_LIMIT,
   thinkPrompt,
   translatePrompt,
   WORKER_BASE,
+  workerBrief,
 } from "../server/orchestrator/prompts.ts";
+import {
+  exactNames,
+  nearMiss,
+  numbered,
+  parseReview,
+  requestExcerpt,
+  requestLines,
+  strayPaths,
+} from "../server/orchestrator/request.ts";
 import { makeCallModel, RouterError } from "../server/orchestrator/router.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -564,6 +585,381 @@ log("notes");
   );
 }
 
+log("the request, word for word: exact names, numbered pieces, excerpts");
+{
+  // A request shaped like the ones that went wrong: the output's name sits in the middle of a
+  // long text, between two lists, and a count is stated once.
+  const LONG = [
+    "Find a 1-hour slot for Alice, Bob and Carol during January 15-19, 2024 (business hours: 9 AM - 6 PM).",
+    "",
+    "Availability:",
+    ...Array.from(
+      { length: 9 },
+      (_, i) =>
+        `- Person P${i + 1}: prefers mornings, can do early afternoons if needed, never after 2 PM; this rule is for weekdays only.`,
+    ),
+    "",
+    "Input: three calendars (`/data/app/alice_calendar.ics`, `/data/app/bob_calendar.ics`, `/data/app/carol_calendar.ics`).",
+    "",
+    'Output: Create `/data/app/meeting_scheduled.ics` with a 1-hour "Team Planning Meeting" for all 3 attendees.',
+    "",
+    "Technical requirements:",
+    ...Array.from(
+      { length: 16 },
+      (_, i) =>
+        `- Requirement R${i + 1}: the file must keep header H${i + 1} exactly as the standard writes it, in UTC (YYYYMMDDTHHMMSSZ), with --strict-mode on.`,
+    ),
+    '- Call `schedule_meeting(start, end)` and print "DONE" within 5 seconds; tolerance 1e-6.',
+  ].join("\n");
+  check(LONG.length > 3000, `(a request of ${LONG.length} characters)`);
+  const exact = exactNames(LONG);
+  check(
+    [
+      "/data/app/alice_calendar.ics",
+      "/data/app/meeting_scheduled.ics",
+      "Team Planning Meeting",
+      "schedule_meeting(start, end)",
+      "--strict-mode",
+      "DONE",
+      "1-hour",
+      "3 attendees",
+      "5 seconds",
+      "1e-6",
+    ].every((x) => exact.includes(x)),
+    `code copies the exact names out of the request: paths, quoted strings, flags, calls, numbers with their units (${exact.length}: ${exact.slice(0, 6).join(" | ")} …)`,
+  );
+  check(
+    !exact.includes("1") && !exact.includes("2") && exact.join(" | ").length <= 900,
+    "list numbering is not a name; the list is bounded",
+  );
+  check(
+    exactNames("See https://example.com/a.json, version v1.2.3, e.g. this.").length === 0,
+    "a URL, a version and an abbreviation are not names",
+  );
+  const lines = requestLines(LONG);
+  check(lines.join("\n") === LONG, "the request in pieces is the request, character for character");
+  const longLine = `${"A sentence that goes on. ".repeat(30)}The file is out_final.csv.`;
+  check(
+    requestLines(longLine).length > 1 &&
+      requestLines(longLine).every((l) => l.length <= 320) &&
+      requestLines(longLine).join("") === longLine,
+    "a paragraph on one line is cut at sentence ends, losing nothing",
+  );
+  const num = numbered(LONG, 4000);
+  const outAt = lines.findIndex((l) => l.includes("meeting_scheduled.ics")) + 1;
+  check(
+    num.includes(`[${outAt}] Output: Create \`/data/app/meeting_scheduled.ics\``),
+    "the planner sees every piece with its number (the middle of a long request is not cut away)",
+  );
+  const planP = plannerPrompt(LONG, "/data/app (macOS); contains: a.ics", "", false, exact);
+  check(
+    planP.instructions.length + planP.input.length <= PROMPT_BUDGET &&
+      planP.input.includes("meeting_scheduled.ics") &&
+      planP.input.includes("MUST MATCH EXACTLY"),
+    `the planner's prompt holds it within the budget (${planP.instructions.length + planP.input.length} <= ${PROMPT_BUDGET})`,
+  );
+  const ex = requestExcerpt(LONG, 1500, [outAt]);
+  check(
+    !ex.whole &&
+      ex.text.length <= 1500 &&
+      ex.text.includes("Output: Create `/data/app/meeting_scheduled.ics`") &&
+      ex.text.startsWith("Find a 1-hour slot") &&
+      /\[… \d+ lines? of the request left out here …\]/.test(ex.text),
+    "an excerpt keeps the pieces a task needs word for word, fills up from the top, and marks every gap",
+  );
+  check(requestExcerpt("short one", 100).whole, "a request that fits is given whole");
+  // The brief of a task in a split job, for that long request.
+  const notes = emptyNotes();
+  addRequest(notes, LONG);
+  addDone(notes, "Read the calendars", "20 events found, none recurring");
+  addFile(notes, "events.json", "add");
+  addCommand(notes, "python3 parse.py", true);
+  addApproval(notes, "rm -f /tmp/x");
+  const before = JSON.stringify(notes);
+  const brief = workerBrief({
+    request: LONG,
+    exact,
+    task: {
+      title: "Write the calendar file for the slot found",
+      done: "the file exists and parses",
+      needs: [outAt],
+    },
+    index: 2,
+    total: 3,
+    later: [{ title: "Validate it", done: "" }],
+    notes,
+    cwd: "/data/app",
+    folder: "/data/app (macOS); contains: alice_calendar.ics",
+    requestFile: "/tmp/provenance-requests/t.txt",
+  });
+  check(
+    brief.length <= BRIEF_BUDGET,
+    `the brief is within its budget (${brief.length} <= ${BRIEF_BUDGET})`,
+  );
+  check(
+    brief.includes(
+      'Output: Create `/data/app/meeting_scheduled.ics` with a 1-hour "Team Planning Meeting"',
+    ) &&
+      /MUST MATCH EXACTLY[^\n]*\/data\/app\/meeting_scheduled\.ics/.test(brief) &&
+      brief.includes("(Shortened here. All of it is in /tmp/provenance-requests/t.txt"),
+    "it quotes the piece the task needs word for word, lists the exact names, and says where the whole request is",
+  );
+  check(
+    brief.includes("- Read the calendars: 20 events found") &&
+      brief.includes(
+        "NEEDS APPROVAL (asked and declined: do without, do not ask again):\n- rm -f /tmp/x",
+      ) &&
+      JSON.stringify(notes) === before,
+    "the notes are in it, cut to the room that is left without folding what is stored",
+  );
+  // Measured on the lengths of the benchmark's ten requests (characters).
+  const sizes = [561, 663, 848, 904, 979, 1269, 1518, 1985, 2253, 3455];
+  const wholeIn = sizes.filter((n) => {
+    const r = `${"word ".repeat(Math.ceil(n / 5)).slice(0, n - 1)}.`;
+    const b = workerBrief({
+      request: r,
+      exact: [],
+      task: {
+        title: "Do everything THE REQUEST above asks for, and check it",
+        done: "",
+        whole: true,
+      },
+      index: 1,
+      total: 1,
+      later: [],
+      notes: emptyNotes(),
+      cwd: "/data/app",
+    });
+    return b.includes(r) && b.length <= BRIEF_BUDGET;
+  });
+  check(
+    wholeIn.length === 9 && sizes.filter((n) => n + 300 <= ONE_WORKER_CHARS).length === 9,
+    `nine of the ten benchmark request lengths fit a one-worker brief whole, with a 300-character folder listing to spare (${wholeIn.join(", ")})`,
+  );
+  check(
+    WORKER_BASE.length < 3000,
+    `the worker's base instructions stay under the router's 3,000 (${WORKER_BASE.length})`,
+  );
+  const rev = revisePrompt(LONG, notesText(notes), { title: "t", done: "" }, "r", [], exact);
+  const rvw = reviewPrompt({
+    request: LONG,
+    exact,
+    files: "- a.ics (add, 300 bytes)\n".repeat(80),
+    commands: "- ok: python3 check.py\n".repeat(80),
+    found: "",
+    claims: "- done",
+  });
+  const thk = thinkPrompt({
+    goal: LONG,
+    exact,
+    requestFile: "/tmp/provenance-requests/t.txt",
+    folder: "/data/app (macOS); contains: a.ics",
+    summary: "s".repeat(SUMMARY_LIMIT),
+    results: "r".repeat(3500),
+    step: 3,
+    stepsLeft: 5,
+  });
+  check(
+    [rev, rvw, thk].every((p) => p.instructions.length + p.input.length <= PROMPT_BUDGET),
+    `with the longest inputs the reviser's, the reviewer's and the think prompt stay within the budget (${[rev, rvw, thk].map((p) => p.instructions.length + p.input.length).join(", ")} <= ${PROMPT_BUDGET})`,
+  );
+  check(
+    thk.input.startsWith("GOAL:\nFind a 1-hour slot") &&
+      thk.input.includes("(Shortened here. All of it is in /tmp/provenance-requests/t.txt") &&
+      /MUST MATCH EXACTLY[^\n]*meeting_scheduled\.ics/.test(thk.input) &&
+      /LAST STEP RESULTS:\nr{300,}\n\[… \d+ characters left out …\]\nr{300,}/.test(thk.input),
+    "the think prompt has the request's own words, the exact names and where the rest is; the last results take the room that is left",
+  );
+}
+
+log("the finish check: what code finds, what the reviewer says");
+{
+  check(
+    nearMiss("meeting_scheduled.ics", ["notes.txt", "meeting.ics"]) === "meeting.ics" &&
+      nearMiss("/data/app/out.json", ["sub/out.json"]) === "sub/out.json" &&
+      nearMiss("recovered.json", ["recoverd.json"]) === "recoverd.json" &&
+      nearMiss("report.md", ["notes.txt", "data.csv"]) === null,
+    "a file of nearly the asked name, or of that name elsewhere, is a near miss; an unrelated file is not",
+  );
+  const stray = strayPaths(
+    {
+      files: ["/mnt/data/meeting.ics"],
+      commands: ["python3 a.py > /mnt/data/out.txt", "echo hi > /tmp/x", "cp a /data/app/b.ics"],
+      reports: ["CHANGES: created /mnt/data/app/meeting.ics"],
+    },
+    "/work",
+    "Write to /data/app/b.ics",
+  );
+  check(
+    stray.join("|") === "/mnt/data/meeting.ics|/mnt/data/out.txt|/mnt/data/app/meeting.ics",
+    `paths outside the folder that the request does not name are found; temp files and named paths are not (${stray.join("|")})`,
+  );
+  const dir = mkdtempSync(path.join(tmpdir(), "provenance-orc-finish-"));
+  writeFileSync(path.join(dir, "meeting.ics"), "BEGIN:VCALENDAR\n");
+  const req = `Create ${dir}/meeting_scheduled.ics with the slot.`;
+  const dl = deliverablesIn(req, dir);
+  check(
+    dl.join() === "meeting_scheduled.ics",
+    "a file the request names by its full path is a deliverable, whatever its type",
+  );
+  const f = codeFindings({
+    deliverables: dl,
+    cwd: dir,
+    request: req,
+    files: ["meeting.ics"],
+    commands: [],
+    reports: [],
+    lastCheck: { cmd: "python3 validate.py", ok: false },
+  });
+  const fl = findingLines(f);
+  check(
+    f.near[0]?.have === "meeting.ics" &&
+      /`meeting_scheduled\.ics`, named in the request, does not exist; `meeting\.ics` was made instead: a near miss/.test(
+        fl[0],
+      ) &&
+      /the last recorded check failed: `python3 validate\.py`/.test(fl[1]),
+    "code flags the near miss by name, and a last check that failed",
+  );
+  const rv = parseReview(`Here is the review:
+
+R1: file meeting_scheduled.ics exists | MET | listing shows 312 bytes
+- R2: exactly 60 minutes | NOT SHOWN | CHECK: grep DTSTART meeting_scheduled.ics
+**R3:** handles a missing argument - VIOLATED - prints a traceback
+4. tolerance 1e-6: not shown
+   Check: python3 check.py
+Overall the job looks fine.`);
+  check(
+    rv.items.length === 4 &&
+      rv.open.map((o) => o.verdict).join() === "not-shown,violated,not-shown" &&
+      rv.open[0].note === "CHECK: grep DTSTART meeting_scheduled.ics" &&
+      rv.open[2].note === "CHECK: python3 check.py",
+    "the reviewer's lines are read in whatever shape: met, not shown with its check, violated",
+  );
+  check(
+    parseReview("Looks good to me!").items.length === 0,
+    "a reply with no verdicts is no review",
+  );
+  const t = followUpTask(rv.open, fl);
+  check(
+    t.followUp === true &&
+      /- \(recorded\) `meeting_scheduled\.ics`, named in the request, does not exist/.test(
+        t.detail ?? "",
+      ) &&
+      /- NOT SHOWN: exactly 60 minutes — CHECK: grep DTSTART meeting_scheduled\.ics/.test(
+        t.detail ?? "",
+      ) &&
+      /- VIOLATED: handles a missing argument — prints a traceback/.test(t.detail ?? ""),
+    "what is open becomes one task, written by code from the findings",
+  );
+  check(
+    /\*\*Finish check\.\*\* [^\n]*3 of 4 requirements were not shown met:\n- not shown: exactly 60 minutes[^\n]*\n- violated[^\n]*\n- not shown[^\n]*\nNo follow-up task was run for them \(too little was left\): treat them as \*\*not verified\*\*\./.test(
+      finishText({ review: rv, open: rv.open, followUp: null, skipped: "too little was left" }),
+    ) &&
+      finishText({
+        review: parseReview("R1: x | MET | y"),
+        open: [],
+        followUp: null,
+        skipped: null,
+      }) === "",
+    "the answer names what was not shown as not verified; when all is shown it adds nothing",
+  );
+}
+
+log("plans: one worker unless the job is large; pieces by number");
+{
+  const one = parsePlan("ONE");
+  check(
+    one.one && !one.tasks.length && one.answer === null,
+    '"ONE" is a plan: the whole job, one worker',
+  );
+  const big = parsePlan(
+    "LARGE: five files, two stages\nTASK 1: Write the parser\nNEEDS: 2-4, 7\nDONE WHEN: it parses\nTASK 2: Wire it up\nNEEDS: all\nDONE WHEN: ok",
+  );
+  check(
+    big.large === "five files, two stages" &&
+      big.tasks.length === 2 &&
+      big.tasks[0].needs?.join() === "2,3,4,7" &&
+      big.tasks[1].needs === undefined &&
+      big.tasks[0].done === "it parses",
+    "LARGE gives the reason; NEEDS names request pieces by number",
+  );
+  const bullets = parsePlan(
+    "TASK 1: Inspect the graph\n\nDONE WHEN: documented\n\nTASK 2: Create `solution.sparql`. Write a query that:\n\n- Selects full professors.\n- Requires more than 10 students.\n\nDONE WHEN: saved\n\nThat is the plan.",
+  );
+  check(
+    bullets.tasks.length === 2 &&
+      /Write a query that Selects full professors\. Requires more than 10 students/.test(
+        bullets.tasks[1].title,
+      ) &&
+      bullets.tasks[1].done === "saved",
+    "a task's conditions listed after a blank line stay with the task (they were dropped before)",
+  );
+}
+
+log("hyperexperimental: commands are lifted too, and a retyped name is set back");
+{
+  const think =
+    "First look, then run the probe.\n\n```bash\ncd /data/app\npython3 -c 'import numpy as np; print(np.__version__, {1, 2})'\n```\n\nAlso run `python3 steal.py --rows 30` and read `stolen_A1.npy`.";
+  const lc = liftCommands(think);
+  check(
+    lc.commands.length === 1 &&
+      lc.commands[0].script ===
+        "cd /data/app\npython3 -c 'import numpy as np; print(np.__version__, {1, 2})'" &&
+      lc.plan.includes(
+        '[command block C1 (2 lines) is held by the executor; for it output only "RUN: C1"]',
+      ) &&
+      !lc.plan.includes("np.__version__"),
+    "a shell block is taken out of the plan: the translator sees a marker, never the script",
+  );
+  const a1 = parseActions("RUN: C1\nRUN: python3 steal.py --rows 30", 8, [], lc.commands);
+  check(
+    a1.actions.length === 2 &&
+      a1.actions[0].kind === "run" &&
+      a1.actions[0].command === lc.commands[0].script &&
+      a1.unrun.length === 0,
+    "RUN: C1 runs the block as one script, exactly as written (the cd holds for the next line)",
+  );
+  const a2 = parseActions(
+    "RUN: cd /data/app\nRUN: python3 -c 'import numpy as np; print(np.**version**, 1, 2)'",
+    8,
+    [],
+    lc.commands,
+  );
+  check(
+    a2.actions.length === 1 &&
+      a2.actions[0].kind === "run" &&
+      a2.actions[0].command === lc.commands[0].script,
+    "a translator that typed the block out line by line, mangled, still runs the block's own text",
+  );
+  check(
+    parseActions("READ: a.txt", 8, [], lc.commands).unrun.join() === "C1",
+    "a block no action named is reported as not run",
+  );
+  check(
+    restoreCommand("python3 steal.py --rows 30", think) === "python3 steal.py --rows 30" &&
+      restoreCommand("echo **init** a,b done", "Run `echo __init__ {a,b} done` now.") ===
+        "echo __init__ {a,b} done" &&
+      restoreCommand("ls -la", "Run `echo hi`.") === "ls -la",
+    "a one-line command comes back as the plan wrote it when the copy lost its marks; an unrelated one is left alone",
+  );
+  check(
+    restorePath("stolen**A1.npy", think) === "stolen_A1.npy" &&
+      restorePath("meeting-scheduled.ics", "write it", ["/data/app/meeting_scheduled.ics"]) ===
+        "meeting-scheduled.ics" &&
+      restorePath("other.txt", think) === "other.txt",
+    "so does a path; a different name is not guessed at",
+  );
+  const mixed = liftCommands(
+    liftFiles("Do it.\n\n```bash\ncat > here.txt <<'EOF'\nline\nEOF\npython3 lifted.py\n```").plan,
+  );
+  check(
+    mixed.commands.length === 1 &&
+      mixed.commands[0].script === "python3 lifted.py" &&
+      /\[file block: here\.txt[^\n]*\n\[command block C1/.test(mixed.plan),
+    "a block that holds a file and a command gives a marker for each",
+  );
+}
+
 // ---- stand-in router --------------------------------------------------------------------------
 interface Seen {
   role: string;
@@ -575,9 +971,10 @@ interface Seen {
 const seen: Seen[] = [];
 let summaries = 0;
 const ROLES: [string, string][] = [
-  ["You split a coding request", "planner"],
-  ["A coding job is split", "revise"],
+  ["You decide how a coding request", "planner"],
+  ["A coding job is being done", "revise"],
   ["Write the reply to the user", "final"],
+  ["You check a finished coding job", "review"],
   ["You direct a coding job", "think"],
   ["Turn the PLAN into actions", "translate"],
   ["You keep the running summary", "summarize"],
@@ -629,19 +1026,28 @@ function answer(role: string, whole: string, instructions = ""): string | number
       if (/inspectonly/.test(input))
         return "TASK 1: Inspect the files with ls and dump the header of main.db\nDONE WHEN: listed";
       if (/flaky/.test(input))
-        return "TASK 1: Set up\nDONE WHEN: ok\nTASK 2: FLAKY thing\nDONE WHEN: ok\nTASK 3: Wrap up\nDONE WHEN: ok";
+        return "LARGE: three stages\nTASK 1: Set up\nDONE WHEN: ok\nTASK 2: FLAKY thing\nDONE WHEN: ok\nTASK 3: Wrap up\nDONE WHEN: ok";
+      // A planner that respells what the request names: the file and the count.
+      if (/paraphrase/.test(input))
+        return "LARGE: two stages, each with its own check\nTASK 1: Write the 20 rows to rows_final.csv NEARMISS rows_final.csv\nNEEDS: 1\nDONE WHEN: rows_final.csv has 20 rows\nTASK 2: Check the csv\nNEEDS: 2\nDONE WHEN: ok";
+      if (/smalljob/.test(input))
+        return "TASK 1: Look at the folder\nDONE WHEN: seen\nTASK 2: Tidy it\nDONE WHEN: tidy\nTASK 3: Check it\nDONE WHEN: ok";
+      if (/onejob/.test(input)) return "ONE";
+      if (/partlyjob/.test(input))
+        return "LARGE: two stages\nTASK 1: PARTLY inspect the inputs\nDONE WHEN: seen\nTASK 2: Write the script\nDONE WHEN: it runs";
+      if (/askalways/.test(input)) return "TASK 1: ASKME ALWAYS run it";
       if (/budget/.test(input)) return "TASK 1: LOOPCALLS circle";
       if (/quiet/.test(input)) return "TASK 1: QUIETTASK think slowly";
       if (/multi/.test(input))
-        return "Here's the plan:\n\n**Task 1:** Create `mathx.py` with add and mul\n- Done when: the file imports cleanly\n2) Write test_mathx.py covering both functions (done when: tests exist)\n### Step 3 - Run the tests\nAcceptance: pytest passes";
+        return "LARGE: three files, each with its own check\n\nHere's the plan:\n\n**Task 1:** Create `mathx.py` with add and mul\n- Done when: the file imports cleanly\n2) Write test_mathx.py covering both functions (done when: tests exist)\n### Step 3 - Run the tests\nAcceptance: pytest passes";
       if (/blocked/.test(input))
-        return "TASK 1: Set up\nDONE WHEN: ok\nTASK 2: BLOCKME install the thing\nDONE WHEN: installed\nTASK 3: Use the thing\nDONE WHEN: used";
+        return "LARGE: three stages\nTASK 1: Set up\nDONE WHEN: ok\nTASK 2: BLOCKME install the thing\nDONE WHEN: installed\nTASK 3: Use the thing\nDONE WHEN: used";
       if (/stuck/.test(input)) return "TASK 1: BLOCKME forever\nDONE WHEN: never";
       if (/many/.test(input))
-        return Array.from(
+        return `LARGE: seven parts\n${Array.from(
           { length: 7 },
           (_, i) => `TASK ${i + 1}: Part ${i + 1}\nDONE WHEN: ok`,
-        ).join("\n");
+        ).join("\n")}`;
       if (/slow/.test(input)) return "TASK 1: SLOWTASK wait a long time";
       if (/askme/.test(input)) return "TASK 1: ASKME run it";
       if (/nocap/.test(input)) return "TASK 1: NOCAP";
@@ -651,10 +1057,18 @@ function answer(role: string, whole: string, instructions = ""): string | number
       return "TASK 1: Follow up on it\nDONE WHEN: done";
     case "revise":
       if (/BLOCKME forever/.test(input)) return "TASK 1: BLOCKME forever\nDONE WHEN: never";
-      if (/REQUEST:\ncalls/.test(input)) return "TASK 1: LOOPCALLS more";
+      if (/REQUEST:\n\[1\] calls/.test(input)) return "TASK 1: LOOPCALLS more";
       return "1. Do the thing another way\n   Done when: it works\n2. Use the thing";
     case "final":
       return "All done: the tasks finished.";
+    case "review":
+      // The reviewer reads the request against the record: here it finds the count not shown.
+      if (/paraphrase/.test(input))
+        return "Here is my review:\n\nR1: write the rows to exact_rows_final.csv | VIOLATED | the record shows rows_final.csv instead\n- R2: 30 rows | NOT SHOWN | CHECK: wc -l exact_rows_final.csv\nR3: run it | MET | python3 check.py passed";
+      if (/mumble/.test(input)) return "R1: Make the thing the request";
+      if (/hfinish/.test(input))
+        return "R1: hfin.txt holds 3 lines | NOT SHOWN | CHECK: wc -l hfin.txt\nR2: the file exists | MET | listed";
+      return "R1: what the request asks for | MET | the recorded commands passed";
     case "think":
       if (/module/.test(input)) {
         if (step === 1)
@@ -663,6 +1077,19 @@ function answer(role: string, whole: string, instructions = ""): string | number
           return "Now replace the return line in mathx.py so it carries a comment, then search for def add and list the folder.";
         return "It printed 5.\n\nFINISHED: Created mathx.py with add(); running it printed 5.";
       }
+      if (/hfinish/.test(input)) {
+        if (step === 1) return "Write the file.\n\n```file:hfin.txt\na\nb\nc\n```";
+        if (step === 2) return "FINISHED: wrote hfin.txt.";
+        if (step === 3)
+          return "Count the lines, from the folder itself.\n\n```bash\ncd . && wc -l hfin.txt\necho __counted__ {a,b}\n```";
+        return "FINISHED: hfin.txt has 3 lines, counted with wc -l.";
+      }
+      if (/hlooking/.test(input))
+        return step <= 3
+          ? `Read it again, part ${step}: run cat README.md | head -n ${step}.`
+          : "FINISHED: Looked.";
+      if (/hmangle/.test(input))
+        return step === 1 ? "Run `echo __init__ {a,b} done` now." : "FINISHED: Echoed.";
       if (/retryok/.test(input)) return "FINISHED: Got through.";
       if (/retryfail/.test(input))
         return /SUMMARY v/.test(whole) ? "FINISHED: Resumed fine." : "Run echo one.";
@@ -690,6 +1117,12 @@ function answer(role: string, whole: string, instructions = ""): string | number
       return "FINISHED: Nothing to do.";
     case "translate":
       if (/h503/.test(input)) return 503;
+      if (/file block: hfin\.txt/.test(input)) return "WRITE: hfin.txt";
+      if (/command block C1/.test(input) && /Count the lines/.test(input)) return "RUN: C1";
+      // (a chat page's rendering of the copy: the dunder as bold, the braces gone)
+      if (/echo __init__/.test(input)) return "RUN: echo **init** a,b done";
+      if (/Read it again, part (\d)/.test(input))
+        return `RUN: cat README.md | head -n ${/part (\d)/.exec(input)?.[1]}`;
       if (/echo one/.test(input)) return "RUN: echo one";
       if (/file block: lifted\.py/.test(input))
         return "WRITE: lifted.py\nRUN: cat > here.txt\nRUN: python3 lifted.py";
@@ -870,6 +1303,7 @@ type Turn = {
     workerCalls: number;
     steps: number;
     roles: Record<string, { calls: number; maxPromptChars: number }>;
+    finish?: { requirements: number; open: number; code: number; followUps: number };
   };
 };
 type Msg = {
@@ -1044,8 +1478,13 @@ check(
 );
 check(
   briefs.every((b) => !b.includes("STILL TO DO")) &&
-    briefs.every((b) => /copy it and work on the copy/.test(b) && /read-only modes/.test(b)),
-  "a brief carries the copy-before-you-open rule, and not the planner's to-do list",
+    briefs.every(
+      (b) =>
+        /run the result the way the request says it will be used/.test(b) &&
+        /keep a copy of any input before a tool that may change it opens it/.test(b) &&
+        /check the result against every size, count or shape the request states/.test(b),
+    ),
+  "a brief carries the three rules of checking (run it as used, copy before you open, hold it to the stated sizes), and not the planner's to-do list",
 );
 const turnStarts = lines.filter((l) => l.turnStart).map((l) => l.turnStart!);
 check(
@@ -1087,17 +1526,36 @@ check(notesText(rec.notes).length <= NOTES_LIMIT, "notes under the bound");
   );
 }
 check(
-  turn.orchestration?.modelCalls === 8 &&
+  turn.orchestration?.modelCalls === 9 &&
     turn.orchestration.workers === 3 &&
     turn.orchestration.workerCalls === 6 &&
     turn.orchestration.roles.planner.calls === 1 &&
+    turn.orchestration.roles.review.calls === 1 &&
     turn.orchestration.roles.final.calls === 1,
-  `the turn records what it cost: 8 model calls = planner + 3 workers x 2 + final (${JSON.stringify(turn.orchestration)})`,
+  `the turn records what it cost: 9 model calls = planner + 3 workers x 2 + the finish check + final (${JSON.stringify(turn.orchestration)})`,
+);
+check(
+  turn.orchestration?.finish?.requirements === 1 &&
+    turn.orchestration.finish.open === 0 &&
+    turn.orchestration.finish.followUps === 0,
+  "and what the finish check found: every requirement shown met, no follow-up task",
 );
 const exSeen = seen.slice();
 check(
-  exSeen.length === 2 && exSeen[0].role === "planner" && exSeen[1].role === "final",
-  "two plain calls reached the router",
+  exSeen.length === 3 &&
+    exSeen[0].role === "planner" &&
+    exSeen[1].role === "review" &&
+    exSeen[2].role === "final",
+  "three plain calls reached the router: the planner, the finish check, the closing words",
+);
+check(
+  /THE REQUEST, word for word:\n"""\nmulti: make a tiny module with a test and run it\n"""/.test(
+    exSeen[1].input,
+  ) &&
+    /RECORDED, files changed:\n- f-\d+\.txt \(add, /.test(exSeen[1].input) &&
+    /RECORDED, commands run[^\n]*\n- ok: python3 check\.py Create mathxpy/.test(exSeen[1].input) &&
+    /CLAIMED \(not evidence\):\n- finished/.test(exSeen[1].input),
+  "the finish check reads the request word for word against what was recorded; what the workers say is marked as a claim",
 );
 check(
   exSeen.every(
@@ -1121,7 +1579,7 @@ check(
   "the planner sees a one-line listing of the folder",
 );
 check(
-  /DONE \(as reported/.test(exSeen[1].input) && /LAST WORKER'S REPORT/.test(exSeen[1].input),
+  /DONE \(as reported/.test(exSeen[2].input) && /LAST WORKER'S REPORT/.test(exSeen[2].input),
   "the final call is written from the notes",
 );
 
@@ -1134,7 +1592,10 @@ check(
   "a one-task turn answers with the worker's report, no final call",
 );
 check(!/STATUS:/.test(last(turn)), "without its STATUS line");
-check(seen.length === 1 && seen[0].role === "planner", "one plain call (the planner)");
+check(
+  seen.map((s) => s.role).join(",") === "planner,review",
+  "two plain calls: the planner and the finish check",
+);
 check(
   /GOAL: multi: make a tiny module/.test(seen[0].input) &&
     /- Run the tests with pytest|Run the tests/.test(seen[0].input) &&
@@ -1145,8 +1606,12 @@ const fb = fake()
   .filter((l) => l.turnStart)
   .at(-1)!.turnStart!.brief;
 check(
-  /OVERALL GOAL: multi: make a tiny module/.test(fb) && /LATER REQUEST: now a follow-up/.test(fb),
-  "the worker's brief has the goal and the new request from the notes",
+  /EARLIER IN THIS THREAD: multi: make a tiny module/.test(fb) &&
+    /THE REQUEST, word for word[^\n]*\n"""\nnow a follow-up on that\n"""/.test(fb) &&
+    /YOUR TASK \(1 of 1\): now a follow-up on that\nA planner suggested this order of work[^\n]*1\. Follow up on it/.test(
+      fb,
+    ),
+  "the worker's brief has the new request word for word, the thread's earlier goal, and the planner's task only as a suggestion",
 );
 
 log("experimental: a direct answer");
@@ -1169,7 +1634,7 @@ await say(bl.id, "blocked: do the thing");
 turn = await turnDone(bl.id);
 check(turn.status === "completed", "turn completed");
 check(
-  seen.map((s) => s.role).join(",") === "planner,revise,final",
+  seen.map((s) => s.role).join(",") === "planner,revise,review,final",
   "the planner was asked to revise after the blocked task",
 );
 const rv = seen[1].input;
@@ -1194,7 +1659,7 @@ const li = await start("experimental");
 await say(li.id, "claims done");
 turn = await turnDone(li.id);
 check(
-  seen.map((s) => s.role).join(",") === "planner,revise,final" &&
+  seen.map((s) => s.role).join(",") === "planner,revise,review,final" &&
     /reported done, but its last command failed: python3 check\.py FAILLAST/.test(seen[1].input) &&
     /ImportError: no module named frob/.test(seen[1].input),
   "a worker that says DONE over a failed last command is not believed: the planner gets the command and its output",
@@ -1228,13 +1693,42 @@ await say(calls.id, "calls: loop on model calls");
 turn = await turnDone(calls.id);
 check(
   turn.status === "completed" &&
-    /^Stopped: this turn reached its limit of 30 model calls\./.test(last(turn)),
-  "model calls per turn: a worker that keeps calling is stopped",
+    /^Stopped with the job partly done: "LOOPCALLS more" hit a problem \(the worker stopped: it used its budget of 8 model requests for one task\), and 28 of this turn's 30 model calls are used: not enough is left to revise the plan and run it\. Not done: "LOOPCALLS more"\. Send "continue" to go on\./.test(
+      last(turn),
+    ),
+  `budgets follow what is left: the turn stops with a partial result that says what is not done, before the wall (${last(turn).split("\n")[0]})`,
 );
 check(
-  fake().filter((l) => l.interrupt).length === before + 3 && turn.orchestration?.modelCalls === 30,
-  "the worker was interrupted at the limit (after two were stopped at their own budget)",
+  fake().filter((l) => l.interrupt).length === before + 2 &&
+    turn.orchestration?.modelCalls === 28 &&
+    turn.orchestration.workerCalls === 26,
+  "the one worker of the unsplit job had 18 requests (one and a half tasks' worth), the next only the 8 that were left; the reserve for the finish was never spent on work",
 );
+check(
+  /Where things stand:/.test(last(turn)) &&
+    stored(calls.id)
+      .notes.pending.map((t) => t.title)
+      .join("|") === "LOOPCALLS more",
+  'the notes keep the task that is left, so "continue" goes on from it',
+);
+{
+  // The same with time: when the turn's minutes are nearly used, no task is started.
+  const caps = backend.caps as { turnMs: number };
+  const keep = caps.turnMs;
+  caps.turnMs = 60_000; // less than one task's minimum plus the reserve
+  const tm = await start("experimental");
+  await say(tm.id, "many parts");
+  turn = await turnDone(tm.id);
+  caps.turnMs = keep;
+  check(
+    turn.status === "completed" &&
+      /^Stopped with the job partly done: 0 of this turn's 1 minutes are used, and what is left is not enough for another task\. Not done: "Part 1", "Part 2"/.test(
+        last(turn),
+      ) &&
+      turn.orchestration?.workers === 0,
+    `and with the turn's time: too little left for a task ends the turn before one is started (${last(turn).split("\n")[0].slice(0, 90)})`,
+  );
+}
 
 const idleT = await start("experimental");
 await say(idleT.id, "silent model");
@@ -1431,8 +1925,9 @@ check(
   "SEARCH and LIST answer",
 );
 check(
-  seen.map((s) => s.role).join(",") === "think,translate,summarize,think,translate,summarize,think",
-  "three chats per step: think, translate, summarize",
+  seen.map((s) => s.role).join(",") ===
+    "think,translate,summarize,think,translate,summarize,think,review",
+  "three chats per step: think, translate, summarize; and one for the finish check before the answer",
 );
 check(
   seen.every(
@@ -1479,8 +1974,8 @@ check(
   `the stored summary is cut to its bound (${rec.summary.length} <= ${SUMMARY_LIMIT}) and ends with the answer given`,
 );
 check(
-  turn.orchestration?.modelCalls === 7 && turn.orchestration.steps === 3,
-  "7 model calls over 3 steps",
+  turn.orchestration?.modelCalls === 8 && turn.orchestration.steps === 3,
+  "8 model calls over 3 steps (the finish check is the eighth)",
 );
 lines = fake();
 const execs = lines.filter((l) => l.exec).map((l) => l.exec!);
@@ -1874,7 +2369,7 @@ check(
   waitLines(turn).length === 1 &&
     /^Waited .* \(2 retries\)\.$/.test(waitLines(turn)[0].text ?? "") &&
     turn.items.filter((i) => /^\*\*Task 2 of 3:\*\*/.test(i.text ?? "")).length === 1 &&
-    seen.map((s) => s.role).join(",") === "planner,final",
+    seen.map((s) => s.role).join(",") === "planner,review,final",
   `one status line, the task announced once, and no revision: it was not the task's fault (${JSON.stringify(waitLines(turn).map((i) => i.text))} ${turn.items.filter((i) => /^\*\*Task 2 of 3:\*\*/.test(i.text ?? "")).length} ${seen.map((s) => s.role).join(",")})`,
 );
 check(stored(fl.id).notes.done.length === 3, "all three tasks finished");
@@ -1906,7 +2401,7 @@ rec = stored(fx.id);
 check(
   turn.status === "completed" &&
     /^Going on from where the last turn stopped, 2 tasks left:/.test(turn.items[1].text ?? "") &&
-    seen.map((s) => s.role).join(",") === "final" &&
+    seen.map((s) => s.role).join(",") === "review,final" &&
     turn.orchestration?.workers === 2,
   '"continue" runs the two tasks that were left, without planning again',
 );
@@ -2016,42 +2511,61 @@ log("experimental: a plan must produce what was asked");
   );
 }
 seen.length = 0;
+let ioFrom = fake().filter((l) => l.turnStart).length;
 const io = await start("experimental");
 await say(io.id, "inspectonly: recover the rows from main.db and create out-xyz.json");
 turn = await turnDone(io.id);
+let ioBriefs = fake()
+  .filter((l) => l.turnStart)
+  .slice(ioFrom)
+  .map((l) => l.turnStart!.brief);
 check(
-  /^Plan, 2 tasks:/.test(turn.items[1].text ?? "") &&
-    /2\. Using what the notes show, produce what the request asks for \(create out-xyz\.json\): inspectonly/.test(
-      turn.items[1].text ?? "",
-    ),
-  "a plan that only inspects gets a last task that produces the file the request names",
+  ioBriefs.length === 2 &&
+    /YOUR TASK \(1 of 1\): inspectonly: recover the rows from main\.db and create out-xyz\.json\n/.test(
+      ioBriefs[0],
+    ) &&
+    /MUST MATCH EXACTLY[^\n]*main\.db \| out-xyz\.json/.test(ioBriefs[0]),
+  "a plan that only inspects does not narrow the job: the one worker's task is the request itself, with its names",
 );
 check(
-  seen.map((s) => s.role).join(",") === "planner,revise,final" &&
-    /Every planned task ran, but out-xyz\.json does not exist/.test(seen[1].input),
-  "the tasks ran and the file is still not there: the planner is asked once for the tasks that make it",
+  seen.map((s) => s.role).join(",") === "planner,review" &&
+    /RECORDED, found by code:\n- `out-xyz\.json`, named in the request, does not exist/.test(
+      seen[1].input,
+    ) &&
+    /- out-xyz\.json \(named in the request\): MISSING/.test(seen[1].input),
+  "the task ran and the file is not there: code finds that, and the finish check is told",
 );
 check(
-  /RECORDED AT THE END:\nout-xyz\.json: MISSING\nlast check: passed/.test(seen[2].input),
-  "the closing call is given what was recorded at the end",
+  /YOUR TASK \(2 of 2\): Settle the open points of the finish check/.test(ioBriefs[1]) &&
+    /- \(recorded\) `out-xyz\.json`, named in the request, does not exist/.test(ioBriefs[1]) &&
+    turn.orchestration?.finish?.code === 1 &&
+    turn.orchestration.finish.followUps === 1,
+  "one more task is made from it, by code (the planner is not asked again)",
 );
 check(
   turn.status === "completed" &&
-    last(turn) ===
-      "**Not finished.** `out-xyz.json`, named in the request, does not exist.\n\nAll done: the tasks finished.",
-  "and the reply says first that the deliverable does not exist, whatever the model wrote",
+    last(turn).startsWith(
+      "**Not finished.** `out-xyz.json`, named in the request, does not exist.\n\nDone.\n\nRESULT: finished",
+    ),
+  "and the reply says first that the deliverable does not exist, whatever the worker wrote",
 );
 seen.length = 0;
+ioFrom = fake().filter((l) => l.turnStart).length;
 const iok = await start("experimental");
 await say(iok.id, "inspectonly: recover the rows and create out-ok.json MAKES out-ok.json");
 turn = await turnDone(iok.id);
+ioBriefs = fake()
+  .filter((l) => l.turnStart)
+  .slice(ioFrom)
+  .map((l) => l.turnStart!.brief);
 check(
   turn.status === "completed" &&
     existsSync(path.join(work, "out-ok.json")) &&
-    seen.map((s) => s.role).join(",") === "planner,final" &&
-    last(turn) === "All done: the tasks finished." &&
-    /out-ok\.json: exists \(3 bytes\)/.test(seen[1].input),
-  "when the added task makes the file, the turn ends as usual",
+    ioBriefs.length === 1 &&
+    seen.map((s) => s.role).join(",") === "planner,review" &&
+    /^Done\.\n\nRESULT: finished/.test(last(turn)) &&
+    /- out-ok\.json \(add, 3 bytes\)\n {4}\| \[\]/.test(seen[1].input),
+  "when the worker makes the file, the turn ends as usual (the finish check saw the file and its first lines)",
 );
 
 log("experimental: a worker out of budget is stopped, and the plan revised");
@@ -2063,20 +2577,20 @@ turn = await turnDone(bu.id);
 check(
   turn.status === "completed" &&
     interrupts() === before + 1 &&
-    seen.map((s) => s.role).join(",") === "planner,revise,final",
-  "a worker that used its 12 requests is stopped; the turn goes on with a revised plan",
+    seen.map((s) => s.role).join(",") === "planner,revise,review,final",
+  "a worker that used its 18 requests is stopped; the turn goes on with a revised plan",
 );
 check(
-  /The worker was stopped: it used its budget of 12 model requests for one task\. It had not finished\./.test(
+  /The worker was stopped: it used its budget of 18 model requests for one task\. It had not finished\./.test(
     seen[1].input,
-  ) && /TASK THAT HIT A PROBLEM: LOOPCALLS circle/.test(seen[1].input),
+  ) && /TASK THAT HIT A PROBLEM: budget test/.test(seen[1].input),
   "the planner is told why, and which task",
 );
 check(
-  stored(bu.id).notes.problems.some((p) => /used its budget of 12 model requests/.test(p)) &&
-    traces.some((t) => t.type === "worker" && t.status === "stopped (calls)" && t.calls === 12) &&
-    turn.orchestration?.workerCalls === 16,
-  "the notes keep it; the turn spent 12 + 2 + 2 worker requests, not the turn's whole allowance",
+  stored(bu.id).notes.problems.some((p) => /used its budget of 18 model requests/.test(p)) &&
+    traces.some((t) => t.type === "worker" && t.status === "stopped (calls)" && t.calls === 18) &&
+    turn.orchestration?.workerCalls === 22,
+  "the notes keep it; the turn spent 18 + 2 + 2 worker requests, not the turn's whole allowance",
 );
 
 log("experimental: a planner that declines is asked again");
@@ -2085,7 +2599,7 @@ const dc = await start("experimental");
 await say(dc.id, "decline to plan");
 turn = await turnDone(dc.id);
 check(
-  seen.map((s) => s.role).join(",") === "planner,planner" &&
+  seen.map((s) => s.role).join(",") === "planner,planner,review" &&
     !seen[0].instructions.includes("Your last reply said") &&
     seen[1].instructions.includes("Your last reply said you cannot run commands"),
   '"I can\'t run commands on your computer" is not a plan: one more call, with a firmer prompt',
@@ -2101,7 +2615,7 @@ const dc2 = await start("experimental");
 await say(dc2.id, "declinetwice please");
 turn = await turnDone(dc2.id);
 check(
-  seen.length === 2 &&
+  seen.map((s) => s.role).join(",") === "planner,planner,review" &&
     turn.status === "completed" &&
     turn.orchestration?.workers === 1 &&
     /RESULT: finished "declinetwice please"/.test(last(turn)) &&
@@ -2149,6 +2663,340 @@ if (zsh) {
   check(
     !bare.startsWith("/orc-marker-bin:"),
     "(a bare login shell, what RUN used before, does not read it)",
+  );
+}
+
+// ---- the request word for word, the finish check, one worker, approvals ---------------------------
+log("experimental: a planner that respells a file name and a count");
+{
+  seen.length = 0;
+  const from = fake().filter((l) => l.turnStart).length;
+  const pp = await start("experimental");
+  const REQ =
+    "paraphrase UNSETTLED: write the 30 rows to exact_rows_final.csv\nand run it the way `python3 -m loader --strict` would";
+  await say(pp.id, REQ);
+  turn = await turnDone(pp.id);
+  const pb = fake()
+    .filter((l) => l.turnStart)
+    .slice(from)
+    .map((l) => l.turnStart!.brief);
+  check(
+    /\[1\] paraphrase UNSETTLED: write the 30 rows to exact_rows_final\.csv\n\[2\] and run it/.test(
+      seen[0].input,
+    ) &&
+      /MUST MATCH EXACTLY[^\n]*exact_rows_final\.csv \| python3 -m loader --strict \| --strict \| 30 rows/.test(
+        seen[0].input,
+      ),
+    "the planner is shown the request in numbered pieces, with the exact names code copied out of it",
+  );
+  check(
+    pb.length === 4 &&
+      /YOUR TASK \(1 of 3\): Write the 20 rows to rows_final\.csv/.test(pb[0]) &&
+      /YOUR TASK \(3 of 3\): Using what the notes show, produce what the request asks for \(create exact_rows_final\.csv\)/.test(
+        pb[2],
+      ) &&
+      pb.every(
+        (b) =>
+          b.includes(`"""\n${REQ}\n"""`) &&
+          /MUST MATCH EXACTLY[^\n]*exact_rows_final\.csv[^\n]*30 rows/.test(b) &&
+          b.length <= BRIEF_BUDGET,
+      ),
+    "the planner wrote 20 rows and rows_final.csv (so a task that names the real file is added by code); every brief still carries the request word for word and the exact file name and count",
+  );
+  const rvIn = seen.find((x) => x.role === "review")?.input ?? "";
+  check(
+    seen.map((x) => x.role).join(",") === "planner,review,final" &&
+      /found by code:\n- `exact_rows_final\.csv`, named in the request, does not exist; `rows_final\.csv` was made instead: a near miss/.test(
+        rvIn,
+      ) &&
+      /- rows_final\.csv \(add, 12 bytes\)\n {4}\| a near miss/.test(rvIn),
+    "at the end code flags the near-miss file by name, and the reviewer is given that with the file's first lines",
+  );
+  check(
+    /YOUR TASK \(4 of 4\): Settle the open points of the finish check/.test(pb[3]) &&
+      /- \(recorded\) `exact_rows_final\.csv`, named in the request, does not exist; `rows_final\.csv` was made instead/.test(
+        pb[3],
+      ) &&
+      /- NOT SHOWN: 30 rows — CHECK: wc -l exact_rows_final\.csv/.test(pb[3]) &&
+      /- VIOLATED: write the rows to exact_rows_final\.csv — the record shows rows_final\.csv instead/.test(
+        pb[3],
+      ) &&
+      !seen.some((x) => x.role === "revise"),
+    'the reviewer\'s "not shown" and "violated" become one follow-up task with their checks; no planner rewrites them',
+  );
+  const ans = last(turn);
+  check(
+    turn.status === "completed" &&
+      ans.startsWith(
+        "**Not finished.** `exact_rows_final.csv`, named in the request, does not exist; `rows_final.csv` was made instead: a near miss, not the file asked for",
+      ) &&
+      /\*\*Finish check\.\*\* [^\n]*2 of 3 requirements were not shown met:\n- violated: write the rows to exact_rows_final\.csv[^\n]*\n- not shown: 30 rows \(CHECK: wc -l exact_rows_final\.csv\)\nA follow-up task ran for them and did not settle them \(wc is missing\): treat them as \*\*not verified\*\*\./.test(
+        ans,
+      ),
+    `the answer says first what is not there, and then plainly what is not verified (${ans.split("\n")[0].slice(0, 70)}…)`,
+  );
+  check(
+    turn.orchestration?.finish?.requirements === 3 &&
+      turn.orchestration.finish.open === 2 &&
+      turn.orchestration.finish.code === 1 &&
+      turn.orchestration.finish.followUps === 1 &&
+      turn.orchestration.workers === 4 &&
+      turn.orchestration.roles.review.calls === 1,
+    "one reviewer call and one follow-up task, both counted on the turn",
+  );
+  check(
+    stored(pp.id).notes.original === REQ &&
+      stored(pp.id).notes.exact.includes("exact_rows_final.csv") &&
+      stored(pp.id).notes.deliverables.join() === "exact_rows_final.csv",
+    "the notes keep the request as written, its exact names and the file it has to produce",
+  );
+}
+
+log("experimental: a small job is one task");
+{
+  seen.length = 0;
+  let from = fake().filter((l) => l.turnStart).length;
+  const sm = await start("experimental");
+  await say(sm.id, "smalljob: tidy the folder");
+  turn = await turnDone(sm.id);
+  let sb = fake()
+    .filter((l) => l.turnStart)
+    .slice(from)
+    .map((l) => l.turnStart!.brief);
+  check(
+    sb.length === 1 &&
+      turn.orchestration?.workers === 1 &&
+      /^You are the worker for this job\./.test(sb[0]) &&
+      /YOUR TASK \(1 of 1\): smalljob: tidy the folder\nA planner suggested this order of work \(it has not seen the files; the request decides\): 1\. Look at the folder 2\. Tidy it 3\. Check it\n/.test(
+        sb[0],
+      ) &&
+      /FOLDER: .*work \(/.test(sb[0]) &&
+      !turn.items.some((i) => /^Plan, \d+ tasks/.test(i.text ?? "")),
+    "a planner that lists three tasks for a request that fits one brief, without saying why the job is large: one worker gets the whole request, the list only as a suggestion",
+  );
+  check(
+    seen.map((x) => x.role).join(",") === "planner,review" &&
+      turn.orchestration?.modelCalls === 4 &&
+      /^Done\.\n\nRESULT: finished/.test(last(turn)),
+    "it costs 4 model calls: the planner, the worker's 2 requests and the finish check (1 call, no follow-up); the worker's report is the answer",
+  );
+  seen.length = 0;
+  from = fake().filter((l) => l.turnStart).length;
+  const oj = await start("experimental");
+  await say(oj.id, "onejob: rename the thing");
+  turn = await turnDone(oj.id);
+  sb = fake()
+    .filter((l) => l.turnStart)
+    .slice(from)
+    .map((l) => l.turnStart!.brief);
+  check(
+    sb.length === 1 &&
+      /YOUR TASK \(1 of 1\): onejob: rename the thing\nDONE WHEN: what the request asks for exists exactly as it names it, and you have run it/.test(
+        sb[0],
+      ) &&
+      /RESULT: finished "onejob: rename the thing"/.test(last(turn)),
+    '"ONE" from the planner: the request is the task',
+  );
+}
+
+{
+  const mb = await start("experimental");
+  await say(mb.id, "onejob mumble: rename the thing");
+  turn = await turnDone(mb.id);
+  check(
+    turn.status === "completed" &&
+      /RESULT: finished/.test(last(turn)) &&
+      last(turn).endsWith(
+        "Finish check: not run (the reviewer's reply could not be read); nothing beyond the recorded commands was verified.",
+      ) &&
+      turn.orchestration?.finish?.requirements === 0 &&
+      turn.orchestration.workers === 1,
+    "a reviewer's reply that is cut off or in no form is not a review: the answer says the check did not run, and no task is made of it",
+  );
+}
+
+log("experimental: PARTIAL with other tasks still planned is progress, not a reason to plan again");
+{
+  seen.length = 0;
+  const pj = await start("experimental");
+  await say(pj.id, "partlyjob: inspect, then write it");
+  turn = await turnDone(pj.id);
+  const n = stored(pj.id).notes;
+  check(
+    turn.status === "completed" &&
+      seen.map((x) => x.role).join(",") === "planner,review,final" &&
+      turn.orchestration?.workers === 2 &&
+      n.done.length === 2 &&
+      /PARTLY inspect the inputs \(partly\): looked at it/.test(n.done[0]) &&
+      n.problems.some((p) =>
+        /left open: None for the inspection; the script itself is not written yet/.test(p),
+      ),
+    "a worker that finished its inspection and reported PARTIAL because the job is not done yet: the next task runs, no revision (what it left open is in the notes)",
+  );
+}
+
+log("experimental: a declined approval does not consume a revision");
+{
+  seen.length = 0;
+  let from = fake().filter((l) => l.turnStart).length;
+  const decline = (threadId: string, n: number) =>
+    until(`approval ${n} of ${threadId}`, () => {
+      const asked = notes.filter(
+        (m) =>
+          m.method === "item/commandExecution/requestApproval" && m.params?.threadId === threadId,
+      );
+      if (asked.length < n) return null;
+      ws.send(JSON.stringify({ id: asked[n - 1].id, result: { decision: "decline" } }));
+      return true;
+    });
+  const dk = await start("experimental", { approvalPolicy: "untrusted" });
+  await say(dk.id, "askme: run the checker");
+  await decline(dk.id, 1);
+  turn = await turnDone(dk.id);
+  let db = fake()
+    .filter((l) => l.turnStart)
+    .slice(from)
+    .map((l) => l.turnStart!.brief);
+  check(
+    turn.status === "completed" &&
+      db.length === 2 &&
+      !/was refused/.test(db[0]) &&
+      /RECORDED: an earlier worker on this task asked approval for a command and was refused: python3 check\.py ASKME run it\. Nobody will approve it\./.test(
+        db[1],
+      ) &&
+      /NEEDS APPROVAL \(asked and declined: do without, do not ask again\):\n- python3 check\.py ASKME run it/.test(
+        db[1],
+      ),
+    "the worker was refused an approval: the task is run once more with that recorded, and the notes hold it once",
+  );
+  check(
+    !seen.some((x) => x.role === "revise") &&
+      stored(dk.id).notes.approvals.join() === "python3 check.py ASKME run it" &&
+      stored(dk.id).notes.problems.length === 0 &&
+      turn.items.some((i) =>
+        /^An approval was declined \(`python3 check\.py ASKME run it`\)\. Running the task again without it\.$/.test(
+          i.text ?? "",
+        ),
+      ),
+    "no revision was spent on it, and it is not a problem of the plan",
+  );
+  check(
+    /RESULT: finished "ASKME run it"/.test(last(turn)) &&
+      /\n\nNeeds approval \(asked and declined, so not run\): `python3 check\.py ASKME run it`\.$/.test(
+        last(turn),
+      ) &&
+      !/Not verified|last recorded check failed/.test(last(turn)),
+    "the second worker did without it; the answer reports the command that needs approval (a command that never ran is not a failed check)",
+  );
+  seen.length = 0;
+  from = fake().filter((l) => l.turnStart).length;
+  const da = await start("experimental", { approvalPolicy: "untrusted" });
+  await say(da.id, "askalways: run the checker");
+  await decline(da.id, 1);
+  await decline(da.id, 2);
+  turn = await turnDone(da.id);
+  db = fake()
+    .filter((l) => l.turnStart)
+    .slice(from)
+    .map((l) => l.turnStart!.brief);
+  check(
+    turn.status === "completed" &&
+      db.length === 2 &&
+      seen.map((x) => x.role).join(",") === "planner" &&
+      turn.items.some((i) =>
+        /^That task needs an approval that was declined twice/.test(i.text ?? ""),
+      ) &&
+      stored(da.id).notes.problems.some((p) =>
+        /not finished, it needs approval: python3 check\.py ASKME ALWAYS run it/.test(p),
+      ) &&
+      /Needs approval \(asked and declined, so not run\): `python3 check\.py ASKME ALWAYS run it`\.$/.test(
+        last(turn),
+      ),
+    "refused twice: the job carries on without the task and says so; still no revision, and no reviewer for a turn that changed nothing",
+  );
+}
+
+log("hyperexperimental: FINISHED is checked before it is the answer");
+{
+  seen.length = 0;
+  const hf = await start("hyperexperimental");
+  await say(hf.id, "hfinish: put 3 lines in hfin.txt");
+  turn = await turnDone(hf.id);
+  check(
+    seen.map((x) => x.role).join(",") ===
+      "think,translate,summarize,think,review,think,translate,summarize,think",
+    `the first FINISHED goes to the finish check; what is open goes back to think (${seen.map((x) => x.role).join(",")})`,
+  );
+  const rvIn = seen.find((x) => x.role === "review")!.input;
+  check(
+    /THE REQUEST, word for word:\n"""\nhfinish: put 3 lines in hfin\.txt\n"""\nMUST MATCH EXACTLY[^\n]*hfin\.txt \| 3 lines/.test(
+      rvIn,
+    ) &&
+      /- hfin\.txt \(add, 6 bytes\)\n {4}\| a\n {4}\| b\n {4}\| c/.test(rvIn) &&
+      /CLAIMED \(not evidence\):\n- wrote hfin\.txt\./.test(rvIn),
+    "the reviewer gets the request word for word, the file with its first lines, and the claim as a claim",
+  );
+  const th3 = seen.filter((x) => x.role === "think")[2].input;
+  check(
+    /LAST STEP RESULTS:\nYou said FINISHED\. Before the answer goes out, a reviewer read the request against what was recorded\. These points are open:\n- NOT SHOWN: hfin\.txt holds 3 lines — CHECK: wc -l hfin\.txt/.test(
+      th3,
+    ) && /This is step 3; 1 step left after it\./.test(th3),
+    "the next think is told the open point and its check, and how few steps are left for it",
+  );
+  const trIn = seen.filter((x) => x.role === "translate")[1].input;
+  const ran = turn.items.find(
+    (i) => i.type === "commandExecution" && /wc -l/.test(i.command ?? ""),
+  );
+  check(
+    !trIn.includes("wc -l") &&
+      !trIn.includes("__counted__") &&
+      trIn.includes(
+        '[command block C1 (2 lines) is held by the executor; for it output only "RUN: C1"]',
+      ) &&
+      ran?.command === "cd . && wc -l hfin.txt\necho __counted__ {a,b}" &&
+      /3 hfin\.txt\n__counted__/.test(ran.aggregatedOutput ?? ""),
+    "the check's shell block never passed through translate: it ran as one script, as the think step wrote it",
+  );
+  check(
+    turn.status === "completed" &&
+      /^hfin\.txt has 3 lines, counted with wc -l\.\n\n\*\*Finish check\.\*\* [^\n]*1 of 2 requirements was not shown met:\n- not shown: hfin\.txt holds 3 lines \(CHECK: wc -l hfin\.txt\)\nMore steps were then run for it; the answer above says what was checked and what was not\.$/.test(
+        last(turn),
+      ) &&
+      turn.orchestration?.finish?.open === 1 &&
+      turn.orchestration.finish.followUps === 1 &&
+      turn.orchestration.roles.review.calls === 1,
+    `the answer carries what the check left open and that more steps were run for it (${last(turn).split("\n")[0]})`,
+  );
+  check(
+    seen.every((x) => x.instructions.length + x.input.length <= PROMPT_BUDGET),
+    "every prompt of the turn is within the budget",
+  );
+  seen.length = 0;
+  const hl = await start("hyperexperimental");
+  await say(hl.id, "hlooking");
+  turn = await turnDone(hl.id);
+  {
+    const th = seen.filter((x) => x.role === "think");
+    check(
+      turn.status === "completed" &&
+        th.length === 4 &&
+        !/only looked/.test(th[1].input) &&
+        /LAST STEP RESULTS:\n\(recorded\) The last 2 steps only looked; nothing was written or run\. What a step reads is shown once/.test(
+          th[2].input,
+        ) &&
+        /\(recorded\) The last 3 steps only looked/.test(th[3].input),
+      "after two steps that only read, the next think is told that nothing was written and that reading again will not help",
+    );
+  }
+  seen.length = 0;
+  const hm = await start("hyperexperimental");
+  await say(hm.id, "hmangle");
+  turn = await turnDone(hm.id);
+  check(
+    turn.items.some(
+      (i) => i.command === "echo __init__ {a,b} done" && /__init__/.test(i.aggregatedOutput ?? ""),
+    ) && seen.map((x) => x.role).join(",") === "think,translate,summarize,think",
+    "a one-line command the translator sent back with its marks lost runs as the think step wrote it (and a turn that changed nothing has no finish check)",
   );
 }
 
@@ -2275,8 +3123,8 @@ idleBriefs = fake()
   .map((l) => l.turnStart!.brief);
 const idleRevise = seen.find((s) => s.role === "revise")?.input ?? "";
 check(
-  /YOUR TASK \(1 of 1\): NOTOOLS ALWAYS/.test(idleBriefs[0]) &&
-    /YOUR TASK \(1 of 1\): NOTOOLS ALWAYS/.test(idleBriefs[1]) &&
+  /YOUR TASK \(1 of 1\): notools always job\n[^\n]*NOTOOLS ALWAYS/.test(idleBriefs[0]) &&
+    /YOUR TASK \(1 of 1\): notools always job\n[^\n]*NOTOOLS ALWAYS/.test(idleBriefs[1]) &&
     /YOUR TASK \(1 of 2\): Do the thing another way/.test(idleBriefs[2] ?? "") &&
     /\(recorded\) Twice a worker given this task stopped without running any command/.test(
       idleRevise,

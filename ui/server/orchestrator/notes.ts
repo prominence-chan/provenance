@@ -12,6 +12,10 @@
 // The notes also hold where the plan stands: the tasks still to do (kept current as tasks start
 // and finish, so a turn that ends early leaves the list "continue" resumes from) and the files
 // the request names that did not exist when it was made (what the job has to produce).
+//
+// And they hold the request itself, as written (`original`), with the exact names code copied
+// out of it (`exact`; request.ts): what every brief quotes word for word, whatever a planner made
+// of it. Commands a worker asked approval for and was refused are kept once each (`approvals`).
 
 export interface Notes {
   /** What the user asked for, newest last (each clipped). The first is the thread's goal. */
@@ -27,10 +31,28 @@ export interface Notes {
   /** Open problems (blockers reported and not since resolved), newest last. */
   problems: string[];
   /** Tasks planned and not finished, in order (empty when a plan ran to its end). */
-  pending: { title: string; done: string }[];
+  pending: PendingTask[];
   /** Files the latest request names that it did not find: what has to exist at the end. */
   deliverables: string[];
+  /** The latest request that started a job, word for word (bounded only by ORIGINAL_LIMIT). */
+  original: string;
+  /** The exact names in it: paths, quoted strings, flags, numbers with units (request.ts). */
+  exact: string[];
+  /** Commands whose approval was asked and declined, newest last (each once). */
+  approvals: string[];
 }
+
+export interface PendingTask {
+  title: string;
+  done: string;
+  needs?: number[];
+  detail?: string;
+  whole?: boolean;
+  followUp?: boolean;
+}
+
+/** How much of a request is kept word for word (a request longer than this loses its middle). */
+export const ORIGINAL_LIMIT = 16_000;
 
 export const NOTES_LIMIT = 2400;
 
@@ -44,6 +66,9 @@ export function emptyNotes(): Notes {
     problems: [],
     pending: [],
     deliverables: [],
+    original: "",
+    exact: [],
+    approvals: [],
   };
 }
 
@@ -101,11 +126,24 @@ export function clearProblems(n: Notes): void {
   n.problems = [];
 }
 
+/** A command that needed an approval nobody gave: recorded once. */
+export function addApproval(n: Notes, cmd: string): void {
+  const c = clip(cmd, 160);
+  if (!c || n.approvals.includes(c)) return;
+  n.approvals.push(c);
+  if (n.approvals.length > 4) n.approvals.shift();
+}
+
 /** The plan as it stands: the task being worked on and those after it (at most 8 are kept). */
-export function setPending(n: Notes, tasks: { title: string; done: string }[]): void {
-  n.pending = tasks
-    .slice(0, 8)
-    .map((t) => ({ title: clip(t.title, 240), done: clip(t.done, 120) }));
+export function setPending(n: Notes, tasks: PendingTask[]): void {
+  n.pending = tasks.slice(0, 8).map((t) => ({
+    title: clip(t.title, 240),
+    done: clip(t.done, 120),
+    ...(t.needs?.length ? { needs: t.needs.slice(0, 60) } : {}),
+    ...(t.detail ? { detail: t.detail.slice(0, 1600) } : {}),
+    ...(t.whole ? { whole: true } : {}),
+    ...(t.followUp ? { followUp: true } : {}),
+  }));
 }
 
 function render(n: Notes, withPending: boolean): string {
@@ -128,6 +166,10 @@ function render(n: Notes, withPending: boolean): string {
   if (n.problems.length) {
     out.push("PROBLEMS HIT (later tasks may have fixed them):");
     for (const p of n.problems) out.push(`- ${p}`);
+  }
+  if (n.approvals.length) {
+    out.push("NEEDS APPROVAL (asked and declined: do without, do not ask again):");
+    for (const a of n.approvals) out.push(`- ${a}`);
   }
   if (withPending && n.pending.length) {
     out.push("STILL TO DO (planned, not finished):");
@@ -161,21 +203,31 @@ export function notesText(n: Notes, limit = NOTES_LIMIT, withPending = true): st
   return text.length > limit ? clipMiddle(text, limit) : text;
 }
 
-/** RESULT / CHANGES / VALIDATION / BLOCKERS out of a worker's report (any may be missing). */
+/**
+ * The notes as text for a reader with less room than the notes' own bound (a worker's brief),
+ * without folding what is stored: the fold is made on a copy.
+ */
+export function notesView(n: Notes, limit: number, withPending = false): string {
+  return notesText(structuredClone(n), limit, withPending);
+}
+
+/** RESULT / CHANGES / VALIDATION / NOT CHECKED / BLOCKERS out of a worker's report (any may be missing). */
 export function reportSections(text: string): {
   result: string;
   changes: string;
   validation: string;
+  unchecked: string;
   blockers: string;
 } {
-  const out = { result: "", changes: "", validation: "", blockers: "" };
+  const out = { result: "", changes: "", validation: "", unchecked: "", blockers: "" };
   let cur: keyof typeof out | null = null;
   const loose: string[] = [];
   for (const raw of text.split("\n")) {
     const line = raw.replace(/^\s*(?:[-*#>]+\s*)*/, "").replace(/\*\*/g, "");
-    const m = /^(result|changes?|validation|verification|blockers?|status)\s*[:\-–—]\s*(.*)$/i.exec(
-      line,
-    );
+    const m =
+      /^(result|changes?|validation|verification|not checked|unchecked|not verified|blockers?|status)\s*[:\-–—]\s*(.*)$/i.exec(
+        line,
+      );
     if (m) {
       const k = m[1].toLowerCase();
       cur =
@@ -185,9 +237,11 @@ export function reportSections(text: string): {
             ? "changes"
             : k.startsWith("valid") || k.startsWith("verif")
               ? "validation"
-              : k.startsWith("blocker")
-                ? "blockers"
-                : null;
+              : k.startsWith("not ") || k === "unchecked"
+                ? "unchecked"
+                : k.startsWith("blocker")
+                  ? "blockers"
+                  : null;
       if (cur && m[2].trim()) out[cur] = m[2].trim();
       continue;
     }
@@ -197,5 +251,6 @@ export function reportSections(text: string): {
   }
   if (!out.result) out.result = loose.join(" ");
   if (/^(none|no|n\/a|nothing|-)\.?$/i.test(out.blockers.trim())) out.blockers = "";
+  if (/^(none|no|n\/a|nothing|-)\.?$/i.test(out.unchecked.trim())) out.unchecked = "";
   return out;
 }

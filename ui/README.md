@@ -538,33 +538,57 @@ empty folder) that only the backend talks to, and call the router directly for p
 call, so each lands in a new chat). Every prompt is in `prompts.ts`; a plain call is held to 8,000
 characters.
 
-- **Experimental** (`experimental.ts`): a planner call returns a short list of mini tasks in plain
-  text (`parse.ts` reads it leniently); each task runs as a worker, a fresh ephemeral thread of
-  the stock harness with the thread's sandbox and approval preset, given a brief (goal, task,
-  done-criteria, notes); its commands, edits and approval requests show in the visible thread;
-  its last message is its report. The notes (`notes.ts`, at most 2,400 characters, oldest folded
-  first) are the only thing carried between tasks and turns: files and commands as recorded,
-  one line per task as reported, and the tasks still to do (so "continue" after a turn that
-  ended early runs what was left, without planning again). A blocked task, or a worker that used
-  up its own budget (24 requests, 10 minutes), sends the remaining list back to the planner. A
-  plan that only looks around gets a last task that makes what the request asks for; a file the
-  request named that is still missing at the end, or a last recorded command that failed, is
-  stated first in the reply. A planner reply that declines ("I can't run commands…") is asked for
-  once more.
+- **Experimental** (`experimental.ts`): a planner call decides between one worker for the whole
+  job (`ONE`, the normal case, and the outcome for any request that fits a brief unless the
+  planner says why the job is `LARGE`) and a short list of tasks in plain text (`parse.ts` reads
+  it leniently). A worker is a fresh ephemeral thread of the stock harness with the thread's
+  sandbox and approval preset, given a brief; its commands, edits and approval requests show in
+  the visible thread; its last message is its report. The notes (`notes.ts`, at most 2,400
+  characters, oldest folded first) are the only thing carried between tasks and turns: files and
+  commands as recorded, one line per task as reported, and the tasks still to do (so "continue"
+  after a turn that ended early runs what was left, without planning again). A blocked task, or
+  a worker that used up its own budget (24 requests and 10 minutes for a task, half as much
+  again for an unsplit job, and never more than the turn has left), sends the remaining list
+  back to the planner. An approval that is declined is not a reason to plan again: it is recorded
+  once, the task is run once more without that command, and after a second refusal the job goes
+  on and the reply names the command. A planner reply that declines ("I can't run commands…") is
+  asked for once more.
 - **Hyperexperimental** (`hyper.ts`): per step, three new chats (think in plain words → translate
   into `RUN / READ / LIST / SEARCH / WRITE / REPLACE` → summarize) and one execution through
   app-server's `command/exec` under the thread's sandbox as an explicit policy (reads always
   read-only; "Ask every time" shows each command and file change for approval first). Only the
-  summary (2,500 characters) and the last step's results are carried. File bodies are written
-  once: the think step gives a file in a ` ```file:<path> ` block, which is lifted out and attached
-  to the translated `WRITE` verbatim (the translator sees a marker); a `WRITE` with no content or
-  a `cat >` with no heredoc is refused before it runs and fed back. A `RUN` sees the environment
+  summary (2,500 characters) and the last step's results are carried. Nothing exact passes
+  through the translate step: a file the think step gives in a ` ```file:<path> ` block and a
+  shell block (` ```bash `) are lifted out and attached to the translated `WRITE` / `RUN`
+  verbatim (the translator sees a marker), and a one-line command or path it did retype is set
+  back to the think step's spelling where characters were lost; a `WRITE` with no content or a
+  `cat >` with no heredoc is refused before it runs and fed back. A `RUN` sees the environment
   the harness's shell tool gives a command (the login shell plus the rc file, captured once, then
   a non-login shell), not a bare `zsh -lc`.
 
+Both carry **the request word for word** (`request.ts`): every worker brief and every think
+prompt quotes the person's own text (whole when it fits; otherwise the pieces a task needs, which
+the planner names by number, with the gaps marked and the path of a temp file that holds all of
+it), together with a "must match exactly" list that code copies out of the request: paths, file
+names, quoted strings, flags, calls, numbers with their units. No model restates them on the way.
+
+Both end a turn that changed something with **a finish check**: by code, every file the request
+names as output exists under exactly that name and place (a file of nearly that name is reported
+as a near miss), nothing was written outside the folder to a path the request does not name, and
+the last recorded check did not fail; then one plain call, a fresh reader given the request and
+what was recorded (files with their first lines, commands with how they ended), answers per
+requirement `MET` / `NOT SHOWN` / `VIOLATED` with the cheapest check for what is not shown. What
+is open becomes one more task (Experimental; written by code, not replanned) or at most two more
+steps (Hyperexperimental), and the reply states first what code found and then what stayed not
+verified. The briefs and the think prompt carry three rules of checking: run the result the way
+the request says it will be used, failure cases included; copy an input before a tool that may
+change it opens it; hold the result to every size, count or shape the request states.
+
 Loop guards are `Caps` in `backend.ts` (tasks, tries per task, plan revisions, steps, model calls
-per turn, requests and minutes per worker); one that stops the work ends the turn with a plain
-message. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
+and minutes per turn, requests and minutes per worker); one that stops the work ends the turn with
+a plain message. Experimental spends by what the turn has left (a reserve is kept for the finish
+check): a worker gets no more than is left, a revision is made only when it and one more task
+still fit, and otherwise the turn stops with what it has and says what is not done. A model call the router can't serve (429, 5xx, no answer, a timeout, an empty reply) is
 retried inside the turn after 5, 20, 60 and 120 s (`PROVENANCE_ORC_RETRY_S`), with a status line
 in the thread; a worker whose own request failed is run again on the same schedule; interrupt ends
 a wait at once. Only then does the turn fail with the router's message, and what was done stays

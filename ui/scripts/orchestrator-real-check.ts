@@ -12,7 +12,7 @@
 //   node scripts/orchestrator-real-check.ts stock [model]      the same job on the stock harness
 //                                                              in one thread, for comparison
 //
-// Env: PROVENANCE_BIN (default ~/.local/bin/provenance), TIERLM_URL (default
+// Env: ORC_MAX_CALLS (a cap on one run's model calls), PROVENANCE_BIN (default ~/.local/bin/provenance), TIERLM_URL (default
 // http://127.0.0.1:4141), PCORE_TOKEN / TIERLM_TOKEN (never printed), ORC_REAL_DIR (where the
 // scratch goes; default the system temp folder), ORC_JOB (the request).
 // Prints what each turn cost: model calls per role, the largest prompt per role (characters),
@@ -78,7 +78,9 @@ const appServer = new AppServerProcess({
 const traces: TraceEvent[] = [];
 const cleanup = () => {
   appServer.stop();
-  if (mode === "sandbox") rmSync(scratch, { recursive: true, force: true });
+  // (the app-server may still be writing as it stops: try again rather than leave the folder)
+  if (mode === "sandbox")
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 };
 
 type Item = {
@@ -111,6 +113,10 @@ async function withBackend<T>(
     dir: path.join(scratch, "data"),
     appServer: () => appServer,
     callModel,
+    // ORC_MAX_CALLS bounds a real run's model calls (the turn stops with a partial result).
+    ...(Number(process.env.ORC_MAX_CALLS) > 0
+      ? { caps: { modelCalls: Number(process.env.ORC_MAX_CALLS) } }
+      : {}),
     log: () => {},
     trace: (e) => traces.push(e),
   });
@@ -241,7 +247,7 @@ try {
               ? `RUN: ${PARITY_CMD}`
               : `WRITE: inside.txt\n<<<\nhello\n>>>\nWRITE: ${outside}/escape.txt\n<<<\nno\n>>>\nRUN: echo ran > by-run.txt; echo x > ${outside}/escape2.txt; cat inside.txt\nREAD: inside.txt\nREPLACE: inside.txt\n<<<\nhello\n===\nhello again\n>>>\nSEARCH: again IN .`
             : "wrote things";
-      return { text: reply, promptChars: 0, servedBy: "script", ms: 0 };
+      return { text: reply, promptChars: 0, servedBy: "script", session: "script", ms: 0 };
     };
     await withBackend(script, async ({ call, turnDone, approvals }) => {
       const run = async (sandbox: string, approvalPolicy: string) => {
