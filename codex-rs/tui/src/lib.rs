@@ -88,6 +88,7 @@ pub use session_archive_commands::run_session_archive_command;
 pub use session_queue_commands::run_session_queue_command;
 use std::fs::OpenOptions;
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -200,6 +201,7 @@ mod notifications;
 #[cfg(any(not(debug_assertions), test))]
 mod npm_registry;
 pub(crate) mod onboarding;
+mod open_in_codex;
 mod oss_selection;
 mod pager_overlay;
 mod projectless;
@@ -1062,6 +1064,7 @@ async fn cloud_config_bundle_for_app_server_target(
     bootstrap_config: &ConfigTomlLoadResult,
     codex_home: &Path,
     embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
+    resolution: Option<&codex_config::ConfigServerResolution>,
 ) -> std::io::Result<CloudConfigBundleLoader> {
     managed_config_bundle_loader_for_storage(
         embedded_network_policy
@@ -1070,6 +1073,7 @@ async fn cloud_config_bundle_for_app_server_target(
             )),
         bootstrap_config.config_layer_stack.requirements_toml(),
         /*enable_codex_api_key_env*/ false,
+        resolution,
     )
     .await
 }
@@ -1504,6 +1508,10 @@ async fn run_ratatui_app(
                         embedded_network_policy.bind_bootstrap_auth(initial_config.auth_config()),
                         initial_config.config_layer_stack.requirements_toml(),
                         /*enable_codex_api_key_env*/ false,
+                        // The server may have started requiring OAuth during onboarding.
+                        cloud_config_bundle
+                            .config_server_resolution()
+                            .filter(|resolution| resolution.resolved.oauth.is_some()),
                     )
                     .await?;
                 }
@@ -2068,6 +2076,14 @@ async fn run_ratatui_app(
                 trust_decision_was_made = true;
             }
         } else if consent.should_exit {
+            // Startup cannot return to the overview's reconnect loop until bootstrap completes.
+            if let codex_app_server_client::AppServerRequestHandle::Remote(handle) =
+                app_server.request_handle()
+                && handle.is_closed()
+            {
+                shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
+                color_eyre::eyre::bail!(onboarding::SETUP_CONNECTION_LOST);
+            }
             if !uses_remote_workspace {
                 config = load_config_or_exit_with_fallback_cwd(
                     cli_kv_overrides.clone(),
@@ -2349,13 +2365,10 @@ async fn run_ratatui_app(
     app_result
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "TUI should no longer be displayed, so we can write to stderr."
-)]
 fn report_restore_error(result: color_eyre::Result<()>) {
     if let Err(err) = result {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr().lock(),
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
     }

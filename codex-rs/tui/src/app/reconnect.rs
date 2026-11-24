@@ -21,6 +21,7 @@ pub(super) struct ReconnectState {
     pub(super) failed: bool,
     pub(super) presentation: ReconnectPresentation,
     pub(super) seen_version_notice: Option<String>,
+    pub(super) cloud_resume: Option<super::resume_preparation::CloudResume>,
 }
 
 pub(super) struct Reconnected {
@@ -415,7 +416,7 @@ impl App {
         if let Some(input) = input.as_mut() {
             input.reconnect_pending = true;
         }
-        self.store_active_thread_receiver().await;
+        self.save_active_thread_state().await;
         // Old request handles stay attached to the dead connection. Rotating the event channel
         // prevents their late completions from submitting follow-up operations on the new one.
         let (tx, rx) = mpsc::unbounded_channel();
@@ -423,6 +424,7 @@ impl App {
         self.app_server_backend_id = Some(session.backend_id());
         *app_event_rx = rx;
         self.pending_thread_switch_resets = 0;
+        self.backtrack.revert_queued = false;
         for (parent, pane) in &mut self.sidebars {
             pane.focus_document_request = None;
             pane.agents.pending_link = None;
@@ -482,7 +484,7 @@ impl App {
             connection.is_managed_daemon = connection.is_local_daemon && managed_daemon;
         }
         self.model_catalog = Arc::new(
-            ModelCatalog::new(bootstrap.available_models)
+            ModelCatalog::new(bootstrap.available_models, bootstrap.catalog_provider)
                 .for_backend(app_server.backend_id(), &mut self.provider_writes)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
@@ -597,10 +599,9 @@ impl App {
             self.thread_event_channels.insert(id, channel);
         }
         if let Some(id) = displayed
-            && let Some((receiver, snapshot)) = self.activate_thread_for_replay(id).await
+            && let Some(snapshot) = self.activate_thread_for_replay(id).await
         {
             self.active_thread_id = Some(id);
-            self.active_thread_rx = Some(receiver);
             self.recap.seed_from_turns(&snapshot.turns, Instant::now());
             if let Err(err) = self
                 .render_thread_snapshot(
@@ -625,7 +626,6 @@ impl App {
             }
         } else {
             self.active_thread_id = None;
-            self.active_thread_rx = None;
             self.primary_thread_id = None;
             self.primary_session_configured = None;
             let init = self.chatwidget_init_for_forked_or_resumed_thread(
