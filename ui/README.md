@@ -184,7 +184,7 @@ thread title, prompt, path, project, output or account ever reaches Discord. It 
 | title               | Provenance (the Discord application's name)                                                              | same                                 |
 | details             | `Idle · Solstice`                                                                                        | `Working · Solstice` + elapsed timer |
 | state               | `by SkyeNXT · coming soon`                                                                               | same                                 |
-| large image (hover) | the app icon (`Provenance · made by Yufan at SkyeNXT`; a click opens the repo)                           | same                                 |
+| large image (hover) | the app icon (`Provenance · harness by SkyeNXT`; a click opens the repo)                                 | same                                 |
 | small image (hover) | the tier's glyph (`Solstice tier · frontier`); Claude Code / Codex: their glyph (`Claude Code fallback`) | same                                 |
 | button              | `Provenance on GitHub` (Discord shows buttons to others, not to you)                                     | same                                 |
 

@@ -191,7 +191,7 @@ await step("activity: the literal lines, images, hover texts and button", () => 
     state: "Harness by SkyeNXT · coming soon",
     assets: {
       large_image: img("provenance"),
-      large_text: "Provenance · harness by SkyeNXT · made by Yufan",
+      large_text: "Provenance · harness by SkyeNXT",
       large_url: "https://github.com/prominence-chan/provenance",
       small_image: img("tier-solstice"),
       small_text: "Solstice tier · frontier",
@@ -206,7 +206,9 @@ await step("activity: the literal lines, images, hover texts and button", () => 
   assert.equal(idle.details, "Claude Code · Fallback");
   assert.equal(idle.timestamps, undefined, "no timer while idle");
   assert.equal((idle.assets as Record<string, string>).small_text, "Claude Code fallback");
-  const none = buildActivity(sanitizePresence({ kind: null, orchestrator: null, working: false, since: null }));
+  const none = buildActivity(
+    sanitizePresence({ kind: null, orchestrator: null, working: false, since: null }),
+  );
   assert.equal(none.details, "Provenance");
   const hyper = buildActivity(
     sanitizePresence({ kind: "nova", orchestrator: "hyperexperimental", working: false }),
@@ -262,7 +264,12 @@ await step("sanitizePresence keeps only kind / working / since", () => {
     "absurd start",
   );
   assert.equal(sanitizePresence({ kind: "spark", working: false, since: Date.now() }).since, null);
-  assert.deepEqual(sanitizePresence(null), { kind: null, orchestrator: null, working: false, since: null });
+  assert.deepEqual(sanitizePresence(null), {
+    kind: null,
+    orchestrator: null,
+    working: false,
+    since: null,
+  });
 });
 
 await step("no client id: nothing connects, nothing is logged", async () => {
