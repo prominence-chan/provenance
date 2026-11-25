@@ -66,7 +66,11 @@
     "vite": "^8.3.8"
   },
   "main": "build-electron/main.cjs",
-  "author": "prominence-chan",
+  "homepage": "https://github.com/prominence-chan/provenance",
+  "author": {
+    "name": "prominence-chan",
+    "email": "noreply@prominence.dev"
+  },
   "build": {
     "appId": "dev.prominence.provenance",
     "productName": "Provenance",
@@ -184,6 +188,7 @@
       ],
       "icon": "design/icon/icon-512.png",
       "category": "Development",
+      "maintainer": "prominence-chan <noreply@prominence.dev>",
       "artifactName": "Provenance-${version}-${arch}.${ext}"
     },
     "afterPack": "scripts/adhoc-sign.cjs"
