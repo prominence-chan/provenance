@@ -52,3 +52,9 @@ export function harnessMessage(message: string, fallback = false): string {
   if (fallback) return message;
   return message.replace(/(?<![\w-])Codex(?![\w]| (?:CLI|Cloud|Apps|Desktop)\b)/g, "Provenance");
 }
+
+/** Platform shortcut prefix ("⌘" on macOS, "Ctrl+" on Windows/Linux). */
+export function modKey(): string {
+  if (typeof navigator === "undefined") return "⌘";
+  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent) ? "⌘" : "Ctrl+";
+}

@@ -223,7 +223,7 @@ export class FallbackBackend {
         return {};
       }
       default:
-        throw new Error(`${method} is not available for Claude Code / Codex threads`);
+        throw new Error(`${method} isn't supported for fallback threads`);
     }
   }
 
@@ -611,7 +611,13 @@ export function agyArgs(t: {
   if (t.sandbox === "danger-full-access") args.push("--dangerously-skip-permissions");
   else if (t.sandbox === "read-only") args.push("--mode", "plan", "--sandbox");
   else args.push("--mode", "accept-edits");
-  if (t.model) args.push("--model", t.model);
+  if (t.model) {
+    // Strip any legacy effort suffix when an explicit --effort is passed so `agy` doesn't reject it.
+    const modelId = t.effort
+      ? t.model.replace(/-(none|minimal|low|medium|high|xhigh|max|ultra)$/, "")
+      : t.model;
+    args.push("--model", modelId);
+  }
   if (t.effort) args.push("--effort", t.effort);
   if (t.session) args.push("--conversation", t.session);
   return args;

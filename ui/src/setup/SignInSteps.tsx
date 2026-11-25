@@ -60,7 +60,7 @@ export function SignInStep({
     setHint(
       r.ok && r.value.shown
         ? null
-        : "Couldn't bring it forward. Look for the sign-in browser in the Dock or with ⌘-Tab.",
+        : "Couldn't bring it forward. Look for the sign-in browser in your app switcher.",
     );
   };
   if (state === "preparing") {

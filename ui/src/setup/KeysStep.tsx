@@ -150,7 +150,7 @@ export function KeysStep({
       </div>
       <p className="setup-lead setup-keys-lead">
         Free API tiers, pooled by tier. Each provider needs a free key from its own site; the router
-        keeps it on this Mac, readable by you only.
+        keeps it on this machine, readable by you only.
       </p>
       <GeminiKeyPrompt
         accounts={accounts}

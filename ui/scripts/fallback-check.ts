@@ -617,19 +617,25 @@ check(
 log("antigravity");
 searchPath = `${bin}:${nodeDir}:/usr/bin:/bin`;
 const agyHealth = await checkAntigravity(env);
-const neonHigh = agyHealth.models.find((m) => m.id === "gemini-4-neon-high");
+const neon = agyHealth.models.find((m) => m.id === "gemini-4-neon");
+const orchNeon = agyHealth.models.find((m) => m.id === "gemini-pro-orchestrator-neon");
+const gptOss = agyHealth.models.find((m) => m.id === "gpt-oss-120b");
 check(
   agyHealth.installed &&
     agyHealth.version === "1.5.14" &&
-    !!neonHigh &&
-    neonHigh.efforts?.join(",") === "low,medium,high,xhigh,max" &&
-    neonHigh.defaultEffort === "high" &&
+    agyHealth.models.map((m) => m.id).join(",") ===
+      ",gemini-4-neon,gemini-pro-orchestrator-neon,claude-sonnet-5-5,gpt-oss-120b" &&
+    neon?.label === "Gemini 4 Neon" &&
+    neon?.efforts?.join(",") === "low,medium,high,xhigh" &&
+    neon?.defaultEffort === "high" &&
+    orchNeon?.efforts?.length === 0 &&
+    gptOss?.efforts?.length === 0 &&
     agyHealth.usage?.weeklyRemaining === 0.92 &&
     agyHealth.usage?.buckets?.claude_gpt?.weeklyRemaining === 1,
-  "antigravity found, version, TSV models, stderr efforts, and /usage weekly buckets read",
+  "antigravity collapses effort-suffixed models into base entries with per-model efforts + /usage buckets",
 );
 const agyStart = (await c.call("thread/start", {
-  model: "antigravity:gemini-4-neon-high",
+  model: "antigravity:gemini-4-neon",
   cwd: work,
   approvalPolicy: "on-request",
   sandbox: "workspace-write",
@@ -660,12 +666,12 @@ check(
     agyRun.argv.includes("--output-format") &&
     !agyRun.argv.includes("-p") &&
     agyRun.argv.includes("--model") &&
-    agyRun.argv.includes("gemini-4-neon-high") &&
+    agyRun.argv.includes("gemini-4-neon") &&
     agyRun.argv.includes("--effort") &&
     agyRun.argv.includes("high") &&
     agyStdin.event === "user" &&
     agyStdin.message?.content === "Check agy",
-  "antigravity uses --input-format/--output-format stream-json with JSON user event on stdin",
+  "antigravity uses --input-format/--output-format stream-json with base model + --effort and JSON stdin",
 );
 const agyAfter = await getFallbacks({ ...env, usageFile: path.join(dataDir, "usage.json") }, true);
 check(

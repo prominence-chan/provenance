@@ -1852,6 +1852,9 @@ button.turn-models-list:hover .turn-models-more {
   width: max-content;
   min-width: 200px;
   max-width: 300px;
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
   padding: 4px;
   background: var(--panel-2);
   border: 1px solid var(--border-strong);

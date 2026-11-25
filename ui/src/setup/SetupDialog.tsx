@@ -231,7 +231,7 @@ export function SetupDialog() {
     body = (
       <PageState
         title="The model router isn't answering"
-        text="Sign-ins and models go through provenance-core, Provenance's model router, and it isn't answering right now."
+        text="Provenance's model router (provenance-core) isn't responding right now."
         action={
           <button className="btn-primary setup-cta" onClick={startRouter} disabled={starting}>
             {starting ? "Starting…" : appShell ? "Start it" : "Try again"}

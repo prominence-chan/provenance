@@ -103,7 +103,7 @@ export function SitesStep({
           </button>
         </>
       )}
-      <h4 className="meta setup-label">For threads that outgrow them</h4>
+      <h4 className="meta setup-label">When a thread outgrows free models</h4>
       <button
         className="setup-site setup-fallbacks"
         onClick={onFallbacks}
@@ -381,9 +381,7 @@ function SiteSettings({
       >
         <label htmlFor={`cap-${p.id}`} className="setup-switch-text">
           <span>Daily limit</span>
-          <span className="meta">
-            Chats per account per day, to stay well inside the site's own limits
-          </span>
+          <span className="meta">Chats per account per day, to stay inside the site's limits</span>
         </label>
         <span className="setup-cap-field">
           <input

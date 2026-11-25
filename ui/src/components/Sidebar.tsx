@@ -9,7 +9,7 @@ import { useAppState } from "../store/store";
 import { setTheme, useTheme } from "../theme/theme";
 import { splitModel, tierOf } from "../theme/tiers";
 import { closeDrawer, toggleSidebar, useSidebar } from "../theme/ui";
-import { baseName, relativeTime, shortPath } from "./format";
+import { baseName, modKey, relativeTime, shortPath } from "./format";
 import {
   IconArchive,
   IconChevron,
@@ -239,7 +239,7 @@ export function Sidebar() {
           </div>
           <button
             className="icon-btn"
-            title="Hide sidebar (⌘B)"
+            title={`Hide sidebar (${modKey()}B)`}
             aria-label="Hide sidebar"
             onClick={() => toggleSidebar(false)}
           >
@@ -601,8 +601,8 @@ function ConnectionStatus() {
     } else {
       tooltip =
         fb.mode === "codex"
-          ? `${name} weekly usage appears after a turn or when running through Provenance`
-          : `${name} weekly usage will appear once reported`;
+          ? `Appears after a turn, or when running ${name} through Provenance`
+          : `${name} weekly usage isn't available yet`;
     }
   } else {
     const { tier: tierName, source: pinnedSource } = splitModel(model);
