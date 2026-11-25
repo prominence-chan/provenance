@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { ThreadItem } from "../../protocol";
 import { useAppState } from "../../store/store";
 import { IconAgents, IconChevron } from "../icons";
@@ -17,7 +18,7 @@ export function CollabAgentCard({ item }: { item: CollabItem }) {
   const threadId = useAppState((s) => s.selectedThreadId);
   const view = useAppState((s) => (s.selectedThreadId ? s.views[s.selectedThreadId] : undefined));
   const threads = useAppState((s) => s.threads);
-  const subagents = collectSubagents(view, threads);
+  const subagents = useMemo(() => collectSubagents(view, threads), [view, threads]);
   const nameOf = (id: string) => subagents.find((a) => a.id === id)?.name ?? id.slice(0, 12);
 
   if (item.type === "subAgentActivity") {
@@ -141,7 +142,7 @@ export function CollabAgentCard({ item }: { item: CollabItem }) {
           </div>
         )}
         {!item.prompt && states.length === 0 && (
-          <div className="meta">No additional details reported for this step.</div>
+          <div className="meta">No details for this step.</div>
         )}
       </div>
     </details>

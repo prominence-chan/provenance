@@ -446,24 +446,68 @@ export function agyEfforts(help: string): FallbackEffort[] {
   return sortEfforts(listed.split(/[\s,|/]+/).filter(isFallbackEffort));
 }
 
-/** Parse `agy models` rows (TSV when piped: "gemini-4-neon-high\tGemini 4 Neon (High)", or 2+ spaces on a TTY). */
-export function agyModels(stdout: string, efforts: FallbackEffort[]): FallbackModel[] {
+/**
+ * Parse `agy models` rows (TSV when piped: "gemini-4-neon-high\tGemini 4 Neon (High)", or 2+
+ * spaces on a TTY) and collapse effort-suffixed variants into one base model entry with its
+ * supported efforts and default. Models without effort variants (e.g. Orchestrator) don't accept
+ * `--effort`, so they get an empty efforts list when other rows enumerate efforts.
+ */
+export function agyModels(stdout: string, cliEfforts: FallbackEffort[]): FallbackModel[] {
   const clean = stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "\n");
-  const out: FallbackModel[] = [{ ...DEFAULT, efforts }];
-  const seen = new Set<string>();
+  const rows: { id: string; label: string; effort: FallbackEffort | null }[] = [];
   for (const raw of clean.split("\n")) {
     const line = raw.trim();
     if (!line || /fetching available models/i.test(line)) continue;
     const m = /^([a-z0-9][a-z0-9._-]{1,60})(?:\t+|\s{2,})(.+)$/.exec(line);
     if (!m) continue;
-    const [, id, label] = m;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const suffix = /-(none|minimal|low|medium|high|xhigh|max|ultra)$/.exec(id)?.[1];
-    const defaultEffort = suffix && isFallbackEffort(suffix) ? suffix : null;
-    out.push({ id, label: label.trim(), efforts, ...(defaultEffort ? { defaultEffort } : {}) });
+    const rawId = m[1];
+    const rawLabel = m[2].trim();
+    const suffix = /-(none|minimal|low|medium|high|xhigh|max|ultra)$/.exec(rawId);
+    const effort = suffix && isFallbackEffort(suffix[1]) ? suffix[1] : null;
+    const id = effort ? rawId.slice(0, -suffix![0].length) : rawId;
+    const label = effort
+      ? rawLabel
+          .replace(/\s*\((?:none|minimal|low|medium|high|xhigh|extra\s*high|max|ultra)\)\s*$/i, "")
+          .trim() || rawLabel
+      : rawLabel;
+    rows.push({ id, label, effort });
   }
-  return out;
+  const hasEffortVariants = rows.some((r) => r.effort !== null);
+  const grouped = new Map<
+    string,
+    { id: string; label: string; efforts: FallbackEffort[]; defaultEffort: FallbackEffort | null }
+  >();
+  for (const r of rows) {
+    let entry = grouped.get(r.id);
+    if (!entry) {
+      entry = {
+        id: r.id,
+        label: r.label,
+        efforts: [],
+        defaultEffort: r.effort,
+      };
+      grouped.set(r.id, entry);
+    }
+    if (r.effort && !entry.efforts.includes(r.effort)) entry.efforts.push(r.effort);
+  }
+  const list: FallbackModel[] = [...grouped.values()].map((e) => {
+    const sorted = sortEfforts(e.efforts);
+    // Only offer the effort picker when a model actually supports multiple effort levels
+    // (or when the CLI didn't emit effort-suffixed rows at all).
+    const efforts = sorted.length > 1 ? sorted : !hasEffortVariants ? cliEfforts : [];
+    return {
+      id: e.id,
+      label: e.label,
+      efforts,
+      ...(e.defaultEffort && efforts.length ? { defaultEffort: e.defaultEffort } : {}),
+    };
+  });
+  const defaultEfforts = sortEfforts(
+    list.some((m) => (m.efforts?.length ?? 0) > 0)
+      ? list.flatMap((m) => m.efforts ?? [])
+      : cliEfforts,
+  );
+  return [{ ...DEFAULT, efforts: defaultEfforts }, ...list];
 }
 
 let cache: { at: number; info: Promise<FallbacksInfo> } | null = null;

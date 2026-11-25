@@ -40,3 +40,9 @@ export function formatDuration(ms: number | null | undefined): string {
   if (s < 60) return `${s.toFixed(1)}s`;
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
+
+/** Platform shortcut prefix ("⌘" on macOS, "Ctrl+" on Windows/Linux). */
+export function modKey(): string {
+  if (typeof navigator === "undefined") return "⌘";
+  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent) ? "⌘" : "Ctrl+";
+}

@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { newThread, openThread } from "../store/actions";
 import { useAppState } from "../store/store";
 import { toggleSidebar, useSidebar } from "../theme/ui";
-import { compactNumber, shortPath } from "./format";
+import { compactNumber, modKey, shortPath } from "./format";
 import { IconAgents, IconCompose, IconSidebar } from "./icons";
 import { threadTitle } from "./Sidebar";
 import {
@@ -29,7 +29,7 @@ export function ThreadHeader() {
         <div className="header-tools">
           <button
             className="icon-btn"
-            title="Show sidebar (⌘B)"
+            title={`Show sidebar (${modKey()}B)`}
             aria-label="Show sidebar"
             onClick={() => toggleSidebar(true)}
           >

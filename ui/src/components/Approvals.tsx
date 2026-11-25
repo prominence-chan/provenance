@@ -106,7 +106,7 @@ function UnsupportedRequest({ req }: { req: ServerRequest; item?: ThreadItem }) 
       <div className="approval-head">
         <IconShield size={15} /> {req.method}
       </div>
-      <div className="muted small">This request type isn't supported by the UI yet.</div>
+      <div className="muted small">Provenance can't handle this request type yet.</div>
       <pre className="approval-cmd">{JSON.stringify(req.params, null, 2)}</pre>
       <div className="approval-actions">
         <button className="btn btn-danger" onClick={() => rejectServerRequest(req)}>

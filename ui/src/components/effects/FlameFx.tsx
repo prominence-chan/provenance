@@ -386,7 +386,7 @@ void main() {
   float add = 0.0;          // extra additive light (flash, ring, spark cores)
   vec3 tint = vec3(0.0);    // direct premultiplied colour (off-palette bits), dark theme
   float tintA = 0.0;
-  float win = bandWin(vPos);
+  float win = uMode == 2 ? 1.0 : bandWin(vPos);
   if (win <= 0.0) { outColor = vec4(0.0); return; }
 
   vec2 c = uRect.xy + uRect.zw * 0.5;
@@ -440,10 +440,10 @@ void main() {
     float fil = ridged(vec2(along / 9.0 + warp.x * 6.0, ddw / 55.0 - ft * 0.9 + uSeed));
     float filZone = smoothstep(f2 * 0.2, f2 * 0.85, ddw) * smoothstep(f2 * 1.12, f2 * 0.9, ddw);
     float filaments = pow(fil, 4.0) * filZone * L2 * (0.4 + 0.6 * tear);
-    // Core flash off the rim, and a faint bloom that fades across the column.
+    // Core flash off the rim, and a wide soft bloom that fades across the whole column.
     float F = pulse(ft, 0.05, 4.8);
-    float flash = exp(-dd / (8.0 + 90.0 * ft)) * F * (0.7 + 0.3 * edgeN);
-    float bloom = exp(-dd / 360.0) * F * smoothstep(f1 * 1.15 + 70.0, f1 * 0.5, ddw);
+    float flash = exp(-dd / (14.0 + 130.0 * ft)) * F * (0.7 + 0.3 * edgeN);
+    float bloom = exp(-dd / 480.0) * F;
     // Plasma smoke: advected outward from the rim, cooling pink -> violet -> cyan -> gone.
     float smL = pulse(ft - 0.06, 0.55, 0.62);
     vec2 sq = wp / 52.0 - nrm * ft * 0.85 + uSeed;
@@ -744,19 +744,19 @@ void main() {
       float streams = smoothstep(0.55, 0.88, colN) * smoothstep(1.0, 9.0, upc)
                     * exp(-upc / H) * smoothstep(H * 3.0, H * 1.4, upc);
       // Sparse weightless nodes drifting slowly upward.
-      vec2 grid = vec2((vPos.x - c.x) / 34.0, (upc - uClock * (5.5 + 10.5 * act)) / 28.0);
+      vec2 grid = vec2((vPos.x - c.x) / 44.0, (upc - uClock * (5.0 + 8.5 * act)) / 36.0);
       vec2 gi = floor(grid);
       vec2 gf = fract(grid) - 0.5;
       float rnd = hash(gi + uSeed);
       vec2 off = (hash2(gi + 4.3 + uSeed) - 0.5) * 0.55;
-      float orb = smoothstep(0.16, 0.02, length(gf - off)) * step(0.76 - 0.28 * act, rnd)
-                * smoothstep(2.0, 12.0, upc) * exp(-upc / (22.0 + 30.0 * act));
+      float orb = smoothstep(0.13, 0.02, length(gf - off)) * step(0.91 - 0.07 * act, rnd)
+                * smoothstep(2.0, 12.0, upc) * exp(-upc / (22.0 + 26.0 * act));
       heat = ((arc * (0.11 * uBreath + 0.36 * act) + arcWash * (0.09 * uBreath + 0.30 * act))
-            + streams * (0.035 * uBreath + 0.28 * act)
-            + orb * (0.14 * uBreath + 0.44 * act)) * xt;
+            + streams * (0.035 * uBreath + 0.26 * act)
+            + orb * (0.10 * uBreath + 0.24 * act)) * xt;
       heat += rimLine * topBand * xt * (0.018 * uBreath + 0.065 * act);
       heat += exp(-upc / 6.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.012 + 0.04 * act);
-      add += orb * (0.03 + 0.12 * act) * xt;
+      add += orb * (0.02 + 0.06 * act) * xt;
     } else {
       // NOVA: a shimmering plasma rim all round, plasma wisps drifting along it; the charge
       // tightens it, the eruption leaves a lingering afterglow; flames while active.
@@ -777,14 +777,14 @@ void main() {
       if (pre > 0.01) {
         // Gathering: faint streaks fall in towards the rim, faster as the charge builds.
         float g = smoothstep(0.62, 0.92, noise(vec2(u / 7.0 + uSeed, dd / 10.0 + uClock * (3.0 + 5.0 * pre))));
-        heat += g * pre * 0.3 * exp(-dd / 26.0) * smoothstep(70.0, 0.0, dd) * outside;
+        heat += g * pre * 0.3 * exp(-dd / 30.0) * smoothstep(110.0, 0.0, dd) * outside;
         // Heat-up: the edge heats like metal, unevenly (hot spots spread along it) through
         // dull orange, yellow, to white-hot; it swells into a bloom and the air above it
         // shimmers.
         float T = clamp(pre * 1.3 - 0.3 * noise(vec2(u / 55.0 + uSeed, uClock * 0.6)), 0.0, 1.0);
         float shim = (noise(vec2(u / 4.0, uClock * 11.0)) - 0.5) * 1.6 * T;
         float rimH = exp(-abs(d - 0.4 - shim) / (0.6 + 1.4 * T)) * smoothstep(-1.5, 0.0, d);
-        float halo = exp(-dd / (3.0 + 20.0 * T * T)) * outside;
+        float halo = exp(-dd / (4.0 + 26.0 * T * T)) * outside;
         float hazeN = smoothstep(0.6, 0.9, fbm3(vec2(vPos.x / 6.0 + sin(up / 9.0 + uClock * 5.0) * 0.6, up / 22.0 + uClock * 2.4) + uSeed));
         float haze = hazeN * smoothstep(0.0, 6.0, up) * exp(-up / 18.0) * topW * T * T;
         vec3 bb = blackbody(T);
@@ -1458,15 +1458,15 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       pushParticle({
         x,
         y,
-        vx: (u - 0.5) * 6 + rand(-5, 5),
-        vy: -rand(streaming ? 18 : 10, streaming ? 34 : 20),
-        temp: rand(0.6, 0.95),
-        cool: rand(0.2, 0.36),
-        size: rand(streaming ? 1.8 : 1.3, streaming ? 2.8 : 2.1),
+        vx: (u - 0.5) * 6 + rand(-4, 4),
+        vy: -rand(streaming ? 16 : 10, streaming ? 28 : 18),
+        temp: rand(0.6, 0.92),
+        cool: rand(0.24, 0.4),
+        size: rand(streaming ? 1.4 : 1.1, streaming ? 2.1 : 1.7),
         pal: PAL.antigravity,
         kind: 5,
-        ttl: rand(1.6, 2.8),
-        amp: streaming ? rand(0.5, 0.85) : rand(0.18, 0.36),
+        ttl: rand(1.4, 2.2),
+        amp: streaming ? rand(0.32, 0.56) : rand(0.14, 0.28),
       });
     }
   };
@@ -1588,7 +1588,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       }
     }
     if (l.tier === "antigravity") {
-      const agyRate = 0.16 + 2.8 * act;
+      const agyRate = 0.08 + 0.7 * act;
       l.trickle += agyRate * dt * (0.7 + 0.6 * noise1(now * 0.6 + l.seed));
       while (l.trickle >= 1) {
         spawnZeroG(r, 1, act > 0.25);
@@ -1765,8 +1765,9 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       side = 12;
     }
     if (l.tier === "nova") {
-      top = 72 + 90 * l.act + 150 * l.fl + 60 * l.pre;
-      side = 56 + 40 * l.fl + 70 * l.pre;
+      top = 120 + 110 * l.act + 180 * l.fl + 120 * l.pre;
+      side = 120 + 60 * l.fl + 120 * l.pre;
+      below = 80 + 40 * l.fl + 80 * l.pre;
     }
     gl.uniform1i(fu.uMode, 0);
     quad(r.x - side, r.y - top, r.x + r.w + side, r.y + r.h + below);
@@ -1782,11 +1783,9 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       quad(0, r.topY - 18, w, r.topY + 44);
     }
     if (l.tier === "nova" && l.ft > 0 && l.ft < REMNANT) {
-      // The shock fronts while they last (lopsided, so up to ~1.6x R), then the remnant.
-      const R = 6 + 600 * (1 - Math.exp(-l.ft * 1.7));
-      const m = l.ft < 4.2 ? Math.max(R * 1.6 + 60, 440) : 440;
+      // Full-canvas pass so the eruption bloom and shockwaves fade smoothly without clipping.
       gl.uniform1i(fu.uMode, 2);
-      quad(r.x - m, r.y - m, r.x + r.w + m, r.y + r.h + m);
+      quad(0, 0, w, h);
     }
   };
 
@@ -1926,7 +1925,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         const env = smooth(0, 0.16, u) * (1 - smooth(0.55, 1, u));
         const a = env * e.amp * fade;
         put(e.x, e.y, e.size, 0.85, a, e.pal, 0.9);
-        put(e.x, e.y, e.size * 3.8, 0.5, a * 0.34, e.pal, 0);
+        put(e.x, e.y, e.size * 3.0, 0.5, a * 0.26, e.pal, 0);
       } else {
         const a = smooth(0, 0.25, e.age) * e.amp * fade;
         put(e.x, e.y, e.size, e.temp, a, e.pal, 0.6);
@@ -1978,7 +1977,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   /** Something is moving fast enough to need full frame rate. */
   const busy = (now = clock()) =>
     arcs.length > 0 ||
-    particles.some((p) => p.kind !== 0 || Math.abs(p.vy) > 45) ||
+    particles.some((p) => (p.kind !== 0 && p.kind !== 5) || Math.abs(p.vy) > 45) ||
     layers.some(
       (l) =>
         l.fading ||

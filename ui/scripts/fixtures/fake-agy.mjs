@@ -36,8 +36,13 @@ if (argv[0] === "models") {
     process.exit(1);
   }
   console.log("gemini-4-neon-high\tGemini 4 Neon (High)");
+  console.log("gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)");
   console.log("gemini-4-neon-medium\tGemini 4 Neon (Medium)");
-  console.log("claude-sonnet-4-6\tClaude Sonnet 4.6");
+  console.log("gemini-4-neon-low\tGemini 4 Neon (Low)");
+  console.log("gemini-pro-orchestrator-neon\tOrchestrator (Neon)");
+  console.log("claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low)");
+  console.log("claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)");
+  console.log("gpt-oss-120b-medium\tGPT-OSS 120B (Medium)");
   process.exit(0);
 }
 

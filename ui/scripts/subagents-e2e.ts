@@ -499,7 +499,13 @@ async function check(): Promise<void> {
     await page.click('button[title="Model tier"]');
     await page.hover('.tier-menu [data-fallback="antigravity"]');
     await page.waitForSelector('.tier-sub[data-fallback="antigravity"]');
-    await page.click('.tier-sub [data-source-model="antigravity:gemini-4-neon-high"]');
+    const agyLabels = await page.locator(".tier-sub .tier-sub-label").allInnerTexts();
+    check(
+      agyLabels.join(",") ===
+        "Default,Gemini 4 Neon,Orchestrator (Neon),Claude Sonnet 5.5,GPT-OSS 120B",
+      `Antigravity picker deduplicates effort variants (${agyLabels.join(", ")})`,
+    );
+    await page.click('.tier-sub [data-source-model="antigravity:gemini-4-neon"]');
     await page.waitForTimeout(350);
     const agyConn = await page.locator(".conn").innerText();
     check(
@@ -512,7 +518,7 @@ async function check(): Promise<void> {
     await page.click('button[title="Model tier"]');
     await page.hover('.tier-menu [data-fallback="antigravity"]');
     await page.waitForSelector('.tier-sub[data-fallback="antigravity"]');
-    await page.click('.tier-sub [data-source-model="antigravity:claude-sonnet-4-6"]');
+    await page.click('.tier-sub [data-source-model="antigravity:claude-sonnet-5-5"]');
     const agyClaudeConn = await page.locator(".conn").innerText();
     check(
       /Weekly/.test(agyClaudeConn) && /100%/.test(agyClaudeConn),

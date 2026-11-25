@@ -186,14 +186,17 @@ export function TierPicker() {
     const menu = menuRef.current;
     const row = rowRefs.current[active];
     if (!sub || !menu || !row) return;
-    const roomRight = window.innerWidth - menu.getBoundingClientRect().right - 8;
+    const menuRect = menu.getBoundingClientRect();
+    const roomRight = window.innerWidth - menuRect.right - 8;
     if (roomRight >= sub.offsetWidth + 4) {
+      const minTop = Math.min(-1, 8 - menuRect.top);
       const top = Math.min(row.offsetTop - 5, menu.clientHeight - sub.offsetHeight + 1);
       sub.style.left = "";
-      sub.style.top = `${Math.max(-1, top)}px`;
+      sub.style.top = `${Math.max(minTop, top)}px`;
     } else {
+      const minTop = 8 - menuRect.top;
       sub.style.left = "-1px";
-      sub.style.top = `${-sub.offsetHeight - 5}px`;
+      sub.style.top = `${Math.max(minTop, -sub.offsetHeight - 5)}px`;
     }
   });
 
