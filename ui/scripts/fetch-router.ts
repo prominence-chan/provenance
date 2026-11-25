@@ -315,7 +315,7 @@ async function main(): Promise<void> {
     "-I",
     "-B",
     "-c",
-    "import importlib, patchright.async_api, uvicorn, yaml; importlib.import_module('provenance_core.api.server' if importlib.util.find_spec('provenance_core.api.server') else 'provenance_core.server')",
+    "import importlib, importlib.util, patchright.async_api, uvicorn, yaml; importlib.import_module('provenance_core.api.server' if importlib.util.find_spec('provenance_core.api.server') else 'provenance_core.server')",
   ]);
   log(`provenance-core ${version} (${info.routerRev}) ready in vendor/router (${dirSizeMb(dest)})`);
 }
