@@ -6,6 +6,7 @@ import { HeroSun } from "./components/effects/HeroSun";
 import { useFx } from "./components/effects/useFx";
 import { Notices } from "./components/Notices";
 import { Sidebar } from "./components/Sidebar";
+import { SubagentsPanel } from "./components/SubagentsPanel";
 import { ThreadHeader } from "./components/ThreadHeader";
 import { WelcomeDialog } from "./fallback/WelcomeDialog";
 import { SetupDialog } from "./setup/SetupDialog";
@@ -35,6 +36,7 @@ export function App() {
         )}
         <Composer />
       </main>
+      <SubagentsPanel />
       <Notices />
       <SetupDialog />
       <WelcomeDialog />

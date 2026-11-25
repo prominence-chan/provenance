@@ -5,6 +5,7 @@ import { memo } from "react";
 import type { ThreadItem } from "../../protocol";
 import { Markdown } from "../Markdown";
 import { AgentMessage } from "./AgentMessage";
+import { CollabAgentCard } from "./CollabAgentCard";
 import { CommandCard } from "./CommandCard";
 import { FileChangeCard } from "./FileChangeCard";
 import { GenericItem } from "./GenericItem";
@@ -15,6 +16,8 @@ const TOOL_TYPES = new Set<ThreadItem["type"]>([
   "reasoning",
   "commandExecution",
   "fileChange",
+  "collabAgentToolCall",
+  "subAgentActivity",
   "mcpToolCall",
   "dynamicToolCall",
   "webSearch",
@@ -38,6 +41,9 @@ export const ItemView = memo(function ItemView({ item }: { item: ThreadItem }) {
       return <CommandCard item={item} />;
     case "fileChange":
       return <FileChangeCard item={item} />;
+    case "collabAgentToolCall":
+    case "subAgentActivity":
+      return <CollabAgentCard item={item} />;
     case "plan":
       return (
         <div className="plan">

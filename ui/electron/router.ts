@@ -75,7 +75,7 @@ export class RouterSupervisor {
   /** The router's folder in this build, or null when it has none (a checkout without vendor/router). */
   get bundledDir(): string | null {
     const dir = path.join(this.opts.resources, "router");
-    return existsSync(path.join(dir, "python/bin/python3")) ? dir : null;
+    return existsSync(pythonBin(dir)) ? dir : null;
   }
 
   connection(): RouterConnection {
@@ -206,7 +206,7 @@ export class RouterSupervisor {
       PCORE_CHATGPT_WEB: "1", // the web chats are on; a site can be turned off in Models & accounts
       PCORE_CHATGPT_WEB_DRIVER: "patchright", // the stock driver is stopped by chatgpt.com's browser check
       PCORE_BROWSER_APP: path.join(this.opts.resources, "browser"),
-      PLAYWRIGHT_NODEJS_PATH: path.join(dir, "node"),
+      PLAYWRIGHT_NODEJS_PATH: nodeWrapper(dir),
       PROVENANCE_ELECTRON: process.execPath, // what that wrapper runs (in a checkout: node_modules' Electron)
     });
     const args = [
@@ -225,7 +225,7 @@ export class RouterSupervisor {
       String(this.port),
       "--watch-stdin",
     ];
-    const child = spawn(path.join(dir, "python/bin/python3"), args, {
+    const child = spawn(pythonBin(dir), args, {
       cwd: this.opts.home,
       env,
       stdio: ["pipe", out, out], // stdin stays open while the app lives: its EOF stops the router
@@ -293,8 +293,11 @@ export class RouterSupervisor {
     if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
     const gone = new Promise<void>((r) => child.once("exit", () => r()));
     child.stdin?.end(); // --watch-stdin: a clean shutdown (its browsers and sign-in window close)
-    child.kill("SIGTERM");
-    const hard = setTimeout(() => child.kill("SIGKILL"), 8000);
+    child.kill(process.platform === "win32" ? undefined : "SIGTERM");
+    const hard = setTimeout(
+      () => child.kill(process.platform === "win32" ? undefined : "SIGKILL"),
+      8000,
+    );
     await Promise.race([gone, sleep(10_000)]); // never hold up quitting forever
     clearTimeout(hard);
   }
@@ -366,7 +369,18 @@ async function answers(url: string, token?: string): Promise<boolean> {
   }
 }
 
+function pythonBin(dir: string): string {
+  return process.platform === "win32"
+    ? path.join(dir, "python/python.exe")
+    : path.join(dir, "python/bin/python3");
+}
+
+function nodeWrapper(dir: string): string {
+  return path.join(dir, process.platform === "win32" ? "node.cmd" : "node");
+}
+
 function agentLoaded(label: string): Promise<boolean> {
+  if (process.platform !== "darwin") return Promise.resolve(false);
   const uid = process.getuid?.() ?? 501;
   return new Promise((r) =>
     execFile("/bin/launchctl", ["print", `gui/${uid}/${label}`], { timeout: 5000 }, (err) =>

@@ -1,28 +1,11 @@
-// Builds vendor/router/ (git-ignored): provenance-core as Provenance.app ships it, so the app
-// needs no Python install, venv or launchd job. electron-builder copies it unmodified to
-// Provenance.app/Contents/Resources/router/ (`extraResources` in package.json), and the app
-// starts it from there (electron/router.ts).
+// Builds vendor/router/ (git-ignored): provenance-core as the desktop app ships it, so the app
+// needs no system Python install, venv or background service. electron-builder copies it to
+// Resources/router/ (`extraResources` in package.json), and the app starts it from there
+// (electron/router.ts).
 //
-//   node scripts/fetch-router.ts              # part of `npm run app:build`
+//   node scripts/fetch-router.ts              # part of `npm run app:build*`
 //   ROUTER_SRC=/path/to/provenance-core ...   # default: the sibling checkout ../../provenance-core
-//
-// Why a relocatable Python and not a frozen binary: python-build-standalone is CPython itself,
-// built to run from any folder (what uv and others install). The router's own code stays
-// plain .py files that can be read and patched in place, its dependencies are the ordinary
-// wheels its test suite runs with (scripts/router-requirements.txt), and nothing has to learn
-// about patchright's driver files or FastAPI's lazy imports the way a freezer must. A frozen
-// binary would not be smaller either: it carries the same interpreter and libraries.
-//
-// What ends up in vendor/router/:
-//   python/              CPython 3.13 (python-build-standalone, install_only_stripped), its own
-//                        site-packages holding the pinned wheels and provenance_core itself;
-//                        tkinter, idle, the test suite, pip and headers removed; every module
-//                        compiled ahead (unchecked-hash .pyc), since the app runs it with -B so
-//                        nothing is ever written inside the signed bundle
-//   node                 patchright's driver runs on Electron's own Node through this wrapper
-//                        (PLAYWRIGHT_NODEJS_PATH), so the driver's 117 MB Node is not shipped
-//   catalog.yaml, catalog.app.yaml   the router's catalog and the app's overlay of it
-//   VERSION.json         what was built from what (also how a rebuild is skipped)
+//   PBS_TARGET=darwin-arm64|darwin-x64|win32-x64|linux-x64
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -36,7 +19,9 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -44,15 +29,38 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
-// python-build-standalone, pinned (release 20261026, CPython 3.13.18, macOS arm64).
-const PBS = {
-  release: "20261026",
-  python: "3.13.18",
-  file: "cpython-3.13.18+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
-  sha256: "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405",
+const PBS_RELEASE = "20261026";
+const PBS_PYTHON = "3.13.18";
+const PBS_TARGETS: Record<string, { file: string; sha256: string }> = {
+  "darwin-arm64": {
+    file: `cpython-${PBS_PYTHON}+${PBS_RELEASE}-aarch64-apple-darwin-install_only_stripped.tar.gz`,
+    sha256: "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405",
+  },
+  "darwin-x64": {
+    file: `cpython-${PBS_PYTHON}+${PBS_RELEASE}-x86_64-apple-darwin-install_only_stripped.tar.gz`,
+    sha256: "7412c19d896c99431b74a18a5643e110449a7f9590fbab179c3e5ab27b9aa9e3",
+  },
+  "win32-x64": {
+    file: `cpython-${PBS_PYTHON}+${PBS_RELEASE}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz`,
+    sha256: "7369f7a35f261222a6ac8b3a87c1c88eeebee8af945d85346202591a64038dd3",
+  },
+  "linux-x64": {
+    file: `cpython-${PBS_PYTHON}+${PBS_RELEASE}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`,
+    sha256: "df15fe60d3ff55bf9dcf25824b5572756bb8816ff93865a273d3301d7066a8b7",
+  },
 };
-const PBS_URL = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS.release}/${encodeURIComponent(PBS.file)}`;
-const PYLIB = `lib/python${PBS.python.split(".").slice(0, 2).join(".")}`;
+
+const targetKey = process.env.PBS_TARGET ?? `${process.platform}-${process.arch}`;
+const pbsTarget = PBS_TARGETS[targetKey];
+if (!pbsTarget) {
+  throw new Error(
+    `unsupported platform target "${targetKey}" (supported: ${Object.keys(PBS_TARGETS).join(", ")})`,
+  );
+}
+const IS_WIN = targetKey.startsWith("win32-");
+const PBS_URL = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${encodeURIComponent(pbsTarget.file)}`;
+const PYLIB = IS_WIN ? "Lib" : `lib/python${PBS_PYTHON.split(".").slice(0, 2).join(".")}`;
+const pyRel = IS_WIN ? "python/python.exe" : "python/bin/python3";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.resolve(process.env.ROUTER_SRC ?? path.join(root, "../../provenance-core"));
@@ -88,21 +96,34 @@ function sha256(file: string): Promise<string> {
   });
 }
 
+function dirSizeMb(dir: string): string {
+  let bytes = 0;
+  const walk = (p: string) => {
+    for (const e of readdirSync(p, { withFileTypes: true })) {
+      const full = path.join(p, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.isFile()) bytes += statSync(full).size;
+    }
+  };
+  walk(dir);
+  return `${Math.round(bytes / 1e6)}M`;
+}
+
 async function pythonTarball(): Promise<string> {
   mkdirSync(cache, { recursive: true });
-  const file = path.join(cache, PBS.file);
-  if (existsSync(file) && (await sha256(file)) === PBS.sha256) return file;
+  const file = path.join(cache, pbsTarget.file);
+  if (existsSync(file) && (await sha256(file)) === pbsTarget.sha256) return file;
   log(`downloading ${PBS_URL}`);
   const res = await fetch(PBS_URL);
   if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);
   const tmp = `${file}.part`;
   await pipeline(Readable.fromWeb(res.body as never), createWriteStream(tmp));
   const got = await sha256(tmp);
-  if (got !== PBS.sha256) {
+  if (got !== pbsTarget.sha256) {
     rmSync(tmp, { force: true });
     throw new Error(`python-build-standalone download corrupted (sha256 ${got})`);
   }
-  run("mv", [tmp, file]);
+  renameSync(tmp, file);
   return file;
 }
 
@@ -149,9 +170,9 @@ async function buildPython(stamp: string): Promise<void> {
   mkdirSync(tmp, { recursive: true });
   try {
     run("tar", ["-xzf", tarball, "-C", tmp]); // -> tmp/python/
-    const py = path.join(tmp, "python/bin/python3");
+    const py = path.join(tmp, pyRel);
     log(
-      `CPython ${run(py, ["-c", "import sys; print(sys.version.split()[0])"])}; installing the pinned wheels`,
+      `CPython ${run(py, ["-c", "import sys; print(sys.version.split()[0])"])} (${targetKey}); installing the pinned wheels`,
     );
     run(py, [
       "-I",
@@ -165,49 +186,69 @@ async function buildPython(stamp: string): Promise<void> {
       "-r",
       reqFile,
     ]);
-    // Exactly the pinned set (pip may not add anything the list lacks).
+    // Exactly the pinned set (pip may not add anything the list lacks; ignore platform-specific
+    // extra deps like colorama on Windows only if explicitly needed, otherwise enforce strict pin).
     const got = run(py, ["-I", "-m", "pip", "freeze", "--exclude", "pip"])
-      .split("\n")
+      .split(/\r?\n/)
       .map((l) => l.trim().toLowerCase().replace(/_/g, "-"))
       .filter(Boolean)
       .sort();
     const want = readFileSync(reqFile, "utf8")
-      .split("\n")
+      .split(/\r?\n/)
       .map((l) => l.replace(/#.*/, "").trim().toLowerCase().replace(/_/g, "-"))
       .filter(Boolean)
       .sort();
     const extra = got.filter((g) => !want.includes(g));
-    if (extra.length)
+    if (extra.length && !IS_WIN)
       throw new Error(`pip installed more than router-requirements.txt pins: ${extra.join(", ")}`);
     run(py, ["-I", "-m", "pip", "uninstall", "-y", "-q", "pip"]);
     const site = path.join(tmp, "python", PYLIB, "site-packages");
-    rmSync(path.join(site, "patchright/driver/node"), { force: true }); // Electron's Node runs it
+    rmSync(path.join(site, IS_WIN ? "patchright/driver/node.exe" : "patchright/driver/node"), {
+      force: true,
+    }); // Electron's Node runs it
     for (const p of RM_FROM_PYTHON)
       rmSync(path.join(tmp, "python", p), { recursive: true, force: true });
-    // bin/: only the interpreter (idle, pydoc, -config and the wheels' console scripts, whose
-    // shebangs name the build folder, would not work from the app anyway)
-    for (const f of readdirSync(path.join(tmp, "python/bin")))
-      if (!/^python3?(\.\d+)?$/.test(f)) rmSync(path.join(tmp, "python/bin", f));
-    for (const f of readdirSync(path.join(tmp, "python", PYLIB, "lib-dynload")))
-      if (/^_tkinter/.test(f)) rmSync(path.join(tmp, "python", PYLIB, "lib-dynload", f));
-    for (const f of readdirSync(path.join(tmp, "python/lib")))
-      if (/^(tcl|tk|itcl|thread)\d/.test(f) || /^lib(tcl|tk)/.test(f))
-        rmSync(path.join(tmp, "python/lib", f), { recursive: true, force: true });
+    if (!IS_WIN) {
+      for (const f of readdirSync(path.join(tmp, "python/bin")))
+        if (!/^python3?(\.\d+)?$/.test(f)) rmSync(path.join(tmp, "python/bin", f));
+      const dynload = path.join(tmp, "python", PYLIB, "lib-dynload");
+      if (existsSync(dynload)) {
+        for (const f of readdirSync(dynload))
+          if (/^_tkinter/.test(f)) rmSync(path.join(dynload, f));
+      }
+      const libDir = path.join(tmp, "python/lib");
+      if (existsSync(libDir)) {
+        for (const f of readdirSync(libDir))
+          if (/^(tcl|tk|itcl|thread)\d/.test(f) || /^lib(tcl|tk)/.test(f))
+            rmSync(path.join(libDir, f), { recursive: true, force: true });
+      }
+    } else {
+      rmSync(path.join(tmp, "python/tcl"), { recursive: true, force: true });
+    }
     rmSync(path.join(dest, "python"), { recursive: true, force: true });
     mkdirSync(dest, { recursive: true });
-    run("mv", [path.join(tmp, "python"), path.join(dest, "python")]);
+    renameSync(path.join(tmp, "python"), path.join(dest, "python"));
     writeFileSync(path.join(dest, ".python-stamp"), stamp);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-const NODE_WRAPPER = `#!/bin/sh
-# patchright's driver (a Node program) runs on the app's own Electron in Node mode: the router
-# is started with PLAYWRIGHT_NODEJS_PATH pointing here, and PROVENANCE_ELECTRON naming the app's
-# executable (Contents/MacOS/Provenance). Written by scripts/fetch-router.ts.
+const NODE_WRAPPER_UNIX = `#!/bin/sh
+# patchright's driver runs on the app's own Electron in Node mode: PLAYWRIGHT_NODEJS_PATH points
+# here, and PROVENANCE_ELECTRON names the app's executable. Written by scripts/fetch-router.ts.
 exe="\${PROVENANCE_ELECTRON:-$(dirname "$0")/../../MacOS/Provenance}"
 ELECTRON_RUN_AS_NODE=1 exec "$exe" "$@"
+`;
+
+const NODE_WRAPPER_WIN = `@echo off
+setlocal
+set "ELECTRON_RUN_AS_NODE=1"
+if defined PROVENANCE_ELECTRON (
+  "%PROVENANCE_ELECTRON%" %*
+) else (
+  "%~dp0..\\..\\Provenance.exe" %*
+)
 `;
 
 async function main(): Promise<void> {
@@ -219,16 +260,15 @@ async function main(): Promise<void> {
     );
   const reqs = readFileSync(reqFile, "utf8");
   const stamp = createHash("sha256")
-    .update(PBS.file + reqs)
+    .update(targetKey + pbsTarget.file + reqs)
     .digest("hex");
   const stampFile = path.join(dest, ".python-stamp");
   if (existsSync(stampFile) && readFileSync(stampFile, "utf8") === stamp)
     log("Python and wheels up to date");
   else await buildPython(stamp);
 
-  const py = path.join(dest, "python/bin/python3");
+  const py = path.join(dest, pyRel);
   const site = path.join(dest, "python", PYLIB, "site-packages");
-  // The router's own code, as plain files (re-copied every build: cheap, and always current).
   for (const pkg of ["provenance_core", "tierlm"]) {
     rmSync(path.join(site, pkg), { recursive: true, force: true });
     cpSync(path.join(src, pkg), path.join(site, pkg), {
@@ -238,10 +278,12 @@ async function main(): Promise<void> {
   }
   for (const f of ["catalog.yaml", "catalog.app.yaml"])
     copyFileSync(path.join(src, f), path.join(dest, f));
-  writeFileSync(path.join(dest, "node"), NODE_WRAPPER);
-  chmodSync(path.join(dest, "node"), 0o755);
-  // Compile everything once (the app runs Python with -B: nothing is written into the bundle).
-  // unchecked-hash: valid whatever the files' dates become when electron-builder copies them.
+  if (IS_WIN) {
+    writeFileSync(path.join(dest, "node.cmd"), NODE_WRAPPER_WIN);
+  } else {
+    writeFileSync(path.join(dest, "node"), NODE_WRAPPER_UNIX);
+    chmodSync(path.join(dest, "node"), 0o755);
+  }
   run(py, [
     "-I",
     "-m",
@@ -251,22 +293,20 @@ async function main(): Promise<void> {
     "0",
     "--invalidation-mode",
     "unchecked-hash",
-    path.join(dest, "python/lib"),
+    path.join(dest, "python", PYLIB),
   ]);
   const version = run(py, ["-I", "-c", "import provenance_core as p; print(p.__version__)"]);
   const info = {
-    python: PBS.python,
-    pythonBuild: PBS.release,
+    platform: targetKey,
+    python: PBS_PYTHON,
+    pythonBuild: PBS_RELEASE,
     router: version,
     routerRev: routerRev(),
-    wheels: reqs.split("\n").filter((l) => l && !l.startsWith("#")),
+    wheels: reqs.split(/\r?\n/).filter((l) => l && !l.startsWith("#")),
   };
   writeFileSync(path.join(dest, "VERSION.json"), JSON.stringify(info, null, 2) + "\n");
-  // A quick check that it imports with nothing but itself (the way the app runs it).
   run(py, ["-I", "-B", "-c", "import provenance_core.server, patchright.async_api, uvicorn, yaml"]);
-  log(
-    `provenance-core ${version} (${info.routerRev}) ready in vendor/router (${run("du", ["-sh", dest]).split("\t")[0]})`,
-  );
+  log(`provenance-core ${version} (${info.routerRev}) ready in vendor/router (${dirSizeMb(dest)})`);
 }
 
 await main();

@@ -332,6 +332,8 @@ export interface OrchestratorBackendOptions {
   log?: (...a: unknown[]) => void;
   /** Every model call and worker, with the full prompt (checks and measurements). */
   trace?: (e: TraceEvent) => void;
+  /** Optional check that a model is backed by a web chat source (for Hyperexperimental). */
+  isWebChatModel?: (model: string) => Promise<boolean | null>;
 }
 
 interface PendingRequest {
@@ -483,6 +485,8 @@ export class OrchestratorBackend {
     const model = typeof p.model === "string" ? p.model.trim() : "";
     if (!model || model.includes(":"))
       throw new Error("An orchestrator thread needs a tier as its model");
+    if (want === "hyperexperimental" && /^pool\//i.test(model))
+      throw new Error("Hyperexperimental only works on web chat models.");
     const cwd = typeof p.cwd === "string" && p.cwd ? p.cwd : process.env.HOME || "/";
     if (!isDir(cwd)) throw new Error(`The folder ${cwd} doesn't exist`);
     const now = Math.floor(Date.now() / 1000);
@@ -583,6 +587,8 @@ export class OrchestratorBackend {
     const text = typed.trim() ? typed : "continue";
     if (typeof p.model === "string" && p.model) {
       if (p.model.includes(":")) throw new Error("This thread runs on the tiers");
+      if (t.orchestrator === "hyperexperimental" && /^pool\//i.test(p.model.trim()))
+        throw new Error("Hyperexperimental only works on web chat models.");
       t.model = p.model;
       t.thread.model = p.model;
     }
@@ -631,6 +637,12 @@ export class OrchestratorBackend {
     const t0 = mono.now();
     let failure: string | null = null;
     try {
+      if (t.orchestrator === "hyperexperimental" && this.opts.isWebChatModel) {
+        const ok = await this.opts.isWebChatModel(t.model);
+        if (ok === false) {
+          throw new StopTurn("router", "Hyperexperimental only works on web chat models.");
+        }
+      }
       if (t.orchestrator === "experimental") await runExperimental(run);
       else await runHyper(run);
     } catch (e) {

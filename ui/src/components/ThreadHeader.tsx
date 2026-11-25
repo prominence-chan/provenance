@@ -1,14 +1,28 @@
-import { newThread } from "../store/actions";
+import { useMemo } from "react";
+import { newThread, openThread } from "../store/actions";
 import { useAppState } from "../store/store";
 import { toggleSidebar, useSidebar } from "../theme/ui";
 import { compactNumber, shortPath } from "./format";
-import { IconCompose, IconSidebar } from "./icons";
+import { IconAgents, IconCompose, IconSidebar } from "./icons";
 import { threadTitle } from "./Sidebar";
+import {
+  collectSubagents,
+  isSubagentActive,
+  isSubagentsPanelOpen,
+  toggleSubagentsPanel,
+  useSubagentsPanel,
+} from "./subagents";
 
 /** Slim top bar: sidebar toggle (when hidden), thread title + cwd, tier, context use. */
 export function ThreadHeader() {
   const view = useAppState((s) => (s.selectedThreadId ? s.views[s.selectedThreadId] : undefined));
+  const threads = useAppState((s) => s.threads);
   const { visible } = useSidebar();
+  const panel = useSubagentsPanel();
+  const subagents = useMemo(() => collectSubagents(view, threads), [view, threads]);
+  const activeSubagents = subagents.filter((a) => isSubagentActive(a.status)).length;
+  const subPanelOpen = isSubagentsPanelOpen(panel, view?.id ?? null, subagents.length > 0);
+  const parentId = view?.thread.parentThreadId ?? null;
   return (
     <header className="thread-header">
       {!visible && (
@@ -34,9 +48,36 @@ export function ThreadHeader() {
       {view && (
         <>
           <div className="thread-header-title" title={view.cwd ? shortPath(view.cwd) : undefined}>
+            {parentId && (
+              <button
+                type="button"
+                className="parent-back-btn"
+                onClick={() => void openThread(parentId)}
+                title="Back to parent thread"
+              >
+                ← Parent
+              </button>
+            )}
             <span className="thread-header-name">{threadTitle(view.thread)}</span>
           </div>
           <div className="thread-header-meta">
+            {subagents.length > 0 && (
+              <button
+                type="button"
+                className={`subagents-toggle ${subPanelOpen ? "active" : ""}`}
+                aria-pressed={subPanelOpen}
+                title={subPanelOpen ? "Hide subagents panel" : "Show subagents panel"}
+                onClick={() => toggleSubagentsPanel(view.id)}
+              >
+                {activeSubagents > 0 && <span className="dot dot-busy" />}
+                <IconAgents size={13} />
+                <span>
+                  {activeSubagents > 0
+                    ? `${activeSubagents} active · ${subagents.length}`
+                    : `${subagents.length} subagent${subagents.length === 1 ? "" : "s"}`}
+                </span>
+              </button>
+            )}
             <TokenUsage threadId={view.id} />
           </div>
         </>

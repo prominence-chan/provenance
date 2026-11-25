@@ -149,11 +149,13 @@ paths = [
     "scripts/sync-upstream.sh",
     "scripts/provenance-smoke.py",
     "ui/",
+    ".github/app-icon.png",
     ".github/provenance-ui.png",
     ".github/ui-hero.png",
     ".github/ui-picker.png",
     ".github/ui-accounts.png",
     ".github/ui-light.png",
+    ".github/workflows/release.yml",
 ]
 
 # Unused upstream root files/directories intentionally removed to keep the repository root tidy.

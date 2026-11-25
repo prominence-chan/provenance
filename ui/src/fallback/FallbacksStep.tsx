@@ -26,8 +26,8 @@ export function FallbacksStep({ lead }: { lead?: boolean }) {
     <div className="setup-step fallbacks-step">
       {lead !== false && (
         <p className="setup-lead">
-          When a thread outgrows the free models, it can continue in Claude Code or Codex, on your
-          own subscription.
+          When a thread gets too big for the free models, continue it in Claude Code or Codex using
+          your own subscription.
         </p>
       )}
       <ul className="setup-sites">
@@ -161,7 +161,7 @@ function CodexMode({ info, prefs }: { info: FallbacksInfo; prefs: FallbackPrefs 
       {choice(
         "provenance",
         "Run Codex through Provenance",
-        "Provenance runs each turn on your Codex sign-in, with its history trimming; approvals and edits show here",
+        "Runs each turn on your Codex account with history trimming, inline diffs, and approvals.",
         pv.ready,
         pv.problem,
       )}

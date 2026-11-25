@@ -1,0 +1,184 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "provenance-app-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.0)"
+        required: true
+        type: string
+      draft:
+        description: "Create as a draft release"
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark as prerelease"
+        required: false
+        default: false
+        type: boolean
+      router_ref:
+        description: "prominence-chan/provenance-core git ref to bundle"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            os: macos-14
+            platform: darwin
+            arch: arm64
+            build_script: app:build:mac
+            cli_ext: ""
+            artifact_name: macos-arm64
+          - label: macOS x64
+            os: macos-15-intel
+            platform: darwin
+            arch: x64
+            build_script: app:build:mac:x64
+            cli_ext: ""
+            artifact_name: macos-x64
+          - label: Windows x64
+            os: windows-latest
+            platform: win32
+            arch: x64
+            build_script: app:build:win
+            cli_ext: ".exe"
+            artifact_name: windows-x64
+          - label: Linux x64
+            os: ubuntu-24.04
+            platform: linux
+            arch: x64
+            build_script: app:build:linux
+            cli_ext: ""
+            artifact_name: linux-x64
+
+    steps:
+      - name: Checkout provenance
+        uses: actions/checkout@v4
+        with:
+          path: provenance
+
+      - name: Checkout provenance-core
+        uses: actions/checkout@v4
+        with:
+          repository: prominence-chan/provenance-core
+          ref: ${{ inputs.router_ref || 'main' }}
+          path: provenance-core
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev pkg-config libssl-dev unzip rpm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: provenance/codex-rs -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Build Rust agent binaries
+        working-directory: provenance/codex-rs
+        run: |
+          cargo build --release -p codex-cli --bin provenance
+          cargo build --release -p codex-code-mode-host
+
+      - name: Install UI dependencies
+        working-directory: provenance/ui
+        run: npm ci
+
+      - name: Build desktop installers
+        working-directory: provenance/ui
+        env:
+          ROUTER_SRC: ${{ github.workspace }}/provenance-core
+          BROWSER_SOURCE: download
+          PBS_TARGET: ${{ matrix.platform }}-${{ matrix.arch }}
+          BROWSER_TARGET: ${{ matrix.platform }}-${{ matrix.arch }}
+        run: npm run ${{ matrix.build_script }}
+
+      - name: Stage release artifacts
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          PLAT: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          CLI_EXT: ${{ matrix.cli_ext }}
+        run: |
+          mkdir -p dist-release
+          # Desktop installers
+          for f in provenance/ui/release/*.dmg provenance/ui/release/*.zip provenance/ui/release/*.exe provenance/ui/release/*.AppImage provenance/ui/release/*.deb; do
+            [ -f "$f" ] && cp "$f" dist-release/
+          done
+          # Standalone CLI archive
+          CLI_DIR="provenance-cli-${PLAT}-${ARCH}"
+          mkdir -p "$CLI_DIR"
+          cp "provenance/codex-rs/target/release/provenance${CLI_EXT}" "$CLI_DIR/"
+          cp "provenance/codex-rs/target/release/codex-code-mode-host${CLI_EXT}" "$CLI_DIR/"
+          if [ "$PLAT" = "win32" ]; then
+            powershell -Command "Compress-Archive -Path '${CLI_DIR}/*' -DestinationPath 'dist-release/provenance-cli-${TAG}-${PLAT}-${ARCH}.zip'"
+          else
+            tar -czf "dist-release/provenance-cli-${TAG}-${PLAT}-${ARCH}.tar.gz" -C "$CLI_DIR" .
+          fi
+          ls -lh dist-release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_name }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: all-artifacts
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: Provenance ${{ inputs.tag || github.ref_name }}
+          draft: ${{ inputs.draft != '' && inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: all-artifacts/*

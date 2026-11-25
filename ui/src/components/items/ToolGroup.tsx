@@ -41,7 +41,17 @@ export function ToolGroup({ items, collapsed }: { items: ThreadItem[]; collapsed
 }
 
 type Kind =
-  "command" | "read" | "search" | "list" | "edit" | "create" | "delete" | "tool" | "web" | "image";
+  | "command"
+  | "read"
+  | "search"
+  | "list"
+  | "edit"
+  | "create"
+  | "delete"
+  | "subagent"
+  | "tool"
+  | "web"
+  | "image";
 
 // Order of the phrases, and how each one reads for 1 and for n.
 const PHRASES: [Kind, (n: number) => string][] = [
@@ -52,6 +62,7 @@ const PHRASES: [Kind, (n: number) => string][] = [
   ["edit", (n) => `edited ${n} file${n === 1 ? "" : "s"}`],
   ["create", (n) => `created ${n} file${n === 1 ? "" : "s"}`],
   ["delete", (n) => `deleted ${n} file${n === 1 ? "" : "s"}`],
+  ["subagent", (n) => `ran ${n} subagent step${n === 1 ? "" : "s"}`],
   ["tool", (n) => `called ${n} tool${n === 1 ? "" : "s"}`],
   ["web", (n) => `searched the web${n === 1 ? "" : ` ${n} times`}`],
   ["image", (n) => `viewed ${n} image${n === 1 ? "" : "s"}`],
@@ -88,6 +99,13 @@ export function summarize(items: ThreadItem[]) {
             else if (l.startsWith("-") && !l.startsWith("---")) dels++;
           }
         }
+        break;
+      case "collabAgentToolCall":
+        bump("subagent");
+        if (item.status === "failed") failed++;
+        break;
+      case "subAgentActivity":
+        bump("subagent");
         break;
       case "mcpToolCall":
       case "dynamicToolCall":

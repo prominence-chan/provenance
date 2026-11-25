@@ -336,7 +336,11 @@ try {
     `Claude Code's efforts: Default and what --effort takes (${levels.join(", ")})`,
   );
   check(
-    await colourIs(page, '.slot-menu-effort [aria-selected="true"] .tier-option-check', "--fallback-claude"),
+    await colourIs(
+      page,
+      '.slot-menu-effort [aria-selected="true"] .tier-option-check',
+      "--fallback-claude",
+    ),
     "the effort list takes Claude Code's colour",
   );
   await shot(page, "effort-claude-open");
@@ -406,14 +410,14 @@ try {
   );
   check(
     await page.evaluate(() => {
-        const r = document.querySelector(".composer .slot-btn .effort-meter rect.on");
-        const probe = document.createElement("span");
-        probe.style.color = "var(--fallback-claude)";
-        document.body.append(probe);
-        const want = getComputedStyle(probe).color;
-        probe.remove();
-        return !!r && getComputedStyle(r).fill === want;
-      }),
+      const r = document.querySelector(".composer .slot-btn .effort-meter rect.on");
+      const probe = document.createElement("span");
+      probe.style.color = "var(--fallback-claude)";
+      document.body.append(probe);
+      const want = getComputedStyle(probe).color;
+      probe.remove();
+      return !!r && getComputedStyle(r).fill === want;
+    }),
     "its meter in Claude Code's colour",
   );
   check(
@@ -603,9 +607,11 @@ try {
   const orchRows = await page.locator(".slot-menu-orchestrator .slot-option").allInnerTexts();
   check(
     orchRows.length === 3 &&
-      /Provenance\s+One thread/.test(orchRows[0]) &&
-      /Experimental\s+A fresh worker per job/.test(orchRows[1]) &&
-      /Hyperexperimental\s+A plain chat per step/.test(orchRows[2]),
+      /Provenance\s+Standard harness with context improvements/.test(orchRows[0]) &&
+      /Experimental\s+Experimental and heavily subagentic/.test(orchRows[1]) &&
+      /Hyperexperimental\s+(Unproven chat-optimized orchestrator|Web chat models only)/.test(
+        orchRows[2],
+      ),
     "three choices, each with its one line",
   );
   await page.hover('.slot-menu-orchestrator [data-value="experimental"]');
@@ -617,8 +623,11 @@ try {
   check(
     (await page.locator(".composer .slot-orchestrator .slot-btn").innerText()).trim() ===
       "Experimental" &&
-      (await page.evaluate(() => JSON.parse(localStorage.getItem("provenance-ui.settings") ?? "{}")))
-        .orchestrator === "experimental",
+      (
+        await page.evaluate(() =>
+          JSON.parse(localStorage.getItem("provenance-ui.settings") ?? "{}"),
+        )
+      ).orchestrator === "experimental",
     "kept as settings.orchestrator across a reload",
   );
   await page.locator(".thread-title", { hasText: /^Add a README section$/ }).click();

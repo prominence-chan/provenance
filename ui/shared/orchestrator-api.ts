@@ -25,16 +25,16 @@
 export type Orchestrator = "provenance" | "experimental" | "hyperexperimental";
 
 export const ORCHESTRATORS: { id: Orchestrator; name: string; blurb: string }[] = [
-  { id: "provenance", name: "Provenance", blurb: "One thread, the standard harness" },
+  { id: "provenance", name: "Provenance", blurb: "Standard harness with context improvements" },
   {
     id: "experimental",
     name: "Experimental",
-    blurb: "A fresh worker per job, checked at the end",
+    blurb: "Experimental and heavily subagentic",
   },
   {
     id: "hyperexperimental",
     name: "Hyperexperimental",
-    blurb: "A plain chat per step, no tool calls; unproven",
+    blurb: "Unproven chat-optimized orchestrator",
   },
 ];
 
@@ -46,20 +46,44 @@ export function isOrchestrator(v: unknown): v is Orchestrator {
   return v === "provenance" || v === "experimental" || v === "hyperexperimental";
 }
 
+export interface SourceSummary {
+  id: string;
+  kind: string;
+  model: string;
+  available: boolean;
+}
+
+/**
+ * Hyperexperimental is only allowed on web chat usage models (e.g. ChatGPT / Qwen / Gemini web).
+ * Pinned `pool/...` models, fallbacks, and tiers with no available web chat source are disallowed.
+ */
+export function isHyperexperimentalAllowed(
+  model: string,
+  sources: Record<string, SourceSummary[]>,
+): boolean {
+  const m = model.trim();
+  if (!m || m.includes(":")) return false;
+  const slash = m.indexOf("/");
+  const pin = slash >= 0 ? m.slice(0, slash) : null;
+  const tier = slash >= 0 ? m.slice(slash + 1) : m;
+  if (!tier) return false;
+  if (pin) {
+    if (pin.toLowerCase() === "pool") return false;
+    const list = sources[tier] ?? [];
+    const match = list.find((s) => s.id === pin || s.model === m);
+    return !!match && match.kind === "web" && match.available;
+  }
+  const list = sources[tier] ?? [];
+  return list.some((s) => s.kind === "web" && s.available);
+}
+
 /**
  * Reasoning efforts a fallback's CLI takes (the composer shows the ones its model supports).
  * Claude Code's `--effort` takes low..max (its --help); Codex's catalog (`codex debug models`,
  * model/list) lists low..ultra per model, and its enum also knows none and minimal (older models).
  */
 export type FallbackEffort =
-  | "none"
-  | "minimal"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "max"
-  | "ultra";
+  "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /** Every effort, lowest first. */
 export const FALLBACK_EFFORTS: FallbackEffort[] = [
