@@ -386,7 +386,9 @@ void main() {
   float add = 0.0;          // extra additive light (flash, ring, spark cores)
   vec3 tint = vec3(0.0);    // direct premultiplied colour (off-palette bits), dark theme
   float tintA = 0.0;
-  float win = uMode == 2 ? 1.0 : bandWin(vPos);
+  float win = uMode == 2 || (uMode == 0 && uTier == 3 && (uPre > 0.01 || uFl > 0.01))
+    ? 1.0
+    : bandWin(vPos);
   if (win <= 0.0) { outColor = vec4(0.0); return; }
 
   vec2 c = uRect.xy + uRect.zw * 0.5;
@@ -762,6 +764,8 @@ void main() {
       // tightens it, the eruption leaves a lingering afterglow; flames while active.
       float pre = uPre;
       float after = pulse(ft, 0.08, 0.55);
+      float perimL;
+      float uN = perimS(vPos, perimL);
       float rimN = fbm3(vPos / 15.0 + vec2(t * 0.8, -t * 0.5) + uSeed);
       float lvl = 0.5 * uBreath + 0.25 * act + 0.5 * pre + 0.8 * fl + 0.35 * after;
       heat = rimLine * (0.3 + 0.7 * smoothstep(0.4, 0.8, rimN)) * lvl;
@@ -770,25 +774,25 @@ void main() {
       float swell = 0.8 + 0.4 * noise(vec2(t * 0.35, uSeed));
       heat += corona * mix(0.5, 1.0, topW)
             * (0.12 * uBreath + 0.08 * act * swell + 0.28 * fl + 0.22 * after + 0.12 * pre);
-      float wn = fbm3(vec2(u / 34.0 - t * 0.18 + uSeed, dd / 9.0 - t * 0.25));
+      float wn = fbm3(vec2(uN / 34.0 - t * 0.18 + uSeed, dd / 9.0 - t * 0.25));
       heat += smoothstep(0.58, 0.88, wn) * exp(-dd / 13.0) * smoothstep(0.0, 3.0, dd)
             * (0.17 * uBreath + 0.1 * act) * outside;
       tint += mix(uOff1, uOff2, smoothstep(0.3, 0.8, wn)) * corona * after * 0.08;
       if (pre > 0.01) {
         // Gathering: faint streaks fall in towards the rim, faster as the charge builds.
-        float g = smoothstep(0.62, 0.92, noise(vec2(u / 7.0 + uSeed, dd / 10.0 + uClock * (3.0 + 5.0 * pre))));
-        heat += g * pre * 0.3 * exp(-dd / 30.0) * smoothstep(110.0, 0.0, dd) * outside;
+        float g = smoothstep(0.62, 0.92, noise(vec2(uN / 7.0 + uSeed, dd / 10.0 + uClock * (3.0 + 5.0 * pre))));
+        heat += g * pre * 0.3 * exp(-dd / 34.0) * outside;
         // Heat-up: the edge heats like metal, unevenly (hot spots spread along it) through
         // dull orange, yellow, to white-hot; it swells into a bloom and the air above it
         // shimmers.
-        float T = clamp(pre * 1.3 - 0.3 * noise(vec2(u / 55.0 + uSeed, uClock * 0.6)), 0.0, 1.0);
-        float shim = (noise(vec2(u / 4.0, uClock * 11.0)) - 0.5) * 1.6 * T;
+        float T = clamp(pre * 1.3 - 0.3 * noise(vec2(uN / 55.0 + uSeed, uClock * 0.6)), 0.0, 1.0);
+        float shim = (noise(vec2(uN / 4.0, uClock * 11.0)) - 0.5) * 1.6 * T;
         float rimH = exp(-abs(d - 0.4 - shim) / (0.6 + 1.4 * T)) * smoothstep(-1.5, 0.0, d);
-        float halo = exp(-dd / (4.0 + 26.0 * T * T)) * outside;
+        float halo = (exp(-dd / (5.0 + 30.0 * T * T)) + exp(-dd / (40.0 + 140.0 * T * T)) * 0.14) * outside;
         float hazeN = smoothstep(0.6, 0.9, fbm3(vec2(vPos.x / 6.0 + sin(up / 9.0 + uClock * 5.0) * 0.6, up / 22.0 + uClock * 2.4) + uSeed));
         float haze = hazeN * smoothstep(0.0, 6.0, up) * exp(-up / 18.0) * topW * T * T;
         vec3 bb = blackbody(T);
-        tint += bb * (rimH * (0.2 + 1.5 * T) + halo * (0.12 + 0.4 * T * T) + haze * 0.12);
+        tint += bb * (rimH * (0.2 + 1.5 * T) + halo * (0.12 + 0.38 * T * T) + haze * 0.12);
         tintA += (rimH * 0.5 + halo * 0.2) * T;
         heat += rimH * 0.25 * T;
       }
@@ -1770,7 +1774,11 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       below = 80 + 40 * l.fl + 80 * l.pre;
     }
     gl.uniform1i(fu.uMode, 0);
-    quad(r.x - side, r.y - top, r.x + r.w + side, r.y + r.h + below);
+    if (l.tier === "nova" && (l.pre > 0.01 || l.fl > 0.01)) {
+      quad(0, 0, w, h);
+    } else {
+      quad(r.x - side, r.y - top, r.x + r.w + side, r.y + r.h + below);
+    }
 
     const filament =
       l.tier === "nova"
