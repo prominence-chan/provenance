@@ -131,7 +131,7 @@ const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6, antigrav
  * gone by `len`. Each flare stretches all of it by a random 0.88..1.14.
  */
 const FLARE: Record<
-  Exclude<FxId, "claude">,
+  Exclude<FxId, "claude" | "antigravity">,
   { pre: number; rise: number; k1: number; k2: number; m: number; len: number }
 > = {
   spark: { pre: 0, rise: 0.45, k1: 2.0, k2: 0.8, m: 0.6, len: 3.0 },
@@ -140,8 +140,6 @@ const FLARE: Record<
   nova: { pre: 1.35, rise: 0.1, k1: 1.5, k2: 0.42, m: 0.6, len: 6.5 },
   // Codex: `pre` is the ring charging (uPre), then ft counts the discharge (DISCHARGE).
   codex: { pre: 0.55, rise: 0.15, k1: 1.6, k2: 0.55, m: 0.6, len: 2.0 },
-  // Antigravity: brief magnetic lock (`pre`), then two weightless levitation arcs float up.
-  antigravity: { pre: 0.45, rise: 0.16, k1: 1.35, k2: 0.48, m: 0.55, len: 2.4 },
 };
 
 /**
@@ -726,61 +724,39 @@ void main() {
       heat += (rimLine * 0.48 + exp(-dd / 3.0) * outside * 0.15) * ring * mix(0.55, 1.0, topW);
       add += rimLine * ring * mix(0.55, 1.0, topW) * 0.06;
     } else if (uTier == 6) {
-      // ANTIGRAVITY: zero-G levitation field. A suspended meniscus arc hovers gently above the
-      // top edge with sparse rising orbital slipstreams; on switch, the rim locks briefly (uPre)
-      // then releases two concentric buoyant levitation arcs that float upward into weightlessness.
+      // ANTIGRAVITY: calm zero-G levitation field (no switch pulse). At rest, a very faint
+      // suspended meniscus hovers softly above the top edge with sparse drifting motes; while
+      // active, buoyant slipstreams and weightless orbital nodes rise cleanly.
       float xt = smoothstep(uRect.x + 2.0, uRect.x + uRect.z * 0.14, vPos.x)
                * smoothstep(uRect.x + uRect.z - 2.0, uRect.x + uRect.z * 0.86, vPos.x);
       float topBand = smoothstep(uRect.y + uRadius + 2.0, uRect.y + 1.0, vPos.y);
       float upc = max(up, 0.0);
       float nx = clamp((vPos.x - c.x) / max(uRect.z * 0.5, 1.0), -1.0, 1.0);
       float bow = 1.0 - nx * nx;
-      // Suspended levitation meniscus hovering a few px off the top edge, bobbing slowly.
-      float hoverY = 5.5 + 4.5 * act + 1.8 * sin(uClock * 1.15 + uSeed) + 4.5 * bow;
-      float arc = exp(-abs(upc - hoverY) / (1.35 + 0.5 * act)) * smoothstep(0.0, 2.5, up);
-      float arcWash = exp(-abs(upc - hoverY) / (8.0 + 6.0 * act)) * smoothstep(0.0, 2.0, up) * 0.22;
-      // Vertical buoyant slipstreams rising gently off the top edge.
-      float sway = sin(upc * 0.065 - uClock * 0.9 + uSeed) * 10.0;
-      float colN = ridged(vec2((vPos.x + sway) / 28.0 + uSeed * 0.7, upc / 48.0 - t * 1.15));
-      float H = 20.0 + 26.0 * act;
-      float streams = smoothstep(0.52, 0.88, colN) * smoothstep(1.0, 9.0, upc)
-                    * exp(-upc / H) * smoothstep(H * 3.2, H * 1.4, upc);
-      // Shimmering weightless nodes drifting upward in a loose orbital lattice.
-      vec2 grid = vec2((vPos.x - c.x) / 30.0, (upc - uClock * (7.0 + 11.0 * act)) / 26.0);
+      // Quiet suspended levitation meniscus hovering a few px off the top edge.
+      float hoverY = 5.0 + 4.5 * act + 1.5 * sin(uClock * 0.9 + uSeed) + 4.0 * bow;
+      float arc = exp(-abs(upc - hoverY) / (1.3 + 0.55 * act)) * smoothstep(0.0, 2.5, up);
+      float arcWash = exp(-abs(upc - hoverY) / (7.5 + 6.0 * act)) * smoothstep(0.0, 2.0, up) * 0.18;
+      // Gentle vertical buoyant slipstreams, mostly visible while streaming.
+      float sway = sin(upc * 0.065 - uClock * 0.8 + uSeed) * 10.0;
+      float colN = ridged(vec2((vPos.x + sway) / 28.0 + uSeed * 0.7, upc / 48.0 - t * 1.1));
+      float H = 16.0 + 28.0 * act;
+      float streams = smoothstep(0.55, 0.88, colN) * smoothstep(1.0, 9.0, upc)
+                    * exp(-upc / H) * smoothstep(H * 3.0, H * 1.4, upc);
+      // Sparse weightless nodes drifting slowly upward.
+      vec2 grid = vec2((vPos.x - c.x) / 34.0, (upc - uClock * (5.5 + 10.5 * act)) / 28.0);
       vec2 gi = floor(grid);
       vec2 gf = fract(grid) - 0.5;
       float rnd = hash(gi + uSeed);
       vec2 off = (hash2(gi + 4.3 + uSeed) - 0.5) * 0.55;
-      float orb = smoothstep(0.18, 0.02, length(gf - off)) * step(0.68 - 0.22 * act, rnd)
-                * smoothstep(2.0, 12.0, upc) * exp(-upc / (28.0 + 28.0 * act));
-      float base = (arc * (0.34 * uBreath + 0.32 * act) + arcWash * (0.35 * uBreath + 0.35 * act))
-                 + streams * (0.14 * uBreath + 0.32 * act)
-                 + orb * (0.48 * uBreath + 0.42 * act);
-      float lift = 0.0;
-      float flash = 0.0;
-      if (ft > -0.05 && ft < 2.5) {
-        // Two concentric parabolic anti-gravity waves lifting off into zero-G.
-        for (int w = 0; w < 2; w++) {
-          float dtW = ft - float(w) * 0.28;
-          if (dtW <= 0.0) continue;
-          float Yw = (92.0 - float(w) * 18.0) * (1.0 - exp(-dtW * 1.25)) + 10.0 * bow * smoothstep(0.0, 0.4, dtW);
-          float hgt = clamp(Yw / 104.0, 0.0, 1.0);
-          float fadeW = pow(1.0 - hgt, 1.25) * exp(-dtW * 0.42) * smoothstep(0.0, 0.06, dtW);
-          float hw = (uRect.z * 0.5 - 2.0) * mix(1.0, 0.42, hgt);
-          float xs = smoothstep(hw, hw * 0.48, abs(vPos.x - c.x));
-          float wave = exp(-abs(upc - Yw) / mix(2.2, 1.1, hgt)) * fadeW;
-          float wake = upc < Yw ? exp(-(Yw - upc) / 14.0) * fadeW * 0.28 : 0.0;
-          lift += (wave * (w == 0 ? 0.78 : 0.46) + wake) * xs;
-        }
-        flash = pulse(ft, 0.05, 4.5);
-      }
-      heat = (base + lift) * xt;
-      heat += rimLine * topBand * xt * (0.045 * uBreath + 0.07 * act + 0.26 * flash);
-      heat += exp(-upc / 7.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.03 + 0.045 * act + 0.1 * flash);
-      // Pre-release magnetic lock around the composer perimeter.
-      float ring = uPre;
-      heat += (rimLine * 0.46 + exp(-dd / 3.5) * outside * 0.16) * ring * mix(0.55, 1.0, topW);
-      add += (lift * 0.22 + orb * 0.14 + rimLine * (ring * 0.08 + flash * 0.1)) * xt;
+      float orb = smoothstep(0.16, 0.02, length(gf - off)) * step(0.76 - 0.28 * act, rnd)
+                * smoothstep(2.0, 12.0, upc) * exp(-upc / (22.0 + 30.0 * act));
+      heat = ((arc * (0.11 * uBreath + 0.36 * act) + arcWash * (0.09 * uBreath + 0.30 * act))
+            + streams * (0.035 * uBreath + 0.28 * act)
+            + orb * (0.14 * uBreath + 0.44 * act)) * xt;
+      heat += rimLine * topBand * xt * (0.018 * uBreath + 0.065 * act);
+      heat += exp(-upc / 6.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.012 + 0.04 * act);
+      add += orb * (0.03 + 0.12 * act) * xt;
     } else {
       // NOVA: a shimmering plasma rim all round, plasma wisps drifting along it; the charge
       // tightens it, the eruption leaves a lingering afterglow; flames while active.
@@ -1315,7 +1291,11 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
 
   // ---- envelopes ----
   const stepFlare = (l: Layer, now: number) => {
-    if (l.tier === "claude") return; // its select is the lap (stepHead)
+    if (l.tier === "claude" || l.tier === "antigravity") {
+      l.fl = 0;
+      l.pre = 0;
+      return;
+    }
     const f = FLARE[l.tier];
     const tt = (now - l.flareAt) / l.ts;
     l.ft = tt - f.pre;
@@ -1469,24 +1449,24 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     }
   };
 
-  /** Antigravity: weightless orbs detaching from the top edge and floating gently upward. */
-  const spawnZeroG = (r: Rect, count: number, burst = false) => {
+  /** Antigravity: quiet weightless orbs detaching from the top edge and floating gently upward. */
+  const spawnZeroG = (r: Rect, count: number, streaming = false) => {
     for (let i = 0; i < count; i++) {
       const u = rand(0.08, 0.92);
       const x = r.x + r.w * u;
-      const y = r.y - rand(1, burst ? 10 : 5);
+      const y = r.y - rand(1, 5);
       pushParticle({
         x,
         y,
-        vx: (u - 0.5) * (burst ? 18 : 6) + rand(-6, 6),
-        vy: -rand(burst ? 26 : 14, burst ? 56 : 28),
-        temp: rand(0.7, 1),
-        cool: rand(0.18, 0.34),
-        size: rand(burst ? 2.0 : 1.5, burst ? 3.4 : 2.6),
+        vx: (u - 0.5) * 6 + rand(-5, 5),
+        vy: -rand(streaming ? 18 : 10, streaming ? 34 : 20),
+        temp: rand(0.6, 0.95),
+        cool: rand(0.2, 0.36),
+        size: rand(streaming ? 1.8 : 1.3, streaming ? 2.8 : 2.1),
         pal: PAL.antigravity,
         kind: 5,
-        ttl: rand(1.6, 3.0),
-        amp: rand(0.55, 0.95),
+        ttl: rand(1.6, 2.8),
+        amp: streaming ? rand(0.5, 0.85) : rand(0.18, 0.36),
       });
     }
   };
@@ -1608,14 +1588,10 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       }
     }
     if (l.tier === "antigravity") {
-      if (!l.blasted && l.ft >= 0 && l.ft < 0.8) {
-        l.blasted = true;
-        spawnZeroG(r, 16, true);
-      }
-      const agyRate = 0.45 + 3.4 * act;
+      const agyRate = 0.16 + 2.8 * act;
       l.trickle += agyRate * dt * (0.7 + 0.6 * noise1(now * 0.6 + l.seed));
       while (l.trickle >= 1) {
-        spawnZeroG(r, 1, false);
+        spawnZeroG(r, 1, act > 0.25);
         l.trickle -= 1;
       }
     }
@@ -1779,10 +1755,9 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       below = ring ? 30 : 0;
     }
     if (l.tier === "antigravity") {
-      top = l.ft > -1 && l.ft < 2.6 ? 132 : 84 + 34 * l.act;
-      const ring = l.ft < 0.5;
-      side = ring ? 30 : 18;
-      below = ring ? 30 : 8;
+      top = 74 + 34 * l.act;
+      side = 16;
+      below = 6;
     }
     if (l.tier === "solstice") {
       // Everything solstice draws tapers off inside the composer's own width.
@@ -2101,7 +2076,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       l.selEnd = l.flareAt + (FLARE.codex.pre + DISCHARGE.len) * l.ts;
     }
     if (l.tier === "antigravity") {
-      l.selEnd = l.flareAt + (FLARE.antigravity.pre + FLARE.antigravity.len) * l.ts;
+      l.selEnd = l.flareAt;
     }
     if (!r) return;
     if (l.tier === "solstice") spawnEmbers(l, r, 10, true);

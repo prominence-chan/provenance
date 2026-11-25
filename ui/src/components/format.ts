@@ -1,12 +1,17 @@
 export function shortPath(p: string | null | undefined): string {
   if (!p) return "";
-  const home = /^\/Users\/[^/]+/.exec(p)?.[0];
+  const home = /^(?:\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)/.exec(p)?.[0];
   return home ? "~" + p.slice(home.length) : p;
 }
 
 export function baseName(p: string | null | undefined): string {
   if (!p) return "";
-  return p.replace(/\/$/, "").split("/").pop() || p;
+  return (
+    p
+      .replace(/[/\\]+$/, "")
+      .split(/[/\\]/)
+      .pop() || p
+  );
 }
 
 /** app-server timestamps are unix seconds. */

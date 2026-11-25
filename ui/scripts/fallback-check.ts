@@ -617,13 +617,16 @@ check(
 log("antigravity");
 searchPath = `${bin}:${nodeDir}:/usr/bin:/bin`;
 const agyHealth = await checkAntigravity(env);
+const neonHigh = agyHealth.models.find((m) => m.id === "gemini-4-neon-high");
 check(
   agyHealth.installed &&
     agyHealth.version === "1.5.14" &&
-    agyHealth.models.some((m) => m.id === "gemini-4-neon-high") &&
+    !!neonHigh &&
+    neonHigh.efforts?.join(",") === "low,medium,high,xhigh,max" &&
+    neonHigh.defaultEffort === "high" &&
     agyHealth.usage?.weeklyRemaining === 0.92 &&
     agyHealth.usage?.buckets?.claude_gpt?.weeklyRemaining === 1,
-  "antigravity found, version, models, and /usage weekly buckets read",
+  "antigravity found, version, TSV models, stderr efforts, and /usage weekly buckets read",
 );
 const agyStart = (await c.call("thread/start", {
   model: "antigravity:gemini-4-neon-high",
@@ -639,27 +642,30 @@ await c.call("turn/start", {
 const agyTurn = await c.turnDone(agyStart.result.thread.id);
 check(
   agyTurn.status === "completed" &&
+    agyTurn.items.some((i) => i.type === "commandExecution" && i.command === "echo agy_ok") &&
     agyTurn.items.some(
-      (i) => i.type === "agentMessage" && /Antigravity handled it/.test(i.text ?? ""),
+      (i) => i.type === "agentMessage" && /Antigravity handled it \(new\)\./.test(i.text ?? ""),
     ),
-  "antigravity turn completes and streams message",
+  "antigravity turn streams tool + message via native stream-json",
 );
 const agyRun = runs()
   .filter((x) => x.cli === "agy")
   .at(-1)!;
-check(
-  agyRun.argv.includes("--model") &&
-    agyRun.argv.includes("gemini-4-neon-high") &&
-    agyRun.argv.includes("--effort") &&
-    agyRun.argv.includes("high"),
-  "antigravity runs with --model and --effort",
-);
-const savedAgy = JSON.parse(readFileSync(path.join(dataDir, "usage.json"), "utf8")) as {
-  antigravity?: { weeklyRemaining?: number };
+const agyStdin = JSON.parse(agyRun.stdin.trim()) as {
+  event?: string;
+  message?: { content?: string };
 };
 check(
-  savedAgy.antigravity?.weeklyRemaining === 0.78,
-  `antigravity persists stream weekly usage (${savedAgy.antigravity?.weeklyRemaining})`,
+  agyRun.argv.includes("--input-format") &&
+    agyRun.argv.includes("--output-format") &&
+    !agyRun.argv.includes("-p") &&
+    agyRun.argv.includes("--model") &&
+    agyRun.argv.includes("gemini-4-neon-high") &&
+    agyRun.argv.includes("--effort") &&
+    agyRun.argv.includes("high") &&
+    agyStdin.event === "user" &&
+    agyStdin.message?.content === "Check agy",
+  "antigravity uses --input-format/--output-format stream-json with JSON user event on stdin",
 );
 const agyAfter = await getFallbacks({ ...env, usageFile: path.join(dataDir, "usage.json") }, true);
 check(

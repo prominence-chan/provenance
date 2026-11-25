@@ -28,7 +28,7 @@
 // brief is in it, and a context sent again is left out. A turn with a context and no message of
 // its own (carry on with the work) shows no user message at all.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -39,6 +39,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import type { WebSocket } from "ws";
@@ -46,7 +47,7 @@ import { parseFallbackModel, type FallbackUsage } from "../../shared/fallback-ap
 import { isFallbackEffort, type FallbackEffort } from "../../shared/orchestrator-api.ts";
 import { AgyStream } from "./agy-stream.ts";
 import { ClaudeStream } from "./claude-stream.ts";
-import { findCli } from "./cli.ts";
+import { envWithPath, findCli, isWinBatch } from "./cli.ts";
 import { CodexStream } from "./codex-stream.ts";
 import { contextText, userMessage, type Item, type Sink } from "./items.ts";
 
@@ -440,7 +441,7 @@ export class FallbackBackend {
       failure = `${MODE_TITLE[t.mode]} isn't installed (no \`${binName}\` found)`;
       return finish();
     }
-    const cwd = isDir(t.thread.cwd) ? t.thread.cwd : process.env.HOME || "/";
+    const cwd = isDir(t.thread.cwd) ? t.thread.cwd : homedir();
     const args =
       t.mode === "claude"
         ? claudeArgs(t)
@@ -453,14 +454,20 @@ export class FallbackBackend {
         : t.mode === "antigravity"
           ? new AgyStream(sink, cwd, turn.id)
           : new CodexStream(sink, cwd, turn.id);
-    const env: NodeJS.ProcessEnv = { ...process.env, PATH: searchPath };
+    const env = envWithPath(process.env, searchPath);
     // A nested Claude Code session (the app started from one) would refuse to run.
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_ENTRYPOINT;
     this.log(`${t.mode} turn in ${cwd}: ${path.basename(bin)} ${args.join(" ")}`);
     let child: ChildProcess;
     try {
-      child = spawn(bin, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(bin, args, {
+        cwd,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        shell: isWinBatch(bin),
+      });
     } catch (e) {
       failure = `Couldn't start ${t.mode}: ${String(e)}`;
       return finish();
@@ -481,13 +488,17 @@ export class FallbackBackend {
     child.on("close", (code, signal) => {
       parser.end();
       if (!parser.done && !run.interrupted && !failure) {
-        const tail = stderr.trim().split("\n").filter(Boolean).slice(-3).join(" · ");
+        const tail = stderr.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(" · ");
         failure = `${t.mode} stopped (${signal ?? `exit ${code}`})${tail ? `: ${tail.slice(0, 400)}` : ""}`;
       }
       finish();
     });
     child.stdin?.on("error", () => {}); // it may exit before reading everything
-    child.stdin?.end(prompt);
+    const stdinBody =
+      t.mode === "antigravity"
+        ? `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`
+        : prompt;
+    child.stdin?.end(stdinBody);
   }
 
   private upsert(turn: TurnRecord, item: Item): void {
@@ -595,7 +606,8 @@ export function agyArgs(t: {
   sandbox: Sandbox;
   effort?: FallbackEffort | null;
 }): string[] {
-  const args = ["-p", "--output-format", "stream-json"];
+  // Streaming JSON on stdin/stdout avoids `-p` flag-value ambiguity and OS command-line length limits.
+  const args = ["--input-format", "stream-json", "--output-format", "stream-json"];
   if (t.sandbox === "danger-full-access") args.push("--dangerously-skip-permissions");
   else if (t.sandbox === "read-only") args.push("--mode", "plan", "--sandbox");
   else args.push("--mode", "accept-edits");
@@ -659,9 +671,24 @@ function isDir(p: string): boolean {
   }
 }
 
-/** SIGINT first (both CLIs stop cleanly on it), then SIGTERM, then SIGKILL. */
+/** Stop a fallback CLI cleanly across macOS, Linux, and Windows. */
 function killGently(child: ChildProcess | null): void {
   if (!child || child.exitCode !== null) return;
+  if (process.platform === "win32") {
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    const pid = child.pid;
+    const hard = setTimeout(() => {
+      if (child.exitCode === null && pid) {
+        execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
+      }
+    }, 2500);
+    child.once("close", () => clearTimeout(hard));
+    return;
+  }
   child.kill("SIGINT");
   const term = setTimeout(() => child.exitCode === null && child.kill("SIGTERM"), 2500);
   const kill = setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 6000);
