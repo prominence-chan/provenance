@@ -37,6 +37,35 @@ Conversations stick to one model inside your chosen tier and fail over automatic
 - **Built-in account & key setup** — Sign into chat sites or add free-tier API keys under **Models & accounts**. The macOS app bundles its own local `provenance-core` router and starts it automatically.
 - **Long-thread orchestration & fallbacks** — Run standard or experimental multi-worker orchestrators, or hand a thread that outgrows free-tier context over to a local CLI fallback without losing where you left off.
 
+## Inside the app
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src=".github/ui-hero.png" alt="New thread screen with reactive solar canvas" width="100%" />
+<br />
+<strong>New thread</strong> — Reactive solar canvas paired with a project-grouped thread sidebar and orchestrator selector.
+</td>
+<td width="50%" valign="top">
+<img src=".github/ui-picker.png" alt="Tier and source picker" width="100%" />
+<br />
+<strong>Tiers &amp; live sources</strong> — Stay on Auto or pin a specific model source, with remaining quota shown right in the menu.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<img src=".github/ui-accounts.png" alt="Models and accounts setup" width="100%" />
+<br />
+<strong>Models &amp; accounts</strong> — Connect web chat accounts, free-tier API keys, and local CLI fallbacks in one place.
+</td>
+<td width="50%" valign="top">
+<img src=".github/ui-light.png" alt="Provenance light theme" width="100%" />
+<br />
+<strong>Light theme</strong> — Warm daylight palette with the same inline diffs, context ring, and folded tool runs.
+</td>
+</tr>
+</table>
+
 ## Install
 
 1. Download `Provenance-0.1.0-arm64.dmg` from the [latest release](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0) (Apple Silicon) and drag **Provenance** into **Applications**.
