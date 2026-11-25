@@ -29,7 +29,7 @@ These paths never exist upstream, so they never conflict.
 | `README.md`, `SETUP.md` | Fork-owned README and technical setup guide |
 | `docs/UPSTREAM.md` | This file |
 | `ui/` | The desktop / web UI (talks to `provenance app-server`; upstream has no such directory) |
-| `.github/provenance-ui.png` | README screenshot |
+| `.github/provenance-ui.png`, `.github/ui-*.png` | README screenshots |
 
 `codex-provenance` is a workspace member because it is a path dependency inside `codex-rs/` (Cargo adds those
 automatically), so the workspace `Cargo.toml` members list is not edited.

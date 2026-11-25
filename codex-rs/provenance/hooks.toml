@@ -165,6 +165,10 @@ paths = [
     "scripts/provenance-name-check.py",
     "ui/",
     ".github/provenance-ui.png",
+    ".github/ui-hero.png",
+    ".github/ui-picker.png",
+    ".github/ui-accounts.png",
+    ".github/ui-light.png",
 ]
 
 # Unused upstream root files/directories intentionally removed to keep the repository root tidy.
