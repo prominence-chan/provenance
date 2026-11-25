@@ -442,10 +442,10 @@ void main() {
     float fil = ridged(vec2(along / 9.0 + warp.x * 6.0, ddw / 55.0 - ft * 0.9 + uSeed));
     float filZone = smoothstep(f2 * 0.2, f2 * 0.85, ddw) * smoothstep(f2 * 1.12, f2 * 0.9, ddw);
     float filaments = pow(fil, 4.0) * filZone * L2 * (0.4 + 0.6 * tear);
-    // Core flash off the rim, and a wide soft bloom that fades across the whole column.
+    // Core flash off the rim, and a wide soft bloom that fades smoothly inside the column.
     float F = pulse(ft, 0.05, 4.8);
     float flash = exp(-dd / (14.0 + 130.0 * ft)) * F * (0.7 + 0.3 * edgeN);
-    float bloom = exp(-dd / 480.0) * F;
+    float bloom = exp(-dd / 220.0) * F;
     // Plasma smoke: advected outward from the rim, cooling pink -> violet -> cyan -> gone.
     float smL = pulse(ft - 0.06, 0.55, 0.62);
     vec2 sq = wp / 52.0 - nrm * ft * 0.85 + uSeed;
@@ -788,7 +788,7 @@ void main() {
         float T = clamp(pre * 1.3 - 0.3 * noise(vec2(uN / 55.0 + uSeed, uClock * 0.6)), 0.0, 1.0);
         float shim = (noise(vec2(uN / 4.0, uClock * 11.0)) - 0.5) * 1.6 * T;
         float rimH = exp(-abs(d - 0.4 - shim) / (0.6 + 1.4 * T)) * smoothstep(-1.5, 0.0, d);
-        float halo = (exp(-dd / (5.0 + 30.0 * T * T)) + exp(-dd / (40.0 + 140.0 * T * T)) * 0.14) * outside;
+        float halo = (exp(-dd / (5.0 + 28.0 * T * T)) + exp(-dd / (20.0 + 60.0 * T * T)) * 0.1) * outside;
         float hazeN = smoothstep(0.6, 0.9, fbm3(vec2(vPos.x / 6.0 + sin(up / 9.0 + uClock * 5.0) * 0.6, up / 22.0 + uClock * 2.4) + uSeed));
         float haze = hazeN * smoothstep(0.0, 6.0, up) * exp(-up / 18.0) * topW * T * T;
         vec3 bb = blackbody(T);
@@ -811,7 +811,13 @@ void main() {
   // uAlphaK: 0 = additive light (dark theme), 1 = normal paint (light theme).
   // tint is light (dark theme only); on paper its alpha would only paint grey.
   float a = clamp(col.a * uAlphaK + (add * 0.5 + tintA * (1.0 - light)) * uAlphaK * uFade, 0.0, 1.0);
-  outColor = vec4(col.rgb, a) * win;
+  vec4 outC = vec4(col.rgb, a) * win;
+  // Unbiased 1-LSB spatial dithering removes 8-bit 1/255 -> 0/255 Mach-band cutoff rings on dark themes.
+  if (light < 0.5) {
+    float dth = (hash(gl_FragCoord.xy) - 0.5) / 255.0;
+    outC.rgb = max(outC.rgb + dth * step(1e-6, outC.rgb), 0.0);
+  }
+  outColor = outC;
 }`;
 
 const POINT_VS = `#version 300 es
