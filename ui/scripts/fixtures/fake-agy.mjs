@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 // A stand-in for the `agy` (Antigravity) CLI (scripts/fallback-check.ts, scripts/subagents-e2e.ts):
-// answers --version, --help, models, and prints a short `-p --output-format stream-json` turn with
-// a rate_limit_event carrying weekly remaining usage.
+// mirrors real `agy`:
+//   --version   -> stdout "1.5.14"
+//   --help      -> stderr usage text (Go flag package writes help to stderr)
+//   models      -> stdout TSV rows (`id\tLabel`)
+//   -p /usage   -> stdout TSV weekly + 5h remaining limits per model group
+//   --input-format stream-json --output-format stream-json -> reads {"event":"user",...} on stdin
+//                  and emits init, step_update (tool + agent_response text_delta), and result.
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
@@ -13,8 +18,8 @@ if (argv[0] === "--version") {
   process.exit(0);
 }
 if (argv[0] === "--help") {
-  console.log(
-    `Usage: agy [options]\n  --model <model>         Model to use\n  --effort <level>        Reasoning effort level (low, medium, high, xhigh, max)\n  --conversation <id>     Resume an existing conversation`,
+  console.error(
+    `Usage of antigravity:\n  --model                         Model for the current CLI session\n  --effort                        Reasoning effort for the current CLI session (low|medium|high|xhigh|max)\n  --conversation                  Resume a previous conversation by ID`,
   );
   process.exit(0);
 }
@@ -30,10 +35,19 @@ if (argv[0] === "models") {
     console.error("Not signed in. Run `agy login` to authenticate.");
     process.exit(1);
   }
-  console.log("gemini-4-neon-high             Gemini 4 Neon (High)");
-  console.log("gemini-4-neon-medium           Gemini 4 Neon (Medium)");
-  console.log("claude-sonnet-4-6              Claude Sonnet 4.6");
+  console.log("gemini-4-neon-high\tGemini 4 Neon (High)");
+  console.log("gemini-4-neon-medium\tGemini 4 Neon (Medium)");
+  console.log("claude-sonnet-4-6\tClaude Sonnet 4.6");
   process.exit(0);
+}
+
+// Mirror real agy guard against `-p --output-format ...`
+const pIdx = argv.indexOf("-p");
+if (pIdx >= 0 && argv[pIdx + 1]?.startsWith("--")) {
+  console.error(
+    `Error: -p took "${argv[pIdx + 1]}" as its prompt, so the intended prompt was left as an argument and ignored.`,
+  );
+  process.exit(2);
 }
 
 let stdin = "";
@@ -46,30 +60,67 @@ process.stdin.on("end", () => {
     );
   const convIdx = argv.indexOf("--conversation");
   const session = convIdx >= 0 ? argv[convIdx + 1] : randomUUID();
-  out({ type: "system", subtype: "init", conversation_id: session });
+  const reply = `Antigravity handled it (${convIdx >= 0 ? "resumed" : "new"}).`;
   out({
-    type: "rate_limit_event",
-    rate_limit_info: {
-      weekly: { remaining_percent: 78, resets_at: Date.now() + 3 * 86_400_000 },
-      primary: { remaining_percent: 92, resets_at: Date.now() + 2 * 3_600_000 },
+    event: "init",
+    conversation_id: session,
+    init: {
+      cwd: process.cwd(),
+      tools: ["run_command", "read_file"],
+      permission_mode: "accept-edits",
     },
   });
   out({
-    type: "assistant",
-    message: {
-      id: "agy_msg_1",
-      role: "assistant",
-      content: [
-        { type: "text", text: `Antigravity handled it (${convIdx >= 0 ? "resumed" : "new"}).` },
-      ],
+    event: "step_update",
+    step_update: {
+      conversation_id: session,
+      step_index: 0,
+      state: "DONE",
+      step_type: "user_input",
     },
-    conversation_id: session,
   });
   out({
-    type: "result",
-    subtype: "success",
-    is_error: false,
-    result: `Antigravity handled it (${convIdx >= 0 ? "resumed" : "new"}).`,
-    conversation_id: session,
+    event: "step_update",
+    step_update: {
+      conversation_id: session,
+      step_index: 1,
+      state: "DONE",
+      step_type: "tool",
+      tool_name: "run_command",
+      tool_info: {
+        name: "run_command",
+        parameters: { CommandLine: "echo agy_ok" },
+        output: "agy_ok\n",
+      },
+    },
+  });
+  out({
+    event: "step_update",
+    step_update: {
+      conversation_id: session,
+      step_index: 2,
+      state: "ACTIVE",
+      step_type: "agent_response",
+      text_delta: "Antigravity handled ",
+    },
+  });
+  out({
+    event: "step_update",
+    step_update: {
+      conversation_id: session,
+      step_index: 2,
+      state: "DONE",
+      step_type: "agent_response",
+      text_delta: `it (${convIdx >= 0 ? "resumed" : "new"}).`,
+    },
+  });
+  out({
+    event: "result",
+    result: {
+      conversation_id: session,
+      status: "SUCCESS",
+      response: reply,
+      num_turns: 1,
+    },
   });
 });

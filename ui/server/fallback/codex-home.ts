@@ -13,7 +13,16 @@
 // used instead. Everything else in the home (sessions, caches) is the fork's own, so threads run
 // this way never mix with ~/.provenance (the tiers) or ~/.codex (Codex's own sessions).
 
-import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  readlinkSync,
+  symlinkSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -43,7 +52,22 @@ export function prepareCodexHome(home: string, loginHome = codexLoginHome()): Ho
     if (k === "file") continue; // a real lock file: harmless, keep it
     if (k === "link" && readlinkSync(l) === t) continue;
     if (k === "link") unlinkSync(l); // pointed at another Codex home ($CODEX_HOME changed)
-    symlinkSync(t, l);
+    try {
+      symlinkSync(t, l);
+    } catch (err) {
+      // On Windows without Developer Mode, symlinks require elevation: fall back to hardlink/copy.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (process.platform === "win32" && (code === "EPERM" || code === "EACCES")) {
+        if (!existsSync(t)) continue;
+        try {
+          linkSync(t, l);
+        } catch {
+          copyFileSync(t, l);
+        }
+      } else {
+        throw err;
+      }
+    }
   }
   return "linked";
 }

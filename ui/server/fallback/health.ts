@@ -66,6 +66,9 @@ export function loadClaudeCachedUsage(configFile?: string): FallbackUsage | null
           ? [path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json")]
           : []),
         path.join(homedir(), ".claude.json"),
+        ...(process.platform === "win32" && process.env.APPDATA
+          ? [path.join(process.env.APPDATA, "Claude", ".claude.json")]
+          : []),
       ];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
@@ -130,7 +133,10 @@ export async function checkClaude(env: FallbackEnv): Promise<FallbacksInfo["clau
     return {
       ...h,
       problem: "Not installed",
-      fix: "Install it with: curl -fsSL https://claude.ai/install.sh | bash",
+      fix:
+        process.platform === "win32"
+          ? "Install it in PowerShell with: irm https://claude.ai/install.ps1 | iex"
+          : "Install it with: curl -fsSL https://claude.ai/install.sh | bash",
       models: [DEFAULT, ...CLAUDE_MODELS],
     };
   }
@@ -355,8 +361,8 @@ export async function checkAntigravity(
     return { ...h, models: [DEFAULT] };
   }
   h.version = /(\d+\.\d+\.\d+\S*)/.exec(ver.stdout)?.[1] ?? (ver.stdout.trim() || null);
-  const efforts = agyEfforts(help.stdout);
-  const parsedModels = agyModels(modelsRes.stdout, efforts);
+  const efforts = agyEfforts(`${help.stdout}\n${help.stderr}`);
+  const parsedModels = agyModels(modelsRes.stdout || modelsRes.stderr, efforts);
   const usage = usageRes.code === 0 ? parseAgyUsage(usageRes.stdout) : null;
   if (usage) h.usage = usage;
   if (modelsRes.code === 0 && parsedModels.length > 1) {
@@ -440,7 +446,7 @@ export function agyEfforts(help: string): FallbackEffort[] {
   return sortEfforts(listed.split(/[\s,|/]+/).filter(isFallbackEffort));
 }
 
-/** Parse `agy models` rows ("gemini-4-neon-high   Gemini 4 Neon (High)"). */
+/** Parse `agy models` rows (TSV when piped: "gemini-4-neon-high\tGemini 4 Neon (High)", or 2+ spaces on a TTY). */
 export function agyModels(stdout: string, efforts: FallbackEffort[]): FallbackModel[] {
   const clean = stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "\n");
   const out: FallbackModel[] = [{ ...DEFAULT, efforts }];
@@ -448,12 +454,14 @@ export function agyModels(stdout: string, efforts: FallbackEffort[]): FallbackMo
   for (const raw of clean.split("\n")) {
     const line = raw.trim();
     if (!line || /fetching available models/i.test(line)) continue;
-    const m = /^([a-z0-9][a-z0-9._-]{1,60})\s{2,}(.+)$/.exec(line);
+    const m = /^([a-z0-9][a-z0-9._-]{1,60})(?:\t+|\s{2,})(.+)$/.exec(line);
     if (!m) continue;
     const [, id, label] = m;
     if (seen.has(id)) continue;
     seen.add(id);
-    out.push({ id, label: label.trim(), efforts });
+    const suffix = /-(none|minimal|low|medium|high|xhigh|max|ultra)$/.exec(id)?.[1];
+    const defaultEffort = suffix && isFallbackEffort(suffix) ? suffix : null;
+    out.push({ id, label: label.trim(), efforts, ...(defaultEffort ? { defaultEffort } : {}) });
   }
   return out;
 }

@@ -1,7 +1,11 @@
-// Antigravity (`agy -p --output-format stream-json`) NDJSON output parser.
-// Supports both Claude-style stream-json envelopes (system/init, stream_event, assistant, user,
-// result) and Antigravity's native conversation/delta/tool events, falling back to plain text if
-// a line is not JSON.
+// Antigravity (`agy --input-format stream-json --output-format stream-json`) NDJSON parser.
+// Native Antigravity events carry `event`:
+//   init        -> { conversation_id, init: { cwd, tools, permission_mode, model } }
+//   step_update -> { step_update: { conversation_id, step_index, state: "ACTIVE"|"DONE",
+//                    step_type: "user_input"|"agent_response"|"tool"|"checkpoint",
+//                    tool_name, text_delta, tool_info: { name, parameters, output, error } } }
+//   result      -> { result: { conversation_id, status: "SUCCESS"|..., response, error, usage } }
+// Also supports Claude-style `type` envelopes and `rate_limit_event` usage updates.
 
 import path from "node:path";
 import type { FallbackUsage } from "../../shared/fallback-api.ts";
@@ -27,7 +31,8 @@ export class AgyStream {
   private sink: AgySink;
   private cwd: string;
   private prefix: string;
-  private streaming: { id: string; text: string } | null = null;
+  private streaming: { id: string; text: string; stepKey?: string } | null = null;
+  private emittedMessage = false;
   private tools = new Map<string, Item>();
   private n = 0;
   private finished = false;
@@ -47,7 +52,6 @@ export class AgyStream {
     try {
       ev = JSON.parse(raw);
     } catch {
-      // Plain text fallback if agy prints text outside JSON
       if (raw.trim()) this.appendText(`${raw}\n`);
       return;
     }
@@ -55,14 +59,41 @@ export class AgyStream {
       (typeof ev.conversation_id === "string" && ev.conversation_id) ||
       (typeof ev.conversationId === "string" && ev.conversationId) ||
       (typeof ev.session_id === "string" && ev.session_id) ||
+      (typeof (ev.step_update as Json | undefined)?.conversation_id === "string" &&
+        String((ev.step_update as Json).conversation_id)) ||
+      (typeof (ev.result as Json | undefined)?.conversation_id === "string" &&
+        String((ev.result as Json).conversation_id)) ||
       null;
     if (sid) this.sink.session(sid);
 
-    if (ev.rate_limit_info || ev.rateLimits || ev.quota) {
+    if (ev.rate_limit_info || ev.rateLimits || ev.rate_limits || ev.quota) {
       const u = extractUsage(ev);
       if (u) this.sink.usage?.(u);
     }
 
+    // Native Antigravity stream-json format (`event`: "init" | "step_update" | "result")
+    if (typeof ev.event === "string") {
+      switch (ev.event) {
+        case "init":
+          return;
+        case "step_update":
+          return this.stepUpdate((ev.step_update ?? {}) as Json);
+        case "result":
+          return this.nativeResult((ev.result ?? ev) as Json);
+        case "error": {
+          const msg =
+            (typeof ev.message === "string" && ev.message) ||
+            (typeof ev.error === "string" && ev.error) ||
+            "Antigravity error";
+          this.sink.error(msg, false);
+          return;
+        }
+        default:
+          return;
+      }
+    }
+
+    // Fallback compatibility for `type`-keyed envelopes
     switch (ev.type) {
       case "system":
         return;
@@ -84,7 +115,10 @@ export class AgyStream {
         if (typeof content === "string") {
           const id = this.streaming?.id ?? this.nextId("msg");
           this.streaming = null;
-          if (content.trim()) this.sink.completed(agentMessage(id, content, true));
+          if (content.trim()) {
+            this.emittedMessage = true;
+            this.sink.completed(agentMessage(id, content, true));
+          }
         } else {
           this.assistant(content);
         }
@@ -118,16 +152,88 @@ export class AgyStream {
         const msg =
           (typeof ev.message === "string" && ev.message) ||
           (typeof ev.error === "string" && ev.error) ||
-          "Antigravity hit an error";
-        this.sink.error(msg, ev.fatal !== false);
+          "Antigravity error";
+        this.sink.error(msg, false);
         return;
       }
       case "result":
-      case "done":
-      case "complete":
-        return this.result(ev);
+        return this.legacyResult(ev);
       default:
         return;
+    }
+  }
+
+  private stepUpdate(su: Json): void {
+    const stepType = typeof su.step_type === "string" ? su.step_type : "";
+    const state = typeof su.state === "string" ? su.state : "";
+    const stepKey = su.step_index != null ? `step-${String(su.step_index)}` : undefined;
+
+    if (stepType === "agent_response") {
+      if (
+        this.streaming &&
+        stepKey &&
+        this.streaming.stepKey &&
+        this.streaming.stepKey !== stepKey
+      ) {
+        this.closeStreaming();
+      }
+      const delta = typeof su.text_delta === "string" ? su.text_delta : "";
+      if (delta) this.appendText(delta, stepKey);
+      if (state === "DONE") this.closeStreaming();
+      return;
+    }
+
+    if (stepType === "tool") {
+      this.closeStreaming();
+      const key = stepKey ?? this.nextId("tool");
+      const info = (su.tool_info ?? {}) as Json;
+      const name = String(info.name ?? su.tool_name ?? "tool");
+      const params = (info.parameters ?? {}) as Json;
+      let item = this.tools.get(key);
+      if (!item) {
+        item = this.toolItem(key, name, params);
+        this.tools.set(key, item);
+        this.sink.started(item);
+      }
+      if (state === "DONE") {
+        this.tools.delete(key);
+        const errObj = info.error as Json | string | boolean | null | undefined;
+        const failed = errObj != null && errObj !== false;
+        const errText =
+          typeof errObj === "string"
+            ? errObj
+            : errObj && typeof errObj === "object" && typeof errObj.message === "string"
+              ? errObj.message
+              : "";
+        const out = textOf(info.output) || errText;
+        this.sink.completed(finish(item, failed, out));
+      }
+    }
+  }
+
+  private nativeResult(res: Json): void {
+    this.closeStreaming();
+    const response = typeof res.response === "string" ? res.response : "";
+    if (response.trim() && !this.emittedMessage) {
+      this.emittedMessage = true;
+      this.sink.completed(agentMessage(this.nextId("msg"), response, true));
+    }
+    this.end();
+    this.finished = true;
+    const status = typeof res.status === "string" ? res.status : "";
+    const errText =
+      typeof res.error === "string"
+        ? res.error
+        : res.error &&
+            typeof res.error === "object" &&
+            typeof (res.error as Json).message === "string"
+          ? String((res.error as Json).message)
+          : "";
+    const failed = !!errText || (status !== "" && status !== "SUCCESS");
+    if (failed) {
+      this.sink.done("failed", errText || `Antigravity stopped (${status || "error"})`);
+    } else {
+      this.sink.done("completed");
     }
   }
 
@@ -141,14 +247,14 @@ export class AgyStream {
     return this.finished;
   }
 
-  private appendText(d: string): void {
+  private appendText(delta: string, stepKey?: string): void {
     if (!this.streaming) {
       const id = this.nextId("msg");
-      this.streaming = { id, text: "" };
+      this.streaming = { id, text: "", stepKey };
       this.sink.started(agentMessage(id, "", false));
     }
-    this.streaming.text += d;
-    this.sink.delta(this.streaming.id, d);
+    this.streaming.text += delta;
+    this.sink.delta(this.streaming.id, delta);
   }
 
   private streamEvent(e: Json): void {
@@ -170,7 +276,10 @@ export class AgyStream {
     if (!this.streaming) return;
     const { id, text } = this.streaming;
     this.streaming = null;
-    if (text) this.sink.completed(agentMessage(id, text, true));
+    if (text) {
+      this.emittedMessage = true;
+      this.sink.completed(agentMessage(id, text, true));
+    }
   }
 
   private assistant(content: unknown): void {
@@ -179,7 +288,10 @@ export class AgyStream {
       if (b.type === "text" && typeof b.text === "string") {
         const id = this.streaming?.id ?? this.nextId("msg");
         this.streaming = null;
-        if (b.text.trim()) this.sink.completed(agentMessage(id, b.text, true));
+        if (b.text.trim()) {
+          this.emittedMessage = true;
+          this.sink.completed(agentMessage(id, b.text, true));
+        }
       } else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim()) {
         this.sink.completed(reasoning(this.nextId("think"), b.thinking, true));
       } else if (b.type === "tool_use" && typeof b.id === "string") {
@@ -193,52 +305,53 @@ export class AgyStream {
 
   private toolItem(useId: string, name: string, input: Json): Item {
     const id = `${this.prefix}-tool-${useId}`;
-    const s = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : "");
+    const s = (...keys: string[]) => {
+      for (const k of keys) if (typeof input[k] === "string") return input[k] as string;
+      return "";
+    };
     const rel = (p: string) => (p && path.isAbsolute(p) ? path.relative(this.cwd, p) || p : p);
     switch (name) {
-      case "run_command":
       case "Bash":
-        return command(id, s("CommandLine") || s("command"), this.cwd, { status: "inProgress" });
-      case "read_file":
-      case "Read": {
-        const p = s("Path") || s("file_path");
+      case "run_command":
+        return command(id, s("command", "CommandLine"), this.cwd, { status: "inProgress" });
+      case "Read":
+      case "read_file": {
+        const p = s("file_path", "Path", "AbsolutePath", "path");
         const cmd = `read ${rel(p)}`;
         return command(id, cmd, this.cwd, {
           status: "inProgress",
           actions: [{ type: "read", command: cmd, name: path.basename(p), path: p }],
         });
       }
-      case "edit_file":
       case "Edit":
+      case "edit_file":
         return fileChange(
           id,
           [
             {
-              path: rel(s("Path") || s("file_path")),
+              path: rel(s("file_path", "Path", "path")),
               kind: "update",
-              diff: replaceDiff(
-                s("Target") || s("old_string"),
-                s("Replacement") || s("new_string"),
-              ),
+              diff: replaceDiff(s("old_string", "Target"), s("new_string", "Replacement")),
             },
           ],
           "inProgress",
         );
-      case "write_file":
       case "Write":
+      case "write_file":
+      case "write_to_file":
         return fileChange(
           id,
           [
             {
-              path: rel(s("Path") || s("file_path")),
+              path: rel(s("file_path", "Path", "TargetFile", "path")),
               kind: "add",
-              diff: replaceDiff("", s("Content") || s("content")),
+              diff: replaceDiff("", s("content", "Content", "CodeContent")),
             },
           ],
           "inProgress",
         );
-      case "search_web":
       case "WebSearch":
+      case "search_web":
         return webSearch(id, s("query"), false);
       default:
         return toolCall(id, name, input, "inProgress");
@@ -257,8 +370,10 @@ export class AgyStream {
     }
   }
 
-  private result(ev: Json): void {
-    if (typeof ev.result === "string" && ev.result.trim() && !this.streaming) {
+  private legacyResult(ev: Json): void {
+    this.closeStreaming();
+    if (typeof ev.result === "string" && ev.result.trim() && !this.emittedMessage) {
+      this.emittedMessage = true;
       this.sink.completed(agentMessage(this.nextId("msg"), ev.result, true));
     }
     this.end();
