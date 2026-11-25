@@ -35,16 +35,20 @@ export function backendOfThreadId(id: string): BackendId | null {
  */
 export function fallbackOf(model: string | null | undefined): FallbackCli | null {
   const f = parseFallbackModel(model);
-  return f ? (f.mode === "claude" ? "claude" : "codex") : null;
+  if (!f) return null;
+  if (f.mode === "claude") return "claude";
+  if (f.mode === "antigravity") return "antigravity";
+  return "codex";
 }
 
 export const MODE_NAME: Record<FallbackMode, string> = {
   "claude": "Claude Code",
   "codex": "Codex",
   "codex-pv": "Codex",
+  "antigravity": "Antigravity",
 };
 
-/** "Claude Code · Opus", "Codex · GPT-6.2-Sol"; null for a tier. */
+/** "Claude Code · Opus", "Codex · GPT-6.2-Sol", "Antigravity · Gemini 4 Neon"; null for a tier. */
 export function fallbackLabel(
   model: string | null | undefined,
   info: FallbacksInfo | null,
@@ -54,9 +58,11 @@ export function fallbackLabel(
   const list =
     f.mode === "claude"
       ? info?.claude.models
-      : f.mode === "codex"
-        ? info?.codex.models
-        : info?.codex.provenance.models;
+      : f.mode === "antigravity"
+        ? info?.antigravity?.models
+        : f.mode === "codex"
+          ? info?.codex.models
+          : info?.codex.provenance.models;
   const label = list?.find((m) => m.id === f.model)?.label ?? (f.model || "Default");
   return { name: MODE_NAME[f.mode], model: label, mode: f.mode };
 }

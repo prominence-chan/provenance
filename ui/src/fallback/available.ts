@@ -1,13 +1,18 @@
 // Which fallbacks can take a thread now: turned on by the user and healthy on this Mac.
 
-import type { FallbackMode, FallbackModel, FallbacksInfo } from "../../shared/fallback-api";
+import type {
+  FallbackCli,
+  FallbackMode,
+  FallbackModel,
+  FallbacksInfo,
+} from "../../shared/fallback-api";
 import type { FallbackPrefs } from "../store/state";
 
 export interface Fallback {
-  /** "claude" or "codex" (the picker row). */
-  cli: "claude" | "codex";
+  /** "claude", "codex", or "antigravity" (the picker row). */
+  cli: FallbackCli;
   name: string;
-  /** How turns run: claude, codex (in the background) or codex-pv (through Provenance). */
+  /** How turns run: claude, codex (in the background), codex-pv (through Provenance), or antigravity. */
   mode: FallbackMode;
   /** Turned on and healthy. */
   ready: boolean;
@@ -21,9 +26,11 @@ export interface Fallback {
 export function fallbacks(prefs: FallbackPrefs, info: FallbacksInfo | null): Fallback[] {
   const c = info?.claude;
   const x = info?.codex;
+  const a = info?.antigravity;
   const claudeOk = !!c?.installed && c.signedIn !== false && !c.problem;
   const pv = prefs.codex === "provenance";
   const codexOk = pv ? !!x?.provenance.ready : !!x?.installed && x.signedIn !== false && !x.problem;
+  const agyOk = !!a?.installed && a.signedIn !== false && !a.problem;
   return [
     {
       cli: "claude",
@@ -45,6 +52,15 @@ export function fallbacks(prefs: FallbackPrefs, info: FallbacksInfo | null): Fal
         prefs.codex === "off"
           ? "Off"
           : ((pv ? x?.provenance.problem : x?.problem) ?? (info ? null : "Checking…")),
+    },
+    {
+      cli: "antigravity",
+      name: "Antigravity",
+      mode: "antigravity",
+      on: prefs.antigravity,
+      ready: prefs.antigravity && agyOk,
+      models: a?.models ?? [{ id: "", label: "Default" }],
+      problem: !prefs.antigravity ? "Off" : (a?.problem ?? (info ? null : "Checking…")),
     },
   ];
 }

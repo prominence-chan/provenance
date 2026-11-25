@@ -33,7 +33,13 @@ import { WebSocket, WebSocketServer } from "ws";
 import { FallbackBackend } from "../server/fallback/backend.ts";
 import { ThreadLinkStore } from "../server/links.ts";
 import { parseSegments } from "../shared/thread-links.ts";
-import { checkClaude, checkCodex, checkThroughProvenance } from "../server/fallback/health.ts";
+import {
+  checkAntigravity,
+  checkClaude,
+  checkCodex,
+  checkThroughProvenance,
+  getFallbacks,
+} from "../server/fallback/health.ts";
 import {
   checkCodexRoute,
   codexPvArgs,
@@ -56,6 +62,7 @@ mkdirSync(bin);
 mkdirSync(work);
 symlinkSync(path.join(here, "fixtures/fake-claude.mjs"), path.join(bin, "claude"));
 symlinkSync(path.join(here, "fixtures/fake-codex.mjs"), path.join(bin, "codex"));
+symlinkSync(path.join(here, "fixtures/fake-agy.mjs"), path.join(bin, "agy"));
 const cliLog = path.join(scratch, "cli.jsonl");
 process.env.FAKE_CLI_LOG = cliLog;
 const nodeDir = path.dirname(process.execPath);
@@ -263,6 +270,8 @@ async function connect() {
   return { ws, notes, call, turnDone };
 }
 const c = await connect();
+for (let i = 0; i < 50 && !c.notes.some((n) => n.method === "bridge/status"); i++)
+  await new Promise((r) => setTimeout(r, 10));
 check(
   c.notes.some((n) => n.method === "bridge/status"),
   "the page gets a ready status on connect",
@@ -602,6 +611,50 @@ const archived = await backend.handle("thread/archive", { threadId: cs.thread.id
 check(
   archived && ((await backend.handle("thread/list", {})) as { data: unknown[] }).data.length === 1,
   "archive hides a thread",
+);
+
+log("antigravity");
+searchPath = `${bin}:${nodeDir}:/usr/bin:/bin`;
+const agyHealth = await checkAntigravity(env);
+check(
+  agyHealth.installed &&
+    agyHealth.version === "1.5.14" &&
+    agyHealth.models.some((m) => m.id === "gemini-4-neon-high"),
+  "antigravity found, version and models read",
+);
+const agyStart = (await c.call("thread/start", {
+  model: "antigravity:gemini-4-neon-high",
+  cwd: work,
+  approvalPolicy: "on-request",
+  sandbox: "workspace-write",
+})) as { result: { thread: { id: string } } };
+await c.call("turn/start", {
+  threadId: agyStart.result.thread.id,
+  input: [{ type: "text", text: "Check agy" }],
+  effort: "high",
+});
+const agyTurn = await c.turnDone(agyStart.result.thread.id);
+check(
+  agyTurn.status === "completed" &&
+    agyTurn.items.some(
+      (i) => i.type === "agentMessage" && /Antigravity handled it/.test(i.text ?? ""),
+    ),
+  "antigravity turn completes and streams message",
+);
+const agyRun = runs()
+  .filter((x) => x.cli === "agy")
+  .at(-1)!;
+check(
+  agyRun.argv.includes("--model") &&
+    agyRun.argv.includes("gemini-4-neon-high") &&
+    agyRun.argv.includes("--effort") &&
+    agyRun.argv.includes("high"),
+  "antigravity runs with --model and --effort",
+);
+const agyAfter = await getFallbacks({ ...env, usageFile: path.join(dataDir, "usage.json") }, true);
+check(
+  agyAfter.antigravity?.usage?.weeklyRemaining === 0.78,
+  `antigravity persists weekly usage (${agyAfter.antigravity?.usage?.weeklyRemaining})`,
 );
 
 c.ws.close();

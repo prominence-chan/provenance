@@ -2,6 +2,14 @@ import { useSyncExternalStore } from "react";
 import type { Thread, ThreadItem, v2 } from "../protocol";
 import type { ThreadView } from "../store/state";
 
+export interface SubagentEvent {
+  id: string;
+  verb: string;
+  status: string;
+  prompt: string | null;
+  message: string | null;
+}
+
 export interface SubagentInfo {
   id: string;
   name: string;
@@ -13,6 +21,7 @@ export interface SubagentInfo {
   message: string | null;
   agentPath: string | null;
   toolCalls: number;
+  events: SubagentEvent[];
   thread: Thread | null;
   order: number;
 }
@@ -123,6 +132,7 @@ export function collectSubagents(
         message: null,
         agentPath: null,
         toolCalls: 0,
+        events: [],
         thread: child,
         order: byId.size,
       };
@@ -160,6 +170,13 @@ export function collectSubagents(
         } else if (item.tool === "interruptAgent" && item.status === "completed") {
           entry.status = "interrupted";
         }
+        entry.events.push({
+          id: `${item.id}:${id}`,
+          verb: formatCollabVerb(item.tool, item.status === "inProgress"),
+          status: subagentStatusLabel(st?.status ?? entry.status),
+          prompt: item.prompt ?? null,
+          message: st?.message ?? null,
+        });
       }
     } else if (item.type === "subAgentActivity") {
       const entry = ensure(item.agentThreadId);
@@ -171,6 +188,13 @@ export function collectSubagents(
       if (item.reasoningEffort && !entry.reasoningEffort)
         entry.reasoningEffort = item.reasoningEffort;
       entry.status = mapActivityStatus(item.kind);
+      entry.events.push({
+        id: item.id,
+        verb: formatActivityVerb(item.kind),
+        status: subagentStatusLabel(entry.status),
+        prompt: null,
+        message: null,
+      });
     }
   };
 
@@ -203,10 +227,17 @@ interface PanelState {
   /** Per thread: explicit user toggle ("open" | "closed"). Absent = auto-open on wide screens only. */
   byThread: Record<string, "open" | "closed">;
   focusedId: string | null;
+  /** Subagent currently drilled into inside the right panel (null = list view). */
+  inspectedId: string | null;
   overlay: boolean;
 }
 
-let panel: PanelState = { byThread: {}, focusedId: null, overlay: overlayMedia?.matches ?? false };
+let panel: PanelState = {
+  byThread: {},
+  focusedId: null,
+  inspectedId: null,
+  overlay: overlayMedia?.matches ?? false,
+};
 const listeners = new Set<() => void>();
 const emit = () => {
   for (const l of listeners) l();
@@ -252,6 +283,17 @@ export function focusSubagent(threadId: string, agentId: string): void {
     ...panel,
     byThread: { ...panel.byThread, [threadId]: "open" },
     focusedId: agentId,
+    inspectedId: agentId,
+  };
+  emit();
+}
+
+export function inspectSubagent(threadId: string, agentId: string | null): void {
+  panel = {
+    ...panel,
+    ...(agentId ? { byThread: { ...panel.byThread, [threadId]: "open" } } : {}),
+    focusedId: agentId ?? panel.focusedId,
+    inspectedId: agentId,
   };
   emit();
 }

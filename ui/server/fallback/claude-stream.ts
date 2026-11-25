@@ -15,6 +15,8 @@
 // Sub-agent traffic (parent_tool_use_id set) is left out: the Task call itself shows as one tool row.
 
 import path from "node:path";
+import type { FallbackUsage } from "../../shared/fallback-api.ts";
+import { extractUsage } from "./agy-stream.ts";
 import {
   agentMessage,
   command,
@@ -29,8 +31,12 @@ import {
 
 type Json = Record<string, unknown>;
 
+export interface ClaudeSink extends Sink {
+  usage?: (u: FallbackUsage) => void;
+}
+
 export class ClaudeStream {
-  private sink: Sink;
+  private sink: ClaudeSink;
   private cwd: string;
   private prefix: string;
   /** The agentMessage streaming now (content_block_start text .. its assistant message). */
@@ -39,7 +45,7 @@ export class ClaudeStream {
   private n = 0;
   private finished = false;
 
-  constructor(sink: Sink, cwd: string, prefix: string) {
+  constructor(sink: ClaudeSink, cwd: string, prefix: string) {
     this.sink = sink;
     this.cwd = cwd;
     this.prefix = prefix;
@@ -70,6 +76,11 @@ export class ClaudeStream {
         return this.toolResults(((ev.message ?? {}) as Json).content);
       case "result":
         return this.result(ev);
+      case "rate_limit_event": {
+        const u = extractUsage(ev);
+        if (u) this.sink.usage?.(u);
+        return;
+      }
       default:
         return;
     }

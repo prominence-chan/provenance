@@ -119,11 +119,11 @@ const OFF = 4;
 
 /** What an effect is for, and which style draws it: a tier, or a fallback. */
 type FxId = TierId | FallbackCli;
-const FALLBACK_IDS: FallbackCli[] = ["claude", "codex"];
+const FALLBACK_IDS: FallbackCli[] = ["claude", "codex", "antigravity"];
 /** The shader's uTier for each style. */
-const STYLE_INDEX: Record<FxId, number> = { ...TIER_INDEX, claude: 4, codex: 5 };
+const STYLE_INDEX: Record<FxId, number> = { ...TIER_INDEX, claude: 4, codex: 5, antigravity: 5 };
 /** Its colour ramp's palette slot: the tiers', OFF, then the fallbacks'. */
-const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6 };
+const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6, antigravity: 7 };
 
 /**
  * Flare envelope per tier, in seconds: an optional charge (`pre`) before the peak, a smooth
@@ -138,8 +138,9 @@ const FLARE: Record<
   ember: { pre: 0, rise: 0.7, k1: 1.3, k2: 0.55, m: 0.55, len: 4.2 },
   solstice: { pre: 0, rise: 0.9, k1: 0.8, k2: 0.38, m: 0.5, len: 6.5 },
   nova: { pre: 1.35, rise: 0.1, k1: 1.5, k2: 0.42, m: 0.6, len: 6.5 },
-  // Codex: `pre` is the ring charging (uPre), then ft counts the discharge (DISCHARGE).
+  // Codex / Antigravity: `pre` is the ring charging (uPre), then ft counts the discharge (DISCHARGE).
   codex: { pre: 0.55, rise: 0.15, k1: 1.6, k2: 0.55, m: 0.6, len: 2.0 },
+  antigravity: { pre: 0.55, rise: 0.15, k1: 1.6, k2: 0.55, m: 0.6, len: 2.0 },
 };
 
 /**
@@ -781,7 +782,7 @@ in vec4 aP;            // x, y, size, temperature (0..1)
 in vec3 aQ;            // alpha, palette slot, sharpness (0 soft glow .. 1 hard spark)
 uniform vec2 uRes;
 uniform float uDpr;
-uniform vec3 uPal[28]; // 7 slots x deep, mid, hot, core
+uniform vec3 uPal[32]; // 8 slots x deep, mid, hot, core
 out vec3 vC;
 out float vA;
 out float vS;
@@ -949,7 +950,9 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 const frac = (x: number) => x - Math.floor(x);
-const isFallback = (id: FxId): id is FallbackCli => id === "claude" || id === "codex";
+const isFallback = (id: FxId): id is FallbackCli =>
+  id === "claude" || id === "codex" || id === "antigravity";
+const isRaster = (id: FxId): boolean => id === "codex" || id === "antigravity";
 
 // ---- Claude Code's select lap (LAP) ----
 const lapD = (x: number) => (1 - x) * (1 - x);
@@ -1110,7 +1113,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
   let w = 0;
   let h = 0;
   let dpr = 1;
-  let pal = new Float32Array(84);
+  let pal = new Float32Array(96);
   let off = { a: [0.5, 0.3, 1], b: [0.2, 0.8, 1], dusk: [0.5, 0.15, 0.4] };
   let alphaK = 0;
   let gain = 1;
@@ -1482,7 +1485,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     const act = isFallback(l.tier) ? l.act * gateOf(l, now) : l.act;
     l.time += dt * (0.3 + 0.7 * act + 0.6 * l.fl);
     if (l.tier === "claude") stepHead(l, dt, now, r, act);
-    if (l.tier === "codex") stepSweep(l, dt, now, act);
+    if (isRaster(l.tier)) stepSweep(l, dt, now, act);
     if (l.fading) l.fade = Math.max(0, l.fade - dt / (l.retiring ? RENEW_FADE : 0.6));
     else if (l.fade < 1) l.fade = Math.min(1, l.fade + dt / l.fadeIn); // a renewal or a return
     if (l.fading) return;
@@ -1643,7 +1646,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.uniform1f(fu.uSeed, l.seed);
     gl.uniform1i(fu.uTier, STYLE_INDEX[l.tier]);
     // Both small: the head's place round the outline, how far the sweep has run.
-    gl.uniform1f(fu.uPhase, l.tier === "codex" ? sweepOf(l) : frac(l.phase));
+    gl.uniform1f(fu.uPhase, isRaster(l.tier) ? sweepOf(l) : frac(l.phase));
     gl.uniform4f(fu.uAux, l.tier === "claude" ? l.trail : l.sweepA, 0, 0, 0);
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
@@ -1672,7 +1675,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       // Hugs the border: the dashes, the cursor and their glow (plus the band's 16 px fade).
       top = side = below = 34;
     }
-    if (l.tier === "codex") {
+    if (isRaster(l.tier)) {
       top = l.ft > -1 && l.ft < DISCHARGE.len ? 124 : 76 + 30 * l.act;
       // The charge's ring goes all round (plus the band's 16 px fade).
       const ring = l.ft < 0.6;
@@ -1735,7 +1738,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
           trail: l.trail,
           lap: l.tier === "claude" ? l.fl : 0,
           act: isFallback(l.tier) ? l.act * gateOf(l, now) : l.act,
-          sweep: l.tier === "codex" ? sweepOf(l) : -1,
+          sweep: isRaster(l.tier) ? sweepOf(l) : -1,
           sweepA: l.sweepA,
           pre: l.pre,
           ft: l.ft,
@@ -1982,7 +1985,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       l.lap = makeLap(l.flareAt, l.phase, fresh ? 0 : l.vel, HEAD_REST / N, N);
       l.selEnd = l.flareAt + l.lap.T;
     }
-    if (l.tier === "codex") {
+    if (isRaster(l.tier)) {
       // A new raster or one held off (nothing showing) shows none; one in flight fades
       // (stepSweep).
       if (fresh || (l.sweepFrom !== Infinity && l.phase < l.sweepFrom)) l.sweepA = 0;
@@ -2035,7 +2038,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             blasted: false,
             trickle: 0,
             nextSpawn: 1,
-            phase: id === "codex" ? Math.random() * 40 + devUptime / 6.5 : Math.random(),
+            phase: isRaster(id) ? Math.random() * 40 + devUptime / 6.5 : Math.random(),
             selAt: -1e9,
             selEnd: -1e9,
             gate0: 0,

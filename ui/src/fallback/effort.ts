@@ -39,15 +39,20 @@ export function effortsFor(model: string, info: FallbacksInfo | null): EffortCho
   const list =
     f.mode === "claude"
       ? info?.claude.models
-      : f.mode === "codex"
-        ? info?.codex.models
-        : info?.codex.provenance.models;
+      : f.mode === "antigravity"
+        ? info?.antigravity?.models
+        : f.mode === "codex"
+          ? info?.codex.models
+          : info?.codex.provenance.models;
   const m = list?.find((x) => x.id === f.model) ?? list?.find((x) => x.id === "");
   return { efforts: m ? (m.efforts ?? []) : null, defaultEffort: m?.defaultEffort ?? null };
 }
 
 /** The effort a turn on the selected model sends (null: none, the CLI's default). */
-export function chosenEffort(settings: Settings, info: FallbacksInfo | null): FallbackEffort | null {
+export function chosenEffort(
+  settings: Settings,
+  info: FallbacksInfo | null,
+): FallbackEffort | null {
   const cli = fallbackOf(settings.model);
   if (!cli) return null;
   const want = settings.fallbackEffort[cli];

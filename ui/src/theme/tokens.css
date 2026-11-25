@@ -78,6 +78,8 @@
   --fallback-claude-grad: linear-gradient(135deg, #e9e0ff, #b794ff 50%, #7d55f0);
   --fallback-codex: #45d3c7;
   --fallback-codex-grad: linear-gradient(135deg, #dcfff9, #45d3c7 50%, #129488);
+  --fallback-antigravity: #7c93ff;
+  --fallback-antigravity-grad: linear-gradient(135deg, #e0e8ff, #7c93ff 50%, #4b61e8);
 
   /* ---- effects (see src/theme/effects.css + src/components/effects/) ---- */
   /* Per-tier effect ramps, coolest to hottest (deep -> mid -> hot -> core). */
@@ -105,6 +107,10 @@
   --fx-codex-mid: #13a091;
   --fx-codex-hot: #82e8dc;
   --fx-codex-core: #e9fffb;
+  --fx-antigravity-deep: #0e1747;
+  --fx-antigravity-mid: #4c64f0;
+  --fx-antigravity-hot: #9ab0ff;
+  --fx-antigravity-core: #eef2ff;
   /* Off-palette accents, only for a moment: nova's plasma cooling through violet and cyan,
      solstice's dusk clouds. */
   --fx-nova-off1: #7a52ff;
@@ -200,6 +206,8 @@
   --fallback-claude-grad: linear-gradient(135deg, #9a6ff0, #5a2fc4);
   --fallback-codex: #0a7a70;
   --fallback-codex-grad: linear-gradient(135deg, #13a394, #075f57);
+  --fallback-antigravity: #4054d6;
+  --fallback-antigravity-grad: linear-gradient(135deg, #6478f0, #2e3fb5);
 
   /* On paper the ramp runs the other way: pale tips, deep saturated base. */
   --fx-ember-deep: #fed7aa;
@@ -226,6 +234,10 @@
   --fx-codex-mid: #2cc2b0;
   --fx-codex-hot: #0b8275;
   --fx-codex-core: #0b3f3a;
+  --fx-antigravity-deep: #dbe2ff;
+  --fx-antigravity-mid: #6e82f5;
+  --fx-antigravity-hot: #3b4fd4;
+  --fx-antigravity-core: #1d2875;
   --fx-nova-off1: #6d28d9;
   --fx-nova-off2: #0891b2;
   --fx-solstice-dusk: #9d174d;

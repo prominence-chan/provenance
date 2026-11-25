@@ -54,6 +54,11 @@ const KINDS = {
   nova: { name: "Nova", image: "tier-nova", hover: "Nova tier · hyperfrontier" },
   claude: { name: "Claude Code", image: "fallback-claude", hover: "Claude Code fallback" },
   codex: { name: "Codex", image: "fallback-codex", hover: "Codex fallback" },
+  antigravity: {
+    name: "Antigravity",
+    image: "fallback-antigravity",
+    hover: "Antigravity fallback",
+  },
 } as const;
 const LARGE_IMAGE = "provenance";
 /** A tier thread's orchestrator -> its name on the first line ("Solstice · Provenance Orchestrator"). */

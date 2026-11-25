@@ -26,8 +26,8 @@ export function FallbacksStep({ lead }: { lead?: boolean }) {
     <div className="setup-step fallbacks-step">
       {lead !== false && (
         <p className="setup-lead">
-          When a thread gets too big for the free models, continue it in Claude Code or Codex using
-          your own subscription.
+          When a thread gets too big for the free models, continue it in Claude Code, Codex, or
+          Antigravity using your own subscription.
         </p>
       )}
       <ul className="setup-sites">
@@ -54,6 +54,15 @@ export function FallbacksStep({ lead }: { lead?: boolean }) {
             usable={!!info && (healthy(info.codex) || info.codex.provenance.ready)}
           />
           {prefs.codex !== "off" && info && <CodexMode info={info} prefs={prefs} />}
+        </li>
+        <li>
+          <CliRow
+            name="Antigravity"
+            health={info?.antigravity ?? null}
+            on={prefs.antigravity}
+            onToggle={(on) => setFallbackPrefs({ antigravity: on })}
+            note={prefs.antigravity ? NO_ASK : undefined}
+          />
         </li>
       </ul>
       <button className="setup-add" onClick={() => void check()} disabled={checking}>
@@ -94,7 +103,7 @@ function CliRow({
     <div className="fallback-row" data-cli={h?.id ?? name.toLowerCase()}>
       <label className="setup-switch-row">
         <span className="setup-mono" aria-hidden>
-          {name === "Codex" ? "Cx" : "CC"}
+          {name === "Codex" ? "Cx" : name === "Antigravity" ? "Ag" : "CC"}
         </span>
         <span className="setup-switch-text">
           <span className="setup-site-name">{name}</span>

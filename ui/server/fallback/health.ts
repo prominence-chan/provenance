@@ -5,7 +5,14 @@
 // pass-through answering (its /_health, nothing forwarded). A missing CLI is a normal state ("not
 // installed" + how to get it), never an error.
 
-import type { CliHealth, FallbackModel, FallbacksInfo } from "../../shared/fallback-api.ts";
+import type {
+  CliHealth,
+  FallbackModel,
+  FallbacksInfo,
+  FallbackUsage,
+} from "../../shared/fallback-api.ts";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import {
   FALLBACK_EFFORTS,
   isFallbackEffort,
@@ -17,7 +24,7 @@ import { checkCodexRoute, type RouterRef } from "./codex-route.ts";
 import { CLAUDE_MODELS, CODEX_MODELS } from "./known-models.ts";
 
 export interface FallbackEnv {
-  /** Where to look for claude / codex (PATH-style). */
+  /** Where to look for claude / codex / agy (PATH-style). */
   searchPath: string;
   /** The provenance binary (the app's agent). */
   provenanceBin: string;
@@ -27,6 +34,19 @@ export interface FallbackEnv {
   codexLoginHome?: string;
   /** The router "through Provenance" sends its model requests to (codex-route.ts); unset: not checked. */
   router?: RouterRef;
+  /** Optional directory where observed fallback weekly usage snapshots are stored. */
+  usageFile?: string;
+}
+
+function loadSavedUsage(file?: string): Partial<Record<CliHealth["id"], FallbackUsage>> {
+  if (!file || !existsSync(file)) return {};
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as Partial<
+      Record<CliHealth["id"], FallbackUsage>
+    >;
+  } catch {
+    return {};
+  }
 }
 
 const DEFAULT: FallbackModel = { id: "", label: "Default" };
@@ -248,16 +268,92 @@ export async function checkThroughProvenance(
   return { ready: true, problem: null, models: catalogModels(models.stdout) ?? fallback };
 }
 
+export async function checkAntigravity(
+  env: FallbackEnv,
+): Promise<NonNullable<FallbacksInfo["antigravity"]>> {
+  const h = blank("antigravity");
+  const bin = findCli("agy", env.searchPath);
+  if (!bin) {
+    return {
+      ...h,
+      problem: "Not installed",
+      fix: "Install Antigravity CLI so `agy` is on your PATH.",
+      models: [DEFAULT],
+    };
+  }
+  h.installed = true;
+  h.path = bin;
+  const opts = { searchPath: env.searchPath };
+  const [ver, help, modelsRes] = await Promise.all([
+    run(bin, ["--version"], opts),
+    run(bin, ["--help"], opts),
+    run(bin, ["models"], { ...opts, timeoutMs: 12_000 }),
+  ]);
+  if (ver.code !== 0) {
+    h.problem = `It didn't run (${ver.failed ?? `exit ${ver.code}`})`;
+    h.fix = "Reinstall it, or run `agy --version` in a terminal to see why.";
+    return { ...h, models: [DEFAULT] };
+  }
+  h.version = /(\d+\.\d+\.\d+\S*)/.exec(ver.stdout)?.[1] ?? (ver.stdout.trim() || null);
+  const efforts = agyEfforts(help.stdout);
+  const parsedModels = agyModels(modelsRes.stdout, efforts);
+  if (modelsRes.code === 0 && parsedModels.length > 1) {
+    h.signedIn = true;
+    h.account = "Antigravity";
+  } else if (
+    /not logged in|sign in|authenticate|unauthorized/i.test(
+      `${modelsRes.stdout}\n${modelsRes.stderr}`,
+    )
+  ) {
+    h.signedIn = false;
+    h.problem = "Not signed in";
+    h.fix = "Run `agy` in a terminal once and sign in.";
+  } else {
+    h.signedIn = modelsRes.code === 0 ? true : null;
+    if (h.signedIn) h.account = "Antigravity";
+  }
+  return { ...h, models: parsedModels };
+}
+
+/** Parse `--effort ... (low|medium|high|xhigh|max)` from `agy --help`. */
+export function agyEfforts(help: string): FallbackEffort[] {
+  const line = /--effort[^\n]*/.exec(help)?.[0] ?? "";
+  const listed = /\(([^)]*)\)/.exec(line)?.[1] ?? "";
+  return sortEfforts(listed.split(/[\s,|/]+/).filter(isFallbackEffort));
+}
+
+/** Parse `agy models` rows ("gemini-4-neon-high   Gemini 4 Neon (High)"). */
+export function agyModels(stdout: string, efforts: FallbackEffort[]): FallbackModel[] {
+  const clean = stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "\n");
+  const out: FallbackModel[] = [{ ...DEFAULT, efforts }];
+  const seen = new Set<string>();
+  for (const raw of clean.split("\n")) {
+    const line = raw.trim();
+    if (!line || /fetching available models/i.test(line)) continue;
+    const m = /^([a-z0-9][a-z0-9._-]{1,60})\s{2,}(.+)$/.exec(line);
+    if (!m) continue;
+    const [, id, label] = m;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, label: label.trim(), efforts });
+  }
+  return out;
+}
+
 let cache: { at: number; info: Promise<FallbacksInfo> } | null = null;
 
-/** Both checks, cached for 20 s (`refresh` checks again now). */
+/** All fallback checks, cached for 20 s (`refresh` checks again now). */
 export function getFallbacks(env: FallbackEnv, refresh = false): Promise<FallbacksInfo> {
   if (!refresh && cache && Date.now() - cache.at < 20_000) return cache.info;
-  const info = Promise.all([checkClaude(env), checkCodex(env)]).then(([claude, codex]) => ({
-    claude,
-    codex,
-    checkedAt: Math.floor(Date.now() / 1000),
-  }));
+  const savedUsage = loadSavedUsage(env.usageFile);
+  const info = Promise.all([checkClaude(env), checkCodex(env), checkAntigravity(env)]).then(
+    ([claude, codex, antigravity]) => ({
+      claude: { ...claude, usage: claude.usage ?? savedUsage.claude ?? null },
+      codex: { ...codex, usage: codex.usage ?? savedUsage.codex ?? null },
+      antigravity: { ...antigravity, usage: antigravity.usage ?? savedUsage.antigravity ?? null },
+      checkedAt: Math.floor(Date.now() / 1000),
+    }),
+  );
   cache = { at: Date.now(), info };
   info.catch(() => (cache = null));
   return info;

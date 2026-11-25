@@ -11,6 +11,8 @@
 //
 // exec prints whole items (no text deltas), so a message appears when it is complete.
 
+import type { FallbackUsage } from "../../shared/fallback-api.ts";
+import { extractUsage } from "./agy-stream.ts";
 import {
   agentMessage,
   command,
@@ -25,16 +27,20 @@ import {
   type Sink,
 } from "./items.ts";
 
+export interface CodexSink extends Sink {
+  usage?: (u: FallbackUsage) => void;
+}
+
 type Json = Record<string, unknown>;
 
 export class CodexStream {
-  private sink: Sink;
+  private sink: CodexSink;
   private cwd: string;
   private prefix: string;
   private open = new Map<string, Item>();
   private finished = false;
 
-  constructor(sink: Sink, cwd: string, prefix: string) {
+  constructor(sink: CodexSink, cwd: string, prefix: string) {
     this.sink = sink;
     this.cwd = cwd;
     this.prefix = prefix;
@@ -90,8 +96,17 @@ export class CodexStream {
       case "error":
         this.sink.error(String(ev.message ?? "error"), false);
         return;
-      default:
+      case "rate_limit_event":
+      case "rate_limits": {
+        const u = extractUsage(ev);
+        if (u) this.sink.usage?.(u);
         return;
+      }
+      default: {
+        const u = extractUsage(ev);
+        if (u) this.sink.usage?.(u);
+        return;
+      }
     }
   }
 

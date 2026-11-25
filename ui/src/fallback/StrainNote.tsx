@@ -40,7 +40,7 @@ export function StrainNote({ threadId }: { threadId: string }) {
           ))
         ) : (
           <button className="btn" onClick={() => openSetup(null, "fallbacks")}>
-            Set up Codex or Claude Code…
+            Set up a fallback…
           </button>
         )}
         <button

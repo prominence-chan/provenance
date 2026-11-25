@@ -52,21 +52,26 @@ function usageText(s: Source): string | null {
  * them). Empty when the router lists no sources for the tier: then there is no submenu.
  */
 function subItemsFor(tier: string, sources: Record<string, Source[]>): SubItem[] {
-  const list = sources[tier] ?? [];
+  const seen = new Set<string>();
+  const list = (sources[tier] ?? []).filter((s) => {
+    if (s.model === tier || seen.has(s.model)) return false;
+    seen.add(s.model);
+    return true;
+  });
   const pins = list.filter((s) => s.pinnable);
   const needs = list.filter((s) => !s.pinnable && s.needs);
   if (!pins.length && !needs.length) return [];
   return [
-    { key: "auto", model: tier, label: "Auto", meta: null, disabled: false },
+    { key: `${tier}:auto`, model: tier, label: "Auto", meta: null, disabled: false },
     ...pins.map((s) => ({
-      key: s.id,
+      key: `${tier}:pin:${s.id}:${s.model}`,
       model: s.model,
       label: s.label,
       meta: usageText(s),
       disabled: !s.available,
     })),
     ...needs.map((s) => ({
-      key: s.id,
+      key: `${tier}:need:${s.id}:${s.model}`,
       model: s.model,
       label: s.label,
       meta: usageText(s),
@@ -158,9 +163,8 @@ export function TierPicker() {
     if (!open) return;
     void refreshSources();
     void refreshFallbacks();
-    const fbIndex = picked
-      ? fbs.findIndex((f) => f.cli === (picked.mode === "claude" ? "claude" : "codex"))
-      : -1;
+    const fbCli = fallbackOf(model);
+    const fbIndex = fbCli ? fbs.findIndex((f) => f.cli === fbCli) : -1;
     setActive(fbIndex >= 0 ? list.length + fbIndex : Math.max(0, list.indexOf(currentTier)));
     setSubOpen(false);
     setSubActive(null);
@@ -204,7 +208,7 @@ export function TierPicker() {
       setFallbackPrefs({ codex: it.codexMode });
       // The chosen Codex model moves over to the other way of running it.
       const was = parseFallbackModel(model);
-      if (was && was.mode !== "claude")
+      if (was && (was.mode === "codex" || was.mode === "codex-pv"))
         updateSettings({ model: `${it.codexMode === "provenance" ? "codex-pv" : "codex"}:` });
       return;
     }
@@ -369,13 +373,15 @@ export function TierPicker() {
           </div>
           {fbs.map((f, k) => {
             const i = list.length + k;
-            const selected = !!picked && (picked.mode === "claude") === (f.cli === "claude");
+            const selected = !!picked && fallbackOf(model) === f.cli;
             const meta = f.ready
               ? f.cli === "codex"
                 ? f.mode === "codex-pv"
                   ? "Through Provenance"
                   : "In the background"
-                : "Your Claude subscription"
+                : f.cli === "antigravity"
+                  ? "Your Antigravity account"
+                  : "Your Claude subscription"
               : f.on && f.problem && f.problem !== "Off"
                 ? f.problem
                 : "Set up…";
