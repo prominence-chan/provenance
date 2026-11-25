@@ -943,9 +943,10 @@ void main() {
     col = mix(col + dwarf, col * (1.0 - max(core * dw, hl)) + dwarfL, uLight);
     alpha = max(alpha, mix(dwA, max(core * dw, hl), uLight));
   }
-  // the flash: one soft-edged glow from the core, never the whole canvas
+  // the flash's tight core on layer 0 (zero well before the canvas edge; the wide white
+  // bloom lives on layer 1 so it radiates smoothly across the whole hero with no radius clip)
   if (uNova.x > 0.001) {
-    float f = (exp(-r * r / 0.03) + exp(-r / 0.2) * 0.2) * uNova.x;
+    float f = exp(-r * r / 0.025) * uNova.x;
     col += mix(vec3(0.95, 0.97, 1.0), vec3(0.6, 0.7, 0.95), uLight) * f;
     alpha = max(alpha, clamp(f, 0.0, 1.0) * mix(0.6, 0.8, uLight));
   }
@@ -959,6 +960,8 @@ void main() {
   float r = length(p);
   vec3 col = vec3(0.0);
   float alpha = 0.0;
+  vec3 flashCol = vec3(0.0);
+  float flashA = 0.0;
   if (uStar.y > 0.5) {
     vec3 em; float dens;
     nebula(p, em, dens);
@@ -983,6 +986,12 @@ void main() {
       alpha = max(alpha, clamp(sk, 0.0, 1.0) * mix(0.5, 0.8, uLight));
     }
   }
+  // Wide white flash bloom on the hero-sized canvas so it never clips to the 200 px sun box.
+  if (uNova.x > 0.001) {
+    float f = (exp(-r * r / 0.24) * 0.48 + exp(-r / 0.95) * 0.26 + exp(-r / 2.8) * 0.1) * uNova.x;
+    flashCol = mix(vec3(0.95, 0.97, 1.0), vec3(0.6, 0.7, 0.95), uLight) * f;
+    flashA = clamp(f, 0.0, 1.0) * mix(0.6, 0.72, uLight);
+  }
   // Soft towards the hero's edges, never a hard clip; dimmed behind the heading, so it stays
   // legible on both themes.
   float fx = smoothstep(-uFade.x, -uFade.x * 0.55, p.x) * smoothstep(uFade.y, uFade.y * 0.55, p.x);
@@ -991,7 +1000,7 @@ void main() {
   vec2 tq = abs(p - tc) - th;
   float sd = length(max(tq, 0.0)) + min(max(tq.x, tq.y), 0.0);
   float dim = mix(0.3, 1.0, smoothstep(-0.05, 0.35, sd));
-  outColor = vec4(col, alpha) * fx * fy * dim * uStar.w;
+  outColor = (vec4(col, alpha) * dim + vec4(flashCol, flashA)) * fx * fy * uStar.w;
 }
 #endif`;
 
@@ -1149,8 +1158,9 @@ function surface(canvas: HTMLCanvasElement, layer: 0 | 1) {
   };
 }
 
-/** Whether a frame has anything for the nebula's canvas (the remnant or the shock front). */
-const hasNebula = (f: Frame) => f.star[1] > 0.5 && (f.nova[3] > 0.003 || f.nova[2] > 0.002);
+/** Whether a frame has anything for the nebula's canvas (the remnant, shock front, or flash). */
+const hasNebula = (f: Frame) =>
+  f.star[1] > 0.5 && (f.nova[3] > 0.003 || f.nova[2] > 0.002 || f.nova[0] > 0.001);
 
 // ---- the component ----------------------------------------------------------------------
 
@@ -1353,7 +1363,7 @@ export function HeroSun({ size = 200, tier }: { size?: number; tier?: TierId | n
         lastFlash = f.flash;
         shownFrame = f;
         // the settled remnant moves slowly: its canvas redraws at 15 fps
-        const busy = s.neb < 1 || f.nova[2] > 0.002;
+        const busy = s.neb < 1 || f.nova[2] > 0.002 || f.nova[0] > 0.001;
         drawBoth([[f, 1]], busy || manual || tick++ % 2 === 0);
       };
       drawNow = () => shownFrame && drawBoth([[shownFrame, 1]]);
