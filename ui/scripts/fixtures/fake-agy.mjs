@@ -18,6 +18,13 @@ if (argv[0] === "--help") {
   );
   process.exit(0);
 }
+if (argv[0] === "-p" && argv[1] === "/usage") {
+  console.log("Gemini Models\tWeekly Limit Remaining\t92%\t2026-12-01T14:47:23Z");
+  console.log("Gemini Models\tFive Hour Limit Remaining\t93%\t2026-11-25T08:13:55Z");
+  console.log("Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z");
+  console.log("Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z");
+  process.exit(0);
+}
 if (argv[0] === "models") {
   if (process.env.FAKE_SIGNED_OUT === "1") {
     console.error("Not signed in. Run `agy login` to authenticate.");

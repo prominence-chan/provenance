@@ -10,14 +10,17 @@ import type {
   FallbackModel,
   FallbacksInfo,
   FallbackUsage,
+  FallbackUsageWindow,
 } from "../../shared/fallback-api.ts";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   FALLBACK_EFFORTS,
   isFallbackEffort,
   type FallbackEffort,
 } from "../../shared/orchestrator-api.ts";
+import { extractUsage } from "./agy-stream.ts";
 import { findCli, run } from "./cli.ts";
 import { codexHomeEnv, codexLoginHome, prepareCodexHome } from "./codex-home.ts";
 import { checkCodexRoute, type RouterRef } from "./codex-route.ts";
@@ -34,8 +37,10 @@ export interface FallbackEnv {
   codexLoginHome?: string;
   /** The router "through Provenance" sends its model requests to (codex-route.ts); unset: not checked. */
   router?: RouterRef;
-  /** Optional directory where observed fallback weekly usage snapshots are stored. */
+  /** Optional file where observed fallback weekly usage snapshots are stored. */
   usageFile?: string;
+  /** Optional override for Claude Code's local config JSON (default ~/.claude.json). */
+  claudeConfigFile?: string;
 }
 
 function loadSavedUsage(file?: string): Partial<Record<CliHealth["id"], FallbackUsage>> {
@@ -47,6 +52,60 @@ function loadSavedUsage(file?: string): Partial<Record<CliHealth["id"], Fallback
   } catch {
     return {};
   }
+}
+
+/**
+ * Read Claude Code's own locally cached utilization from ~/.claude.json (`cachedUsageUtilization`).
+ * Plain local config metadata (no secrets/keychain), so weekly usage shows immediately on startup.
+ */
+export function loadClaudeCachedUsage(configFile?: string): FallbackUsage | null {
+  const candidates = configFile
+    ? [configFile]
+    : [
+        ...(process.env.CLAUDE_CONFIG_DIR
+          ? [path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json")]
+          : []),
+        path.join(homedir(), ".claude.json"),
+      ];
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(file, "utf8")) as {
+        cachedUsageUtilization?: { fetchedAtMs?: unknown; utilization?: Record<string, unknown> };
+      };
+      const cached = raw?.cachedUsageUtilization;
+      if (!cached?.utilization || typeof cached.utilization !== "object") continue;
+      const parsed = extractUsage({ utilization: cached.utilization });
+      if (!parsed) continue;
+      const fetchedAt =
+        typeof cached.fetchedAtMs === "number" && Number.isFinite(cached.fetchedAtMs)
+          ? cached.fetchedAtMs
+          : parsed.updatedAt;
+      return { ...parsed, updatedAt: fetchedAt };
+    } catch {
+      // unreadable or malformed config; ignore
+    }
+  }
+  return null;
+}
+
+function mergeUsage(
+  a: FallbackUsage | null | undefined,
+  b: FallbackUsage | null | undefined,
+): FallbackUsage | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  const [newer, older] = (a.updatedAt ?? 0) >= (b.updatedAt ?? 0) ? [a, b] : [b, a];
+  const buckets =
+    newer.buckets || older.buckets ? { ...older.buckets, ...newer.buckets } : undefined;
+  return {
+    weeklyRemaining: newer.weeklyRemaining ?? older.weeklyRemaining ?? null,
+    weeklyResetsAt: newer.weeklyResetsAt ?? older.weeklyResetsAt ?? null,
+    primaryRemaining: newer.primaryRemaining ?? older.primaryRemaining ?? null,
+    primaryResetsAt: newer.primaryResetsAt ?? older.primaryResetsAt ?? null,
+    ...(buckets ? { buckets } : {}),
+    updatedAt: newer.updatedAt ?? older.updatedAt,
+  };
 }
 
 const DEFAULT: FallbackModel = { id: "", label: "Default" };
@@ -284,10 +343,11 @@ export async function checkAntigravity(
   h.installed = true;
   h.path = bin;
   const opts = { searchPath: env.searchPath };
-  const [ver, help, modelsRes] = await Promise.all([
+  const [ver, help, modelsRes, usageRes] = await Promise.all([
     run(bin, ["--version"], opts),
     run(bin, ["--help"], opts),
     run(bin, ["models"], { ...opts, timeoutMs: 12_000 }),
+    run(bin, ["-p", "/usage"], { ...opts, timeoutMs: 10_000 }),
   ]);
   if (ver.code !== 0) {
     h.problem = `It didn't run (${ver.failed ?? `exit ${ver.code}`})`;
@@ -297,6 +357,8 @@ export async function checkAntigravity(
   h.version = /(\d+\.\d+\.\d+\S*)/.exec(ver.stdout)?.[1] ?? (ver.stdout.trim() || null);
   const efforts = agyEfforts(help.stdout);
   const parsedModels = agyModels(modelsRes.stdout, efforts);
+  const usage = usageRes.code === 0 ? parseAgyUsage(usageRes.stdout) : null;
+  if (usage) h.usage = usage;
   if (modelsRes.code === 0 && parsedModels.length > 1) {
     h.signedIn = true;
     h.account = "Antigravity";
@@ -313,6 +375,62 @@ export async function checkAntigravity(
     if (h.signedIn) h.account = "Antigravity";
   }
   return { ...h, models: parsedModels };
+}
+
+/**
+ * Parse `agy -p /usage` TSV rows:
+ *   Gemini Models\tWeekly Limit Remaining\t92%\t2026-12-01T14:47:23Z
+ *   Claude and GPT models\tFive Hour Limit Remaining\t100%\t1970-01-01T00:00:00Z
+ */
+export function parseAgyUsage(stdout: string): FallbackUsage | null {
+  const clean = stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "\n");
+  const buckets: Record<string, FallbackUsageWindow> = {};
+  const ensure = (key: string): FallbackUsageWindow =>
+    (buckets[key] ??= {
+      weeklyRemaining: null,
+      weeklyResetsAt: null,
+      primaryRemaining: null,
+      primaryResetsAt: null,
+    });
+  for (const raw of clean.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const cols = line.includes("\t") ? line.split("\t") : line.split(/\s{2,}/);
+    if (cols.length < 3) continue;
+    const [group, label, pctCol, resetCol] = cols.map((s) => s.trim());
+    const pctMatch = /(\d+(?:\.\d+)?)\s*%/.exec(pctCol);
+    if (!pctMatch) continue;
+    const val = Math.max(0, Math.min(1, parseFloat(pctMatch[1]) / 100));
+    let resetMs: number | null = null;
+    if (resetCol) {
+      const ms = Date.parse(resetCol);
+      if (Number.isFinite(ms) && ms > 86_400_000) resetMs = ms;
+    }
+    const key = /claude|gpt/i.test(group)
+      ? "claude_gpt"
+      : /gemini/i.test(group)
+        ? "gemini"
+        : "default";
+    const b = ensure(key);
+    if (/weekly|7\s*day/i.test(label)) {
+      b.weeklyRemaining = val;
+      b.weeklyResetsAt = resetMs;
+    } else if (/five\s*hour|5\s*h/i.test(label)) {
+      b.primaryRemaining = val;
+      b.primaryResetsAt = resetMs;
+    }
+  }
+  const keys = Object.keys(buckets);
+  if (!keys.length) return null;
+  const primaryBucket = buckets.gemini ?? buckets[keys[0]];
+  return {
+    weeklyRemaining: primaryBucket.weeklyRemaining,
+    weeklyResetsAt: primaryBucket.weeklyResetsAt,
+    primaryRemaining: primaryBucket.primaryRemaining,
+    primaryResetsAt: primaryBucket.primaryResetsAt,
+    buckets,
+    updatedAt: Date.now(),
+  };
 }
 
 /** Parse `--effort ... (low|medium|high|xhigh|max)` from `agy --help`. */
@@ -342,19 +460,39 @@ export function agyModels(stdout: string, efforts: FallbackEffort[]): FallbackMo
 
 let cache: { at: number; info: Promise<FallbacksInfo> } | null = null;
 
-/** All fallback checks, cached for 20 s (`refresh` checks again now). */
-export function getFallbacks(env: FallbackEnv, refresh = false): Promise<FallbacksInfo> {
-  if (!refresh && cache && Date.now() - cache.at < 20_000) return cache.info;
+function attachUsage(base: FallbacksInfo, env: FallbackEnv): FallbacksInfo {
   const savedUsage = loadSavedUsage(env.usageFile);
+  const claudeLocal = loadClaudeCachedUsage(env.claudeConfigFile);
+  return {
+    ...base,
+    claude: {
+      ...base.claude,
+      usage: mergeUsage(mergeUsage(base.claude.usage, savedUsage.claude), claudeLocal),
+    },
+    codex: { ...base.codex, usage: mergeUsage(base.codex.usage, savedUsage.codex) },
+    antigravity: base.antigravity
+      ? {
+          ...base.antigravity,
+          usage: mergeUsage(base.antigravity.usage, savedUsage.antigravity),
+        }
+      : undefined,
+  };
+}
+
+/** All fallback checks, cached for 20 s (`refresh` checks again now); usage files are always read fresh. */
+export function getFallbacks(env: FallbackEnv, refresh = false): Promise<FallbacksInfo> {
+  if (!refresh && cache && Date.now() - cache.at < 20_000) {
+    return cache.info.then((base) => attachUsage(base, env));
+  }
   const info = Promise.all([checkClaude(env), checkCodex(env), checkAntigravity(env)]).then(
     ([claude, codex, antigravity]) => ({
-      claude: { ...claude, usage: claude.usage ?? savedUsage.claude ?? null },
-      codex: { ...codex, usage: codex.usage ?? savedUsage.codex ?? null },
-      antigravity: { ...antigravity, usage: antigravity.usage ?? savedUsage.antigravity ?? null },
+      claude,
+      codex,
+      antigravity,
       checkedAt: Math.floor(Date.now() / 1000),
     }),
   );
   cache = { at: Date.now(), info };
   info.catch(() => (cache = null));
-  return info;
+  return info.then((base) => attachUsage(base, env));
 }

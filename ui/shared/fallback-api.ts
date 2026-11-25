@@ -13,17 +13,22 @@ import type { FallbackEffort } from "./orchestrator-api.ts";
 
 export type FallbackCli = "claude" | "codex" | "antigravity";
 
-/** Weekly (and optional short-window) remaining usage for a fallback subscription. */
-export interface FallbackUsage {
+export interface FallbackUsageWindow {
   /** Share of weekly usage remaining (0..1); null when the CLI hasn't reported one. */
   weeklyRemaining: number | null;
-  /** Unix seconds when the weekly window resets, if known. */
+  /** Unix ms when the weekly window resets, if known. */
   weeklyResetsAt?: number | null;
   /** Share of primary (e.g. 5-hour) window remaining (0..1), if known. */
   primaryRemaining?: number | null;
-  /** Unix seconds when the primary window resets, if known. */
+  /** Unix ms when the primary window resets, if known. */
   primaryResetsAt?: number | null;
-  /** Unix seconds when this snapshot was observed. */
+}
+
+/** Weekly (and optional short-window) remaining usage for a fallback subscription. */
+export interface FallbackUsage extends FallbackUsageWindow {
+  /** Per-model-group buckets when a CLI splits quotas (e.g. Antigravity's gemini vs claude_gpt). */
+  buckets?: Record<string, FallbackUsageWindow>;
+  /** Unix ms when this snapshot was observed. */
   updatedAt?: number | null;
 }
 

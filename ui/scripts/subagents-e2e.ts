@@ -500,12 +500,24 @@ async function check(): Promise<void> {
     await page.hover('.tier-menu [data-fallback="antigravity"]');
     await page.waitForSelector('.tier-sub[data-fallback="antigravity"]');
     await page.click('.tier-sub [data-source-model="antigravity:gemini-4-neon-high"]');
+    await page.waitForTimeout(350);
     const agyConn = await page.locator(".conn").innerText();
     check(
-      /Weekly/.test(agyConn) && /78%/.test(agyConn),
-      `fallback shows weekly remaining usage bar (${agyConn.replace(/\n/g, " ")})`,
+      /Weekly/.test(agyConn) && /92%/.test(agyConn),
+      `Antigravity Gemini shows weekly remaining from agy -p /usage (${agyConn.replace(/\n/g, " ")})`,
     );
     await shot(page, "antigravity-weekly-bar");
+
+    // Switching to an Antigravity Claude/GPT model switches to its Claude & GPT bucket (100%)
+    await page.click('button[title="Model tier"]');
+    await page.hover('.tier-menu [data-fallback="antigravity"]');
+    await page.waitForSelector('.tier-sub[data-fallback="antigravity"]');
+    await page.click('.tier-sub [data-source-model="antigravity:claude-sonnet-4-6"]');
+    const agyClaudeConn = await page.locator(".conn").innerText();
+    check(
+      /Weekly/.test(agyClaudeConn) && /100%/.test(agyClaudeConn),
+      `Antigravity Claude model switches to Claude & GPT bucket (${agyClaudeConn.replace(/\n/g, " ")})`,
+    );
 
     // 7. Design screen check: light theme + tablet (768px) overlay + phone (390px) no horizontal overflow
     await page.click('button[title="Switch to light theme"]');

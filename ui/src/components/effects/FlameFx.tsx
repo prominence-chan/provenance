@@ -121,7 +121,7 @@ const OFF = 4;
 type FxId = TierId | FallbackCli;
 const FALLBACK_IDS: FallbackCli[] = ["claude", "codex", "antigravity"];
 /** The shader's uTier for each style. */
-const STYLE_INDEX: Record<FxId, number> = { ...TIER_INDEX, claude: 4, codex: 5, antigravity: 5 };
+const STYLE_INDEX: Record<FxId, number> = { ...TIER_INDEX, claude: 4, codex: 5, antigravity: 6 };
 /** Its colour ramp's palette slot: the tiers', OFF, then the fallbacks'. */
 const PAL: Record<FxId, number> = { ...TIER_INDEX, claude: 5, codex: 6, antigravity: 7 };
 
@@ -138,9 +138,10 @@ const FLARE: Record<
   ember: { pre: 0, rise: 0.7, k1: 1.3, k2: 0.55, m: 0.55, len: 4.2 },
   solstice: { pre: 0, rise: 0.9, k1: 0.8, k2: 0.38, m: 0.5, len: 6.5 },
   nova: { pre: 1.35, rise: 0.1, k1: 1.5, k2: 0.42, m: 0.6, len: 6.5 },
-  // Codex / Antigravity: `pre` is the ring charging (uPre), then ft counts the discharge (DISCHARGE).
+  // Codex: `pre` is the ring charging (uPre), then ft counts the discharge (DISCHARGE).
   codex: { pre: 0.55, rise: 0.15, k1: 1.6, k2: 0.55, m: 0.6, len: 2.0 },
-  antigravity: { pre: 0.55, rise: 0.15, k1: 1.6, k2: 0.55, m: 0.6, len: 2.0 },
+  // Antigravity: brief magnetic lock (`pre`), then two weightless levitation arcs float up.
+  antigravity: { pre: 0.45, rise: 0.16, k1: 1.35, k2: 0.48, m: 0.55, len: 2.4 },
 };
 
 /**
@@ -724,6 +725,62 @@ void main() {
       float ring = uPre;
       heat += (rimLine * 0.48 + exp(-dd / 3.0) * outside * 0.15) * ring * mix(0.55, 1.0, topW);
       add += rimLine * ring * mix(0.55, 1.0, topW) * 0.06;
+    } else if (uTier == 6) {
+      // ANTIGRAVITY: zero-G levitation field. A suspended meniscus arc hovers gently above the
+      // top edge with sparse rising orbital slipstreams; on switch, the rim locks briefly (uPre)
+      // then releases two concentric buoyant levitation arcs that float upward into weightlessness.
+      float xt = smoothstep(uRect.x + 2.0, uRect.x + uRect.z * 0.14, vPos.x)
+               * smoothstep(uRect.x + uRect.z - 2.0, uRect.x + uRect.z * 0.86, vPos.x);
+      float topBand = smoothstep(uRect.y + uRadius + 2.0, uRect.y + 1.0, vPos.y);
+      float upc = max(up, 0.0);
+      float nx = clamp((vPos.x - c.x) / max(uRect.z * 0.5, 1.0), -1.0, 1.0);
+      float bow = 1.0 - nx * nx;
+      // Suspended levitation meniscus hovering a few px off the top edge, bobbing slowly.
+      float hoverY = 5.5 + 4.5 * act + 1.8 * sin(uClock * 1.15 + uSeed) + 4.5 * bow;
+      float arc = exp(-abs(upc - hoverY) / (1.35 + 0.5 * act)) * smoothstep(0.0, 2.5, up);
+      float arcWash = exp(-abs(upc - hoverY) / (8.0 + 6.0 * act)) * smoothstep(0.0, 2.0, up) * 0.22;
+      // Vertical buoyant slipstreams rising gently off the top edge.
+      float sway = sin(upc * 0.065 - uClock * 0.9 + uSeed) * 10.0;
+      float colN = ridged(vec2((vPos.x + sway) / 28.0 + uSeed * 0.7, upc / 48.0 - t * 1.15));
+      float H = 20.0 + 26.0 * act;
+      float streams = smoothstep(0.52, 0.88, colN) * smoothstep(1.0, 9.0, upc)
+                    * exp(-upc / H) * smoothstep(H * 3.2, H * 1.4, upc);
+      // Shimmering weightless nodes drifting upward in a loose orbital lattice.
+      vec2 grid = vec2((vPos.x - c.x) / 30.0, (upc - uClock * (7.0 + 11.0 * act)) / 26.0);
+      vec2 gi = floor(grid);
+      vec2 gf = fract(grid) - 0.5;
+      float rnd = hash(gi + uSeed);
+      vec2 off = (hash2(gi + 4.3 + uSeed) - 0.5) * 0.55;
+      float orb = smoothstep(0.18, 0.02, length(gf - off)) * step(0.68 - 0.22 * act, rnd)
+                * smoothstep(2.0, 12.0, upc) * exp(-upc / (28.0 + 28.0 * act));
+      float base = (arc * (0.34 * uBreath + 0.32 * act) + arcWash * (0.35 * uBreath + 0.35 * act))
+                 + streams * (0.14 * uBreath + 0.32 * act)
+                 + orb * (0.48 * uBreath + 0.42 * act);
+      float lift = 0.0;
+      float flash = 0.0;
+      if (ft > -0.05 && ft < 2.5) {
+        // Two concentric parabolic anti-gravity waves lifting off into zero-G.
+        for (int w = 0; w < 2; w++) {
+          float dtW = ft - float(w) * 0.28;
+          if (dtW <= 0.0) continue;
+          float Yw = (92.0 - float(w) * 18.0) * (1.0 - exp(-dtW * 1.25)) + 10.0 * bow * smoothstep(0.0, 0.4, dtW);
+          float hgt = clamp(Yw / 104.0, 0.0, 1.0);
+          float fadeW = pow(1.0 - hgt, 1.25) * exp(-dtW * 0.42) * smoothstep(0.0, 0.06, dtW);
+          float hw = (uRect.z * 0.5 - 2.0) * mix(1.0, 0.42, hgt);
+          float xs = smoothstep(hw, hw * 0.48, abs(vPos.x - c.x));
+          float wave = exp(-abs(upc - Yw) / mix(2.2, 1.1, hgt)) * fadeW;
+          float wake = upc < Yw ? exp(-(Yw - upc) / 14.0) * fadeW * 0.28 : 0.0;
+          lift += (wave * (w == 0 ? 0.78 : 0.46) + wake) * xs;
+        }
+        flash = pulse(ft, 0.05, 4.5);
+      }
+      heat = (base + lift) * xt;
+      heat += rimLine * topBand * xt * (0.045 * uBreath + 0.07 * act + 0.26 * flash);
+      heat += exp(-upc / 7.0) * smoothstep(-1.0, 1.0, up) * topBand * xt * (0.03 + 0.045 * act + 0.1 * flash);
+      // Pre-release magnetic lock around the composer perimeter.
+      float ring = uPre;
+      heat += (rimLine * 0.46 + exp(-dd / 3.5) * outside * 0.16) * ring * mix(0.55, 1.0, topW);
+      add += (lift * 0.22 + orb * 0.14 + rimLine * (ring * 0.08 + flash * 0.1)) * xt;
     } else {
       // NOVA: a shimmering plasma rim all round, plasma wisps drifting along it; the charge
       // tightens it, the eruption leaves a lingering afterglow; flames while active.
@@ -828,7 +885,7 @@ interface Rect {
 /**
  * kind 0: rising ember / cinder (buoyant)    kind 1: falling spark (gravity, streak)
  * kind 2: spark-tier sparklet (fizzles, drifts) kind 3: nova charge mote (falls in)
- * kind 4: nova debris (fast, light gravity, streak)
+ * kind 4: nova debris (fast, light gravity, streak) kind 5: antigravity zero-G orb
  */
 interface Particle {
   x: number;
@@ -840,7 +897,7 @@ interface Particle {
   size: number;
   seed: number;
   pal: number;
-  kind: 0 | 1 | 2 | 3 | 4;
+  kind: 0 | 1 | 2 | 3 | 4 | 5;
   age: number;
   ttl: number;
   amp: number;
@@ -952,7 +1009,6 @@ const smooth = (a: number, b: number, x: number) => {
 const frac = (x: number) => x - Math.floor(x);
 const isFallback = (id: FxId): id is FallbackCli =>
   id === "claude" || id === "codex" || id === "antigravity";
-const isRaster = (id: FxId): boolean => id === "codex" || id === "antigravity";
 
 // ---- Claude Code's select lap (LAP) ----
 const lapD = (x: number) => (1 - x) * (1 - x);
@@ -1413,6 +1469,28 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     }
   };
 
+  /** Antigravity: weightless orbs detaching from the top edge and floating gently upward. */
+  const spawnZeroG = (r: Rect, count: number, burst = false) => {
+    for (let i = 0; i < count; i++) {
+      const u = rand(0.08, 0.92);
+      const x = r.x + r.w * u;
+      const y = r.y - rand(1, burst ? 10 : 5);
+      pushParticle({
+        x,
+        y,
+        vx: (u - 0.5) * (burst ? 18 : 6) + rand(-6, 6),
+        vy: -rand(burst ? 26 : 14, burst ? 56 : 28),
+        temp: rand(0.7, 1),
+        cool: rand(0.18, 0.34),
+        size: rand(burst ? 2.0 : 1.5, burst ? 3.4 : 2.6),
+        pal: PAL.antigravity,
+        kind: 5,
+        ttl: rand(1.6, 3.0),
+        amp: rand(0.55, 0.95),
+      });
+    }
+  };
+
   // ---- the fallbacks' heads and sweeps ----
   const cellsOf = (r: Rect) => Math.max(12, Math.floor(perimLength(r) / 9 + 0.5));
 
@@ -1485,7 +1563,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     const act = isFallback(l.tier) ? l.act * gateOf(l, now) : l.act;
     l.time += dt * (0.3 + 0.7 * act + 0.6 * l.fl);
     if (l.tier === "claude") stepHead(l, dt, now, r, act);
-    if (isRaster(l.tier)) stepSweep(l, dt, now, act);
+    if (l.tier === "codex") stepSweep(l, dt, now, act);
     if (l.fading) l.fade = Math.max(0, l.fade - dt / (l.retiring ? RENEW_FADE : 0.6));
     else if (l.fade < 1) l.fade = Math.min(1, l.fade + dt / l.fadeIn); // a renewal or a return
     if (l.fading) return;
@@ -1526,6 +1604,18 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       l.trickle += 40 * l.pre * dt;
       while (l.trickle >= 1) {
         spawnMote(r);
+        l.trickle -= 1;
+      }
+    }
+    if (l.tier === "antigravity") {
+      if (!l.blasted && l.ft >= 0 && l.ft < 0.8) {
+        l.blasted = true;
+        spawnZeroG(r, 16, true);
+      }
+      const agyRate = 0.45 + 3.4 * act;
+      l.trickle += agyRate * dt * (0.7 + 0.6 * noise1(now * 0.6 + l.seed));
+      while (l.trickle >= 1) {
+        spawnZeroG(r, 1, false);
         l.trickle -= 1;
       }
     }
@@ -1596,6 +1686,12 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
         e.vx *= 1 + 2.2 * dt;
         e.vy *= 1 + 2.2 * dt;
         e.temp = Math.min(1, e.temp + dt * 0.6);
+      } else if (e.kind === 5) {
+        // Zero-G orb: gentle sinusoidal sway, decelerates smoothly into weightless hover.
+        e.vx += Math.sin(t * 1.4 + e.seed) * 14 * dt;
+        const drag = Math.max(0, 1 - 0.95 * dt);
+        e.vx *= drag;
+        e.vy = e.vy * Math.max(0, 1 - 0.85 * dt) - 3.5 * dt;
       } else {
         // Debris: light gravity, air drag; a little buoyancy once it slows (hot plasma).
         e.vy += (160 - 90 * e.temp) * dt;
@@ -1646,7 +1742,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
     gl.uniform1f(fu.uSeed, l.seed);
     gl.uniform1i(fu.uTier, STYLE_INDEX[l.tier]);
     // Both small: the head's place round the outline, how far the sweep has run.
-    gl.uniform1f(fu.uPhase, isRaster(l.tier) ? sweepOf(l) : frac(l.phase));
+    gl.uniform1f(fu.uPhase, l.tier === "codex" ? sweepOf(l) : frac(l.phase));
     gl.uniform4f(fu.uAux, l.tier === "claude" ? l.trail : l.sweepA, 0, 0, 0);
     gl.uniform3fv(fu.uC0, c(0));
     gl.uniform3fv(fu.uC1, c(1));
@@ -1675,12 +1771,18 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       // Hugs the border: the dashes, the cursor and their glow (plus the band's 16 px fade).
       top = side = below = 34;
     }
-    if (isRaster(l.tier)) {
+    if (l.tier === "codex") {
       top = l.ft > -1 && l.ft < DISCHARGE.len ? 124 : 76 + 30 * l.act;
       // The charge's ring goes all round (plus the band's 16 px fade).
       const ring = l.ft < 0.6;
       side = ring ? 30 : 12;
       below = ring ? 30 : 0;
+    }
+    if (l.tier === "antigravity") {
+      top = l.ft > -1 && l.ft < 2.6 ? 132 : 84 + 34 * l.act;
+      const ring = l.ft < 0.5;
+      side = ring ? 30 : 18;
+      below = ring ? 30 : 8;
     }
     if (l.tier === "solstice") {
       // Everything solstice draws tapers off inside the composer's own width.
@@ -1738,7 +1840,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
           trail: l.trail,
           lap: l.tier === "claude" ? l.fl : 0,
           act: isFallback(l.tier) ? l.act * gateOf(l, now) : l.act,
-          sweep: isRaster(l.tier) ? sweepOf(l) : -1,
+          sweep: l.tier === "codex" ? sweepOf(l) : -1,
           sweepA: l.sweepA,
           pre: l.pre,
           ft: l.ft,
@@ -1844,6 +1946,12 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             }
           }
         }
+      } else if (e.kind === 5) {
+        const u = e.age / e.ttl;
+        const env = smooth(0, 0.16, u) * (1 - smooth(0.55, 1, u));
+        const a = env * e.amp * fade;
+        put(e.x, e.y, e.size, 0.85, a, e.pal, 0.9);
+        put(e.x, e.y, e.size * 3.8, 0.5, a * 0.34, e.pal, 0);
       } else {
         const a = smooth(0, 0.25, e.age) * e.amp * fade;
         put(e.x, e.y, e.size, e.temp, a, e.pal, 0.6);
@@ -1985,12 +2093,15 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
       l.lap = makeLap(l.flareAt, l.phase, fresh ? 0 : l.vel, HEAD_REST / N, N);
       l.selEnd = l.flareAt + l.lap.T;
     }
-    if (isRaster(l.tier)) {
+    if (l.tier === "codex") {
       // A new raster or one held off (nothing showing) shows none; one in flight fades
       // (stepSweep).
       if (fresh || (l.sweepFrom !== Infinity && l.phase < l.sweepFrom)) l.sweepA = 0;
       l.sweepFrom = Infinity;
       l.selEnd = l.flareAt + (FLARE.codex.pre + DISCHARGE.len) * l.ts;
+    }
+    if (l.tier === "antigravity") {
+      l.selEnd = l.flareAt + (FLARE.antigravity.pre + FLARE.antigravity.len) * l.ts;
     }
     if (!r) return;
     if (l.tier === "solstice") spawnEmbers(l, r, 10, true);
@@ -2038,7 +2149,7 @@ function createEngine(canvas: HTMLCanvasElement, host: HTMLElement) {
             blasted: false,
             trickle: 0,
             nextSpawn: 1,
-            phase: isRaster(id) ? Math.random() * 40 + devUptime / 6.5 : Math.random(),
+            phase: id === "codex" ? Math.random() * 40 + devUptime / 6.5 : Math.random(),
             selAt: -1e9,
             selEnd: -1e9,
             gate0: 0,

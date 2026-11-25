@@ -570,24 +570,34 @@ function ConnectionStatus() {
   if (fb && fbCli) {
     const name = MODE_NAME[fb.mode];
     const u = fallbackUsage[fbCli] ?? fallbackInfo?.[fbCli]?.usage ?? null;
+    const agyBucketKey =
+      fb.mode === "antigravity" ? (/claude|gpt/i.test(fb.model) ? "claude_gpt" : "gemini") : null;
+    const bucket = agyBucketKey && u?.buckets?.[agyBucketKey] ? u.buckets[agyBucketKey] : u;
+    const groupSuffix =
+      agyBucketKey === "claude_gpt"
+        ? " (Claude & GPT)"
+        : agyBucketKey === "gemini" && u?.buckets?.gemini
+          ? " (Gemini)"
+          : "";
     label = "Weekly";
-    if (u && u.weeklyRemaining != null) {
-      remaining = Math.max(0, Math.min(1, u.weeklyRemaining));
+    if (bucket && bucket.weeklyRemaining != null) {
+      remaining = Math.max(0, Math.min(1, bucket.weeklyRemaining));
       const pct = Math.round(remaining * 100);
       valueText = `${pct}%`;
-      const parts = [`${name} weekly remaining: ${pct}%`];
-      const reset = formatResetDelta(u.weeklyResetsAt);
+      const parts = [`${name}${groupSuffix} weekly remaining: ${pct}%`];
+      const reset = formatResetDelta(bucket.weeklyResetsAt);
       if (reset) parts.push(reset);
-      if (u.primaryRemaining != null) {
-        parts.push(`5h window: ${Math.round(u.primaryRemaining * 100)}% left`);
+      if (bucket.primaryRemaining != null) {
+        parts.push(`5h window: ${Math.round(bucket.primaryRemaining * 100)}% left`);
       }
       tooltip = parts.join(" · ");
-    } else if (u && u.primaryRemaining != null) {
-      remaining = Math.max(0, Math.min(1, u.primaryRemaining));
+    } else if (bucket && bucket.primaryRemaining != null) {
+      label = "5h limit";
+      remaining = Math.max(0, Math.min(1, bucket.primaryRemaining));
       const pct = Math.round(remaining * 100);
       valueText = `${pct}%`;
-      const reset = formatResetDelta(u.primaryResetsAt);
-      tooltip = `${name} remaining: ${pct}%${reset ? ` · ${reset}` : ""}`;
+      const reset = formatResetDelta(bucket.primaryResetsAt);
+      tooltip = `${name}${groupSuffix} 5h window remaining: ${pct}%${reset ? ` · ${reset}` : ""}`;
     } else {
       tooltip =
         fb.mode === "codex"
@@ -659,20 +669,20 @@ function ConnectionStatus() {
       title={tooltip}
     >
       <span className="dot dot-ok" />
-      <div className="usage-stack">
-        <div className="usage-head">
-          <span className="usage-name">{label}</span>
-          <span className="usage-pct">{valueText}</span>
+      <div className="meter-stack">
+        <div className="meter-head">
+          <span className="meter-name">{label}</span>
+          <span className="meter-pct">{valueText}</span>
         </div>
         <div
-          className="usage-track"
+          className="meter-track"
           role="progressbar"
           aria-label={`${label} remaining usage`}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={remaining != null ? pctWidth : undefined}
         >
-          <div className="usage-fill" style={{ width: `${pctWidth}%` }} />
+          <div className="meter-fill" style={{ width: `${pctWidth}%` }} />
         </div>
       </div>
     </div>
