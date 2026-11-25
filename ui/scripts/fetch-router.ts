@@ -139,8 +139,9 @@ function routerRev(): string {
       "--",
       "provenance_core",
       "tierlm",
-      "catalog.yaml",
-      "catalog.app.yaml",
+      ...(existsSync(path.join(src, "config/catalog.yaml"))
+        ? ["config/catalog.yaml", "config/catalog.app.yaml"]
+        : ["catalog.yaml", "catalog.app.yaml"]),
     ]);
     return diff
       ? `${rev}-dirty-${createHash("sha256").update(diff).digest("hex").slice(0, 8)}`
@@ -252,9 +253,14 @@ if defined PROVENANCE_ELECTRON (
 `;
 
 async function main(): Promise<void> {
-  if (!existsSync(path.join(src, "provenance_core/server.py")))
-    throw new Error(`no provenance-core at ${src} (set ROUTER_SRC)`);
-  if (!existsSync(path.join(src, "catalog.app.yaml")))
+  const hasServer =
+    existsSync(path.join(src, "provenance_core/api/server.py")) ||
+    existsSync(path.join(src, "provenance_core/server.py"));
+  if (!hasServer) throw new Error(`no provenance-core at ${src} (set ROUTER_SRC)`);
+  const catalogDir = existsSync(path.join(src, "config/catalog.app.yaml"))
+    ? path.join(src, "config")
+    : src;
+  if (!existsSync(path.join(catalogDir, "catalog.app.yaml")))
     throw new Error(
       `${src} has no catalog.app.yaml: it predates the app's own router (branch app-router)`,
     );
@@ -277,7 +283,7 @@ async function main(): Promise<void> {
     });
   }
   for (const f of ["catalog.yaml", "catalog.app.yaml"])
-    copyFileSync(path.join(src, f), path.join(dest, f));
+    copyFileSync(path.join(catalogDir, f), path.join(dest, f));
   if (IS_WIN) {
     writeFileSync(path.join(dest, "node.cmd"), NODE_WRAPPER_WIN);
   } else {
@@ -305,7 +311,12 @@ async function main(): Promise<void> {
     wheels: reqs.split(/\r?\n/).filter((l) => l && !l.startsWith("#")),
   };
   writeFileSync(path.join(dest, "VERSION.json"), JSON.stringify(info, null, 2) + "\n");
-  run(py, ["-I", "-B", "-c", "import provenance_core.server, patchright.async_api, uvicorn, yaml"]);
+  run(py, [
+    "-I",
+    "-B",
+    "-c",
+    "import importlib, patchright.async_api, uvicorn, yaml; importlib.import_module('provenance_core.api.server' if importlib.util.find_spec('provenance_core.api.server') else 'provenance_core.server')",
+  ]);
   log(`provenance-core ${version} (${info.routerRev}) ready in vendor/router (${dirSizeMb(dest)})`);
 }
 
