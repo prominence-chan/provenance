@@ -507,21 +507,21 @@ select {
 .conn-usage[data-level="critical"] {
   --usage-bar-color: var(--bad);
 }
-.usage-stack {
+.meter-stack {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
-.usage-head {
+.meter-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 6px;
-  line-height: 1.1;
+  line-height: 1;
 }
-.usage-name {
+.meter-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -530,25 +530,25 @@ select {
   font-weight: 500;
   color: var(--text-2);
 }
-.usage-pct {
+.meter-pct {
   flex-shrink: 0;
   font-size: var(--fs-xs);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-.conn-usage[data-level="low"] .usage-pct {
+.conn-usage[data-level="low"] .meter-pct {
   color: var(--warn);
 }
-.conn-usage[data-level="critical"] .usage-pct {
+.conn-usage[data-level="critical"] .meter-pct {
   color: var(--bad);
 }
-.usage-track {
+.meter-track {
   height: 3px;
   border-radius: 999px;
   background: var(--panel-3);
   overflow: hidden;
 }
-.usage-fill {
+.meter-fill {
   height: 100%;
   border-radius: 999px;
   background: var(--usage-bar-color);

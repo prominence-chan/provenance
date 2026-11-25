@@ -39,6 +39,7 @@ import {
   checkCodex,
   checkThroughProvenance,
   getFallbacks,
+  loadClaudeCachedUsage,
 } from "../server/fallback/health.ts";
 import {
   checkCodexRoute,
@@ -619,8 +620,10 @@ const agyHealth = await checkAntigravity(env);
 check(
   agyHealth.installed &&
     agyHealth.version === "1.5.14" &&
-    agyHealth.models.some((m) => m.id === "gemini-4-neon-high"),
-  "antigravity found, version and models read",
+    agyHealth.models.some((m) => m.id === "gemini-4-neon-high") &&
+    agyHealth.usage?.weeklyRemaining === 0.92 &&
+    agyHealth.usage?.buckets?.claude_gpt?.weeklyRemaining === 1,
+  "antigravity found, version, models, and /usage weekly buckets read",
 );
 const agyStart = (await c.call("thread/start", {
   model: "antigravity:gemini-4-neon-high",
@@ -651,10 +654,42 @@ check(
     agyRun.argv.includes("high"),
   "antigravity runs with --model and --effort",
 );
+const savedAgy = JSON.parse(readFileSync(path.join(dataDir, "usage.json"), "utf8")) as {
+  antigravity?: { weeklyRemaining?: number };
+};
+check(
+  savedAgy.antigravity?.weeklyRemaining === 0.78,
+  `antigravity persists stream weekly usage (${savedAgy.antigravity?.weeklyRemaining})`,
+);
 const agyAfter = await getFallbacks({ ...env, usageFile: path.join(dataDir, "usage.json") }, true);
 check(
-  agyAfter.antigravity?.usage?.weeklyRemaining === 0.78,
-  `antigravity persists weekly usage (${agyAfter.antigravity?.usage?.weeklyRemaining})`,
+  agyAfter.antigravity?.usage?.weeklyRemaining === 0.92 &&
+    agyAfter.antigravity?.usage?.buckets?.claude_gpt?.weeklyRemaining === 1,
+  `antigravity refreshes live /usage buckets (${agyAfter.antigravity?.usage?.weeklyRemaining})`,
+);
+
+// Claude Code cached usage from ~/.claude.json (`cachedUsageUtilization`)
+const fakeClaudeCfg = path.join(scratch, "claude.json");
+const { writeFileSync } = await import("node:fs");
+writeFileSync(
+  fakeClaudeCfg,
+  JSON.stringify({
+    cachedUsageUtilization: {
+      fetchedAtMs: Date.now(),
+      utilization: {
+        five_hour: { utilization: 25, resets_at: "2026-11-25T10:00:00Z" },
+        seven_day: { utilization: 62, resets_at: "2026-11-28T00:59:59+00:00" },
+      },
+    },
+  }),
+);
+const claudeLocal = loadClaudeCachedUsage(fakeClaudeCfg);
+check(
+  claudeLocal != null &&
+    Math.abs((claudeLocal.weeklyRemaining ?? -1) - 0.38) < 0.001 &&
+    Math.abs((claudeLocal.primaryRemaining ?? -1) - 0.75) < 0.001 &&
+    typeof claudeLocal.weeklyResetsAt === "number",
+  `claude local cachedUsageUtilization parsed (${JSON.stringify(claudeLocal)})`,
 );
 
 c.ws.close();

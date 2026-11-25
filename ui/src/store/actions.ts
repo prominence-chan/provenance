@@ -181,7 +181,7 @@ function onNotification(id: BackendId, n: ServerNotification): void {
   });
   if (n.method === "turn/completed") {
     if (id === "main" || id === "orchestrator") void refreshSources();
-    else if (id === "fallback") void refreshFallbacks();
+    else if (id === "fallback") void refreshFallbacks(true);
     else if (id === "codex") void refreshCodexRateLimits();
   }
   if (n.method === "warning" || n.method === "configWarning" || n.method === "deprecationNotice") {
@@ -393,7 +393,29 @@ function mergeFallbackUsage(
   for (const [cli, u] of entries) {
     if (!u) continue;
     const cur = next[cli];
-    if (!cur || (u.updatedAt ?? 0) >= (cur.updatedAt ?? 0)) next[cli] = u;
+    if (!cur) {
+      next[cli] = u;
+    } else if ((u.updatedAt ?? 0) >= (cur.updatedAt ?? 0)) {
+      const buckets = u.buckets || cur.buckets ? { ...cur.buckets, ...u.buckets } : undefined;
+      next[cli] = {
+        weeklyRemaining: u.weeklyRemaining ?? cur.weeklyRemaining ?? null,
+        weeklyResetsAt: u.weeklyResetsAt ?? cur.weeklyResetsAt ?? null,
+        primaryRemaining: u.primaryRemaining ?? cur.primaryRemaining ?? null,
+        primaryResetsAt: u.primaryResetsAt ?? cur.primaryResetsAt ?? null,
+        ...(buckets ? { buckets } : {}),
+        updatedAt: u.updatedAt ?? cur.updatedAt,
+      };
+    } else {
+      const buckets = u.buckets || cur.buckets ? { ...u.buckets, ...cur.buckets } : undefined;
+      next[cli] = {
+        weeklyRemaining: cur.weeklyRemaining ?? u.weeklyRemaining ?? null,
+        weeklyResetsAt: cur.weeklyResetsAt ?? u.weeklyResetsAt ?? null,
+        primaryRemaining: cur.primaryRemaining ?? u.primaryRemaining ?? null,
+        primaryResetsAt: cur.primaryResetsAt ?? u.primaryResetsAt ?? null,
+        ...(buckets ? { buckets } : {}),
+        updatedAt: cur.updatedAt ?? u.updatedAt,
+      };
+    }
   }
   return next;
 }

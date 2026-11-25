@@ -532,7 +532,14 @@ export class FallbackBackend {
           cur = {};
         }
       }
-      cur[mode] = usage;
+      const prev = cur[mode];
+      cur[mode] = {
+        weeklyRemaining: usage.weeklyRemaining ?? prev?.weeklyRemaining ?? null,
+        weeklyResetsAt: usage.weeklyResetsAt ?? prev?.weeklyResetsAt ?? null,
+        primaryRemaining: usage.primaryRemaining ?? prev?.primaryRemaining ?? null,
+        primaryResetsAt: usage.primaryResetsAt ?? prev?.primaryResetsAt ?? null,
+        updatedAt: usage.updatedAt,
+      };
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, JSON.stringify(cur, null, 2));
       renameSync(tmp, file);

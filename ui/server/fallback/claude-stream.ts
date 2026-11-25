@@ -74,15 +74,21 @@ export class ClaudeStream {
         return this.assistant(((ev.message ?? {}) as Json).content);
       case "user":
         return this.toolResults(((ev.message ?? {}) as Json).content);
-      case "result":
+      case "result": {
+        const u = extractUsage(ev);
+        if (u) this.sink.usage?.(u);
         return this.result(ev);
+      }
       case "rate_limit_event": {
         const u = extractUsage(ev);
         if (u) this.sink.usage?.(u);
         return;
       }
-      default:
+      default: {
+        const u = extractUsage(ev);
+        if (u) this.sink.usage?.(u);
         return;
+      }
     }
   }
 

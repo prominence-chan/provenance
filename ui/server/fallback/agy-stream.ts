@@ -276,9 +276,18 @@ export class AgyStream {
 }
 
 export function extractUsage(ev: Json): FallbackUsage | null {
-  const info = (ev.rate_limit_info ?? ev.rateLimits ?? ev.quota) as Json | undefined;
+  const info = (ev.rate_limit_info ??
+    ev.rateLimits ??
+    ev.rate_limits ??
+    ev.quota ??
+    ev.utilization) as Json | undefined;
   if (!info || typeof info !== "object") return null;
-  const sec = (info.secondary ?? info.seven_day ?? info.weekly) as Json | undefined;
+  const limits = Array.isArray(info.limits) ? (info.limits as Json[]) : [];
+  const weeklyFromLimits =
+    limits.find((l) => l && l.kind === "weekly_all") ??
+    limits.find((l) => l && l.group === "weekly");
+  const sec = (info.secondary ?? info.seven_day ?? info.weekly ?? weeklyFromLimits) as
+    Json | undefined;
   const pri = (info.primary ?? info.five_hour) as Json | undefined;
   const rem = (w: Json | undefined): number | null => {
     if (!w || typeof w !== "object") return null;
@@ -296,31 +305,39 @@ export function extractUsage(ev: Json): FallbackUsage | null {
         ? w.usedPercent
         : typeof w.used_percent === "number"
           ? w.used_percent
-          : null;
+          : typeof w.used_percentage === "number"
+            ? w.used_percentage
+            : typeof w.usedPercentage === "number"
+              ? w.usedPercentage
+              : typeof w.percent === "number"
+                ? w.percent
+                : null;
     if (pctUsed !== null) return clamp01(1 - (pctUsed > 1 ? pctUsed / 100 : pctUsed));
     if (typeof w.utilization === "number")
       return clamp01(1 - (w.utilization > 1 ? w.utilization / 100 : w.utilization));
     return null;
   };
   const resets = (w: Json | undefined): number | null => {
-    const raw =
-      typeof w?.resetsAt === "number"
-        ? w.resetsAt
-        : typeof w?.resets_at === "number"
-          ? w.resets_at
-          : null;
-    return raw == null ? null : raw < 1e12 ? raw * 1000 : raw;
+    const raw = w?.resetsAt ?? w?.resets_at;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw < 1e12 ? raw * 1000 : raw;
+    if (typeof raw === "string" && raw.trim()) {
+      const ms = Date.parse(raw);
+      return Number.isFinite(ms) ? ms : null;
+    }
+    return null;
   };
   let weeklyRemaining = rem(sec);
   let weeklyResetsAt = resets(sec);
-  const primaryRemaining = rem(pri);
-  const primaryResetsAt = resets(pri);
-  if (
-    weeklyRemaining === null &&
-    (info.rateLimitType === "seven_day" || info.window === "weekly")
-  ) {
+  let primaryRemaining = rem(pri);
+  let primaryResetsAt = resets(pri);
+  const kind = typeof info.rateLimitType === "string" ? info.rateLimitType : "";
+  const win = typeof info.window === "string" ? info.window : "";
+  if (weeklyRemaining === null && (kind.startsWith("seven_day") || win === "weekly")) {
     weeklyRemaining = rem(info);
     weeklyResetsAt = resets(info);
+  } else if (primaryRemaining === null && (kind === "five_hour" || win === "five_hour")) {
+    primaryRemaining = rem(info);
+    primaryResetsAt = resets(info);
   }
   if (weeklyRemaining === null && primaryRemaining === null) return null;
   return {
