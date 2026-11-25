@@ -38,14 +38,17 @@ jobs:
   build:
     name: Build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: macOS arm64
-            os: macos-15
+            os: macos-latest
             platform: darwin
             arch: arm64
+            rust_target: aarch64-apple-darwin
             build_script: app:build:mac
             cli_ext: ""
             artifact_name: macos-arm64
@@ -53,6 +56,7 @@ jobs:
             os: macos-15-intel
             platform: darwin
             arch: x64
+            rust_target: x86_64-apple-darwin
             build_script: app:build:mac:x64
             cli_ext: ""
             artifact_name: macos-x64
@@ -60,6 +64,7 @@ jobs:
             os: windows-latest
             platform: win32
             arch: x64
+            rust_target: x86_64-pc-windows-msvc
             build_script: app:build:win
             cli_ext: ".exe"
             artifact_name: windows-x64
@@ -67,22 +72,27 @@ jobs:
             os: ubuntu-24.04
             platform: linux
             arch: x64
+            rust_target: x86_64-unknown-linux-gnu
             build_script: app:build:linux
             cli_ext: ""
             artifact_name: linux-x64
 
     steps:
       - name: Checkout provenance
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: provenance
 
       - name: Checkout provenance-core
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: prominence-chan/provenance-core
           ref: ${{ inputs.router_ref || 'main' }}
           path: provenance-core
+
+      - name: Enable Git long paths (Windows)
+        if: matrix.platform == 'win32'
+        run: git config --global core.longpaths true
 
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
@@ -100,16 +110,61 @@ jobs:
         with:
           workspaces: provenance/codex-rs -> target
 
+      - name: Setup prebuilt rusty_v8
+        shell: bash
+        env:
+          TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^v8 = / {gsub(/^=/, "", $2); print $2; exit}' provenance/codex-rs/Cargo.toml)"
+          release_tag="rusty-v8-v${version}"
+          base_url="https://github.com/openai/codex/releases/download/${release_tag}"
+          profile="ptrcomp_sandbox_release"
+          binding_dir="${RUNNER_TEMP}/rusty_v8"
+          mkdir -p "${binding_dir}"
+
+          if [[ "$TARGET" == *-pc-windows-msvc ]]; then
+            archive_name="rusty_v8_${profile}_${TARGET}.lib.gz"
+          else
+            archive_name="librusty_v8_${profile}_${TARGET}.a.gz"
+          fi
+          binding_name="src_binding_${profile}_${TARGET}.rs"
+          checksums_name="rusty_v8_${profile}_${TARGET}.sha256"
+
+          curl -fsSL --retry 5 --retry-all-errors "${base_url}/${checksums_name}" -o "${binding_dir}/${checksums_name}"
+          curl -fsSL --retry 5 --retry-all-errors "${base_url}/${archive_name}" -o "${binding_dir}/${archive_name}"
+          curl -fsSL --retry 5 --retry-all-errors "${base_url}/${binding_name}" -o "${binding_dir}/${binding_name}"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "${binding_dir}" && tr -d '\r' < "${checksums_name}" | sha256sum --check -)
+          else
+            (cd "${binding_dir}" && tr -d '\r' < "${checksums_name}" | shasum -a 256 --check -)
+          fi
+
+          if [[ "$TARGET" == *-pc-windows-msvc ]]; then
+            archive_path="$(cygpath -w "${binding_dir}/${archive_name}")"
+            binding_path="$(cygpath -w "${binding_dir}/${binding_name}")"
+          else
+            archive_path="${binding_dir}/${archive_name}"
+            binding_path="${binding_dir}/${binding_name}"
+          fi
+          echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "${GITHUB_ENV}"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "${GITHUB_ENV}"
+
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
 
       - name: Build Rust agent binaries
+        shell: bash
         working-directory: provenance/codex-rs
         run: |
-          cargo build --release -p codex-cli --bin provenance
-          cargo build --release -p codex-code-mode-host
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          cargo build --release -p codex-cli --bin provenance -p codex-code-mode-host
 
       - name: Install UI dependencies
         working-directory: provenance/ui
@@ -150,7 +205,7 @@ jobs:
           ls -lh dist-release
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.artifact_name }}
           path: dist-release/*
@@ -162,7 +217,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-artifacts
           merge-multiple: true
