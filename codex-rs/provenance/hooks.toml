@@ -149,7 +149,6 @@ paths = [
     "scripts/sync-upstream.sh",
     "scripts/provenance-smoke.py",
     "ui/",
-    ".github/banner.png",
     ".github/provenance-ui.png",
 ]
 
