@@ -164,7 +164,6 @@ paths = [
     "scripts/provenance-smoke.py",
     "scripts/provenance-name-check.py",
     "ui/",
-    ".github/banner.png",
     ".github/provenance-ui.png",
 ]
 

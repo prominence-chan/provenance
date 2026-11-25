@@ -1,17 +1,16 @@
 <div align="center">
 
-<img src=".github/banner.png" alt="Provenance" width="100%" />
+<img src="ui/design/icon/icon-256.png" alt="Provenance app icon" width="112" />
 
-<h1>Provenance</h1>
+# Provenance
 
-**A local coding agent for macOS and your terminal, powered by pooled free-tier models.**<br />
-Pick a strength, not a model.
+**A coding agent for your Mac and your terminal, running on pooled free-tier models.**
 
-<br />
+Pick a strength, not a model. Powered by [provenance-core](https://github.com/prominence-chan/provenance-core).
 
-<a href="https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0"><img src="https://img.shields.io/badge/download-macOS%20arm64-111111?style=flat-square&logo=apple&logoColor=white" alt="Download for macOS arm64" /></a>
-<a href="https://github.com/prominence-chan/provenance-core"><img src="https://img.shields.io/badge/router-provenance--core-111111?style=flat-square" alt="provenance-core" /></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-111111?style=flat-square" alt="Apache-2.0 License" /></a>
+[![Download for macOS](https://img.shields.io/badge/download-macOS%20arm64-111111?style=flat-square&logo=apple&logoColor=white)](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0)
+[![provenance-core](https://img.shields.io/badge/backend-provenance--core-111111?style=flat-square)](https://github.com/prominence-chan/provenance-core)
+[![License](https://img.shields.io/badge/license-Apache--2.0-111111?style=flat-square)](LICENSE)
 
 <br />
 
@@ -19,62 +18,39 @@ Pick a strength, not a model.
 
 </div>
 
-<br />
+## Why
 
-## Why Provenance?
+Provenance is a local coding agent — a native macOS app paired with a `provenance` terminal client — that routes through [provenance-core](https://github.com/prominence-chan/provenance-core) instead of tying you to a single paid subscription. Free-tier APIs and chat-site accounts you sign into are pooled behind one local endpoint and grouped into four tiers:
 
-Most coding agents lock you into a single paid subscription or make you babysit API keys and rate limits. Provenance takes a different approach: it runs locally on your machine and routes every request through [provenance-core](https://github.com/prominence-chan/provenance-core), which pools free-tier capacity from across a dozen providers (plus web chat accounts you sign into) behind one endpoint.
+| Tier | Strength | Good for |
+| --- | --- | --- |
+| `nova` | Hyperfrontier | Hard architecture, deep debugging |
+| `solstice` | Frontier *(default)* | Everyday coding and multi-file edits |
+| `ember` | Strong mid-size | Focused edits, reviews, summaries |
+| `spark` | Fast / small | Quick checks, lookups, bulk work |
 
-Instead of picking a provider or swapping models when one hits a quota wall, you pick how much horsepower the task needs:
+Conversations stick to one model inside your chosen tier and fail over automatically when a provider hits a rate limit.
 
-<div align="center">
+## What's inside
 
-<table>
-<tr>
-<th><img src="https://img.shields.io/badge/spark-9cc8ff?style=for-the-badge" alt="spark" /></th>
-<th><img src="https://img.shields.io/badge/ember-c9663f?style=for-the-badge" alt="ember" /></th>
-<th><img src="https://img.shields.io/badge/solstice-ff6a3d?style=for-the-badge" alt="solstice" /></th>
-<th><img src="https://img.shields.io/badge/nova-ff4fa3?style=for-the-badge" alt="nova" /></th>
-</tr>
-<tr>
-<td align="center">fast &amp; small</td>
-<td align="center">strong mid-size</td>
-<td align="center">frontier</td>
-<td align="center">the very strongest</td>
-</tr>
-<tr>
-<td align="center"><sub>quick checks, bulk work</sub></td>
-<td align="center"><sub>everyday edits, summaries</sub></td>
-<td align="center"><sub>coding (default)</sub></td>
-<td align="center"><sub>the hardest problems</sub></td>
-</tr>
-</table>
+- **Desktop app & CLI** — Multi-project threads, inline file diffs, collapsed tool runs, command approvals, and light/dark themes in `Provenance.app`, plus an interactive `provenance` TUI and `provenance exec` in your terminal.
+- **Built-in account & key setup** — Sign into chat sites or add free-tier API keys under **Models & accounts**. The macOS app bundles its own local `provenance-core` router and starts it automatically.
+- **Long-thread orchestration & fallbacks** — Run standard or experimental multi-worker orchestrators, or hand a thread that outgrows free-tier context over to a local CLI fallback without losing where you left off.
 
-</div>
-
-## Highlights
-
-- **Desktop app & CLI** — A native macOS app with multi-project threads, live diffs, command approvals, and folder switching, paired with a fast `provenance` terminal client that shares the same engine.
-- **Built-in routing & failover** — Conversations stay on the same model inside your chosen tier and automatically fail over when a provider rate-limits or goes down.
-- **Guided account & key setup** — Connect free web chat accounts or API keys right inside **Models & accounts**; the desktop app bundles and manages its own local router automatically.
-- **Keep working on big threads** — Optional fallbacks let you hand off threads that outgrow free-tier context limits to local coding CLIs you already use, without losing context.
-
-## Get started
+## Install
 
 1. Download `Provenance-0.1.0-arm64.dmg` from the [latest release](https://github.com/prominence-chan/provenance/releases/tag/provenance-app-v0.1.0) (Apple Silicon) and drag **Provenance** into **Applications**.
-2. Because the app is ad-hoc signed rather than notarized, right-click it and choose **Open** the first time (or clear quarantine once — see [SETUP.md](SETUP.md)).
-3. Open **Models & accounts** in the app to sign into a chat site or add free-tier API keys, then start a thread.
+2. The app is ad-hoc signed rather than notarized, so the first launch needs a right-click → **Open** (or clear quarantine once — see [SETUP.md](SETUP.md)).
+3. Open **Models & accounts** in the app to connect a chat site or add API keys, then start a thread.
 
-Want to build from source, run the CLI (`provenance`), use the browser UI, or tune configuration and environment variables? Head over to **[SETUP.md](SETUP.md)**.
+Building from source, installing the `provenance` CLI, running the browser UI, and configuring environment variables or `~/.provenance/config.toml` are all in **[SETUP.md](SETUP.md)**.
 
 ## Docs
 
-- **[SETUP.md](SETUP.md)** — Building the desktop app and CLI, running from the terminal, configuration, and environment variables
-- **[ui/README.md](ui/README.md)** — Desktop shell, web UI architecture, orchestrators, and test scripts
-- **[docs/UPSTREAM.md](docs/UPSTREAM.md)** — Harness customization (`harness.toml`) and upstream maintenance
+- **[SETUP.md](SETUP.md)** — Building the app and CLI from source, CLI usage, and configuration
+- **[ui/README.md](ui/README.md)** — Desktop shell, frontend architecture, orchestrators, and test scripts
+- **[docs/UPSTREAM.md](docs/UPSTREAM.md)** — Harness settings (`harness.toml`) and upstream sync guide
 
 ---
 
-<div align="center">
 <sub>Licensed under <a href="LICENSE">Apache-2.0</a> (see <a href="NOTICE">NOTICE</a>). Agent runtime adapted from <a href="https://github.com/openai/codex">openai/codex</a>; not affiliated with or endorsed by OpenAI.</sub>
-</div>
