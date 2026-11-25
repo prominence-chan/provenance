@@ -12,6 +12,7 @@
 // shown in the conversation, and each message goes to the session serving it now.
 
 import type { FallbacksInfo } from "../../shared/fallback-api";
+import { DEFAULT_ORCHESTRATOR, isHyperexperimentalAllowed } from "../../shared/orchestrator-api";
 import type { LinkSegment, ThreadLinks } from "../../shared/thread-links";
 import { CARRY_ON, threadBrief } from "../fallback/brief";
 import { chosenEffort } from "../fallback/effort";
@@ -427,6 +428,13 @@ export function dismissNotice(id: number): void {
 export function updateSettings(patch: Partial<Settings>): void {
   setState((s) => {
     const settings = { ...s.settings, ...patch };
+    if (
+      settings.orchestrator === "hyperexperimental" &&
+      Object.keys(s.sources).length > 0 &&
+      !isHyperexperimentalAllowed(settings.model, s.sources)
+    ) {
+      settings.orchestrator = DEFAULT_ORCHESTRATOR;
+    }
     saveSettings(settings);
     return { ...s, settings };
   });
@@ -689,6 +697,15 @@ export async function sendMessage(
     return handOver(threadId, settings, text, cwdInput, !!opts.carryOn);
   if (!text.trim()) return;
   const target = threadId ? backendOf(threadId) : targetBackend(settings.model, null);
+  if (
+    !threadId &&
+    target === "orchestrator" &&
+    settings.orchestrator === "hyperexperimental" &&
+    !isHyperexperimentalAllowed(settings.model, getState().sources)
+  ) {
+    notify("warn", "Hyperexperimental only works on web chat models.");
+    return;
+  }
   const cwd = (cwdInput ?? settings.cwd).trim();
   // Only override an existing thread's cwd when the user changed it.
   const cwdOverride = threadId && cwd === getState().views[threadId]?.cwd ? null : cwd || null;

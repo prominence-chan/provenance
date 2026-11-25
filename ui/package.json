@@ -22,6 +22,7 @@
     "check:orchestrator": "node scripts/orchestrator-check.ts",
     "e2e:welcome": "node scripts/welcome-e2e.ts",
     "e2e:toolgroup": "node scripts/toolgroup-e2e.ts",
+    "e2e:subagents": "node scripts/subagents-e2e.ts",
     "e2e:carry": "node scripts/carry-e2e.ts",
     "check:presence": "node scripts/presence-check.ts",
     "mock:router": "node scripts/mock-router.ts",
@@ -31,6 +32,10 @@
     "app:dev": "node scripts/build-electron.mjs && PROVENANCE_APP_VITE=1 electron .",
     "app:start": "npm run build && node scripts/build-electron.mjs && electron .",
     "app:build": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && node scripts/fetch-agent.ts && electron-builder --mac --arm64 --publish never",
+    "app:build:mac": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && node scripts/fetch-agent.ts && electron-builder --mac --arm64 --publish never",
+    "app:build:mac:x64": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && node scripts/fetch-agent.ts && electron-builder --mac --x64 --publish never",
+    "app:build:win": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && node scripts/fetch-agent.ts && electron-builder --win --x64 --publish never",
+    "app:build:linux": "npm run build && node scripts/build-electron.mjs && node scripts/fetch-browser.ts && node scripts/fetch-router.ts && node scripts/fetch-agent.ts && electron-builder --linux --x64 --publish never",
     "browser:fetch": "node scripts/fetch-browser.ts",
     "router:fetch": "node scripts/fetch-router.ts",
     "agent:fetch": "node scripts/fetch-agent.ts",
@@ -98,7 +103,9 @@
         "to": "agent",
         "filter": [
           "provenance",
+          "provenance.exe",
           "codex-code-mode-host",
+          "codex-code-mode-host.exe",
           "VERSION.json"
         ]
       }
@@ -112,13 +119,15 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64"
+            "arm64",
+            "x64"
           ]
         },
         {
-          "target": "dir",
+          "target": "zip",
           "arch": [
-            "arm64"
+            "arm64",
+            "x64"
           ]
         }
       ],
@@ -133,7 +142,49 @@
     },
     "dmg": {
       "title": "Provenance ${version}",
-      "artifactName": "Provenance-${version}-arm64.dmg"
+      "artifactName": "Provenance-${version}-${arch}.dmg"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "design/icon/Provenance.ico",
+      "artifactName": "Provenance-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Provenance-${version}-${arch}-setup.exe"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "design/icon/icon-512.png",
+      "category": "Development",
+      "artifactName": "Provenance-${version}-${arch}.${ext}"
     },
     "afterPack": "scripts/adhoc-sign.cjs"
   }

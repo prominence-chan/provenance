@@ -1,21 +1,10 @@
-// Builds vendor/agent/ (git-ignored): the `provenance` binary Provenance.app ships, so someone
-// with only the app can run threads. electron-builder copies it to
-// Provenance.app/Contents/Resources/agent/ (`extraResources` in package.json); the app uses it
-// when PROVENANCE_BIN is unset, settings.json names no provenanceBin and ~/.local/bin/provenance
-// does not exist (electron/main.ts, resolveAgent).
+// Builds vendor/agent/ (git-ignored): the `provenance` binary the desktop app ships, so someone
+// with only the app can run threads. electron-builder copies it to Resources/agent/
+// (`extraResources` in package.json); the app uses it when PROVENANCE_BIN is unset, settings.json
+// names no provenanceBin and no local install exists (electron/main.ts, resolveAgent).
 //
-//   node scripts/fetch-agent.ts               # part of `npm run app:build`
-//   AGENT_BIN=/path/to/provenance ...         # default: this checkout's release build,
-//                                             # ../codex-rs/target/release/provenance
-//
-// The copy is stripped (symbols and line tables: 432 MB -> 285 MB for 0.171.0) and ad-hoc signed again (strip
-// rewrites the binary; Apple Silicon only runs signed arm64 code), then checked: it runs, it
-// is a provenance binary, and the protocol types it generates match src/protocol/generated (a
-// warning if not: run `npm run gen:protocol` with this binary).
-//
-// What ends up in vendor/agent/:
-//   provenance     the stripped, signed binary
-//   VERSION.json   its version, size, sha256, and what it was made from (also how a rebuild is skipped)
+//   node scripts/fetch-agent.ts               # part of `npm run app:build*`
+//   AGENT_BIN=/path/to/provenance ...         # default: ../codex-rs/target/release/provenance[.exe]
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -35,13 +24,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const IS_WIN = process.platform === "win32";
+const IS_MAC = process.platform === "darwin";
+const EXT = IS_WIN ? ".exe" : "";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.resolve(
-  process.env.AGENT_BIN ?? path.join(root, "../codex-rs/target/release/provenance"),
+  process.env.AGENT_BIN ?? path.join(root, `../codex-rs/target/release/provenance${EXT}`),
 );
 const repo = path.resolve(root, "..");
 const dest = path.join(root, "vendor/agent");
-const bin = path.join(dest, "provenance");
+const bin = path.join(dest, `provenance${EXT}`);
 const stamp = path.join(dest, "VERSION.json");
 const log = (...a: unknown[]) => console.log("[fetch-agent]", ...a);
 
@@ -55,6 +48,19 @@ if (!existsSync(src)) {
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const srcSha = sha256(src);
 
+function stripAndSign(file: string): void {
+  if (!IS_WIN) {
+    try {
+      execFileSync("strip", [file]);
+    } catch {
+      // keep unstripped binary if strip is unavailable
+    }
+  }
+  if (IS_MAC) {
+    execFileSync("codesign", ["--force", "--sign", "-", "--timestamp=none", file]);
+  }
+}
+
 let old: { sourceSha256?: string } = {};
 try {
   old = JSON.parse(readFileSync(stamp, "utf8"));
@@ -67,20 +73,19 @@ if (old.sourceSha256 === srcSha && existsSync(bin)) {
   mkdirSync(dest, { recursive: true });
   const tmp = `${bin}.tmp`;
   copyFileSync(src, tmp);
-  execFileSync("strip", [tmp]); // everything: a release binary's line tables are most of it
-  execFileSync("codesign", ["--force", "--sign", "-", "--timestamp=none", tmp]);
+  stripAndSign(tmp);
   renameSync(tmp, bin);
   const version = execFileSync(bin, ["--version"], { encoding: "utf8" }).trim();
   if (!/^provenance \d/.test(version)) {
-    rmSync(bin);
+    rmSync(bin, { force: true });
     console.error(`[fetch-agent] ${src} says "${version}": not a provenance binary`);
     process.exit(1);
   }
   const info = {
     version,
+    platform: `${process.platform}-${process.arch}`,
     size: statSync(bin).size,
     sha256: sha256(bin),
-    // Shipped inside the app: no absolute path (it names the builder's home folder).
     source: src.startsWith(repo + path.sep) ? path.relative(repo, src) : path.basename(src),
     sourceSize: statSync(src).size,
     sourceSha256: srcSha,
@@ -88,14 +93,11 @@ if (old.sourceSha256 === srcSha && existsSync(bin)) {
   };
   writeFileSync(stamp, JSON.stringify(info, null, 2) + "\n");
   log(
-    `${version}: ${(info.sourceSize / 1e6).toFixed(0)} MB -> ${(info.size / 1e6).toFixed(0)} MB stripped, from ${src}`,
+    `${version}: ${(info.sourceSize / 1e6).toFixed(0)} MB -> ${(info.size / 1e6).toFixed(0)} MB, from ${src}`,
   );
 }
 
-// The code-mode host: a second program the binary starts to run tools for models that only take "code mode"
-// (every model of a Codex sign-in). It is looked for next to the binary, so it ships there.
-//   AGENT_HOST=/path/to/codex-code-mode-host   # default: next to AGENT_BIN, else this checkout's release build
-const hostName = "codex-code-mode-host";
+const hostName = `codex-code-mode-host${EXT}`;
 const hostSrc = [
   process.env.AGENT_HOST,
   path.join(path.dirname(src), hostName),
@@ -111,14 +113,19 @@ if (!hostSrc) {
 }
 const hostStamp = path.join(dest, "HOST.sha256");
 const hostSha = sha256(hostSrc);
-if (!existsSync(hostBin) || !existsSync(hostStamp) || readFileSync(hostStamp, "utf8").trim() !== hostSha) {
+if (
+  !existsSync(hostBin) ||
+  !existsSync(hostStamp) ||
+  readFileSync(hostStamp, "utf8").trim() !== hostSha
+) {
   const tmp = `${hostBin}.tmp`;
   copyFileSync(hostSrc, tmp);
-  execFileSync("strip", [tmp]);
-  execFileSync("codesign", ["--force", "--sign", "-", "--timestamp=none", tmp]);
+  stripAndSign(tmp);
   renameSync(tmp, hostBin);
   writeFileSync(hostStamp, hostSha + "\n");
-  log(`${hostName}: ${(statSync(hostBin).size / 1e6).toFixed(0)} MB stripped, from ${path.basename(path.dirname(hostSrc))}`);
+  log(
+    `${hostName}: ${(statSync(hostBin).size / 1e6).toFixed(0)} MB, from ${path.basename(path.dirname(hostSrc))}`,
+  );
 } else {
   log(`${hostName} is up to date`);
 }

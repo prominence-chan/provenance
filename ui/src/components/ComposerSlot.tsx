@@ -1,7 +1,15 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   DEFAULT_ORCHESTRATOR,
   ORCHESTRATORS,
+  isHyperexperimentalAllowed,
   type FallbackEffort,
   type Orchestrator,
 } from "../../shared/orchestrator-api";
@@ -78,6 +86,8 @@ function EffortPicker() {
 
 function OrchestratorPicker() {
   const chosen = useAppState((s) => s.settings.orchestrator);
+  const model = useAppState((s) => s.settings.model);
+  const sources = useAppState((s) => s.sources);
   const thread = useAppState((s) =>
     s.selectedThreadId ? s.views[s.selectedThreadId]?.thread : null,
   );
@@ -87,15 +97,29 @@ function OrchestratorPicker() {
     s.selectedThreadId ? (tierSegmentOf(s, s.selectedThreadId)?.threadId ?? null) : null,
   );
   const own = tierThread ? threadOrchestrator(tierThread, thread) : null;
-  const value = own ?? chosen ?? DEFAULT_ORCHESTRATOR;
+  const hyperAllowed = isHyperexperimentalAllowed(model, sources);
+  const sourcesLoaded = Object.keys(sources).length > 0;
+  // Step down from Hyperexperimental when the user picks a non-web-chat model.
+  useEffect(() => {
+    if (!own && sourcesLoaded && chosen === "hyperexperimental" && !hyperAllowed) {
+      updateSettings({ orchestrator: DEFAULT_ORCHESTRATOR });
+    }
+  }, [own, sourcesLoaded, chosen, hyperAllowed]);
+  const effective =
+    !own && chosen === "hyperexperimental" && !hyperAllowed ? DEFAULT_ORCHESTRATOR : chosen;
+  const value = own ?? effective ?? DEFAULT_ORCHESTRATOR;
   const o = ORCHESTRATORS.find((x) => x.id === value) ?? ORCHESTRATORS[0];
-  const options: SlotOption[] = ORCHESTRATORS.map((x, i) => ({
-    id: x.id,
-    name: x.name,
-    meta: x.blurb,
-    glyph: <OrchestratorGlyph id={x.id} size={18} />,
-    group: i === 1,
-  }));
+  const options: SlotOption[] = ORCHESTRATORS.map((x, i) => {
+    const disabled = x.id === "hyperexperimental" && !hyperAllowed;
+    return {
+      id: x.id,
+      name: x.name,
+      meta: disabled ? "Web chat models only" : x.blurb,
+      glyph: <OrchestratorGlyph id={x.id} size={18} />,
+      group: i === 1,
+      disabled,
+    };
+  });
   return (
     <SlotMenu
       kind="orchestrator"
@@ -128,6 +152,7 @@ interface SlotOption {
   glyph: ReactNode;
   /** Starts a group (a thin rule above it). */
   group?: boolean;
+  disabled?: boolean;
 }
 
 function SlotMenu(props: {
@@ -150,7 +175,12 @@ function SlotMenu(props: {
 
   useEffect(() => {
     if (!open) return;
-    setActive(Math.max(0, options.findIndex((o) => o.id === value)));
+    setActive(
+      Math.max(
+        0,
+        options.findIndex((o) => o.id === value),
+      ),
+    );
     const onDown = (e: PointerEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
@@ -174,10 +204,18 @@ function SlotMenu(props: {
 
   const choose = (i: number) => {
     const o = options[i];
-    if (!o) return;
+    if (!o || o.disabled) return;
     props.onChoose(o.id);
     setOpen(false);
     btnRef.current?.focus();
+  };
+
+  const stepActive = (dir: 1 | -1) => {
+    setActive((i) => {
+      let next = i + dir;
+      while (next >= 0 && next < options.length && options[next].disabled) next += dir;
+      return next >= 0 && next < options.length ? next : i;
+    });
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -192,8 +230,8 @@ function SlotMenu(props: {
     if (!["Escape", "ArrowDown", "ArrowUp", "Enter", " "].includes(e.key)) return;
     e.preventDefault();
     if (e.key === "Escape") setOpen(false);
-    else if (e.key === "ArrowDown") setActive((i) => Math.min(options.length - 1, i + 1));
-    else if (e.key === "ArrowUp") setActive((i) => Math.max(0, i - 1));
+    else if (e.key === "ArrowDown") stepActive(1);
+    else if (e.key === "ArrowUp") stepActive(-1);
     else choose(active);
   };
 
@@ -234,10 +272,11 @@ function SlotMenu(props: {
               id={optId(o)}
               role="option"
               aria-selected={o.id === value}
+              aria-disabled={o.disabled || undefined}
               data-value={o.id}
               data-fallback={props.fallback}
-              className={`tier-option slot-option ${i === active ? "active" : ""} ${o.group ? "group" : ""}`}
-              onPointerEnter={() => setActive(i)}
+              className={`tier-option slot-option ${i === active && !o.disabled ? "active" : ""} ${o.group ? "group" : ""} ${o.disabled ? "disabled" : ""}`}
+              onPointerEnter={() => !o.disabled && setActive(i)}
               onClick={() => choose(i)}
             >
               <span className="slot-option-glyph">{o.glyph}</span>
@@ -246,9 +285,7 @@ function SlotMenu(props: {
                 {o.meta && kind === "orchestrator" && <span className="meta">{o.meta}</span>}
               </span>
               {o.meta && kind === "effort" && <span className="meta">{o.meta}</span>}
-              <span className="tier-option-check">
-                {o.id === value && <IconCheck size={13} />}
-              </span>
+              <span className="tier-option-check">{o.id === value && <IconCheck size={13} />}</span>
             </div>
           ))}
         </div>

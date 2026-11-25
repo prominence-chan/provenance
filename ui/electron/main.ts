@@ -142,29 +142,34 @@ const settings = loadSettings();
 
 // ---- which provenance binary -----------------------------------------------------
 
-const LOCAL_BIN = "~/.local/bin/provenance";
+const IS_MAC = process.platform === "darwin";
+const IS_WIN = process.platform === "win32";
+const BIN_NAME = IS_WIN ? "provenance.exe" : "provenance";
+const LOCAL_BIN = IS_WIN
+  ? path.join(process.env.LOCALAPPDATA ?? homedir(), "Provenance", "bin", BIN_NAME)
+  : `~/.local/bin/${BIN_NAME}`;
 type AgentSource = "PROVENANCE_BIN" | "settings" | "~/.local/bin" | "bundled" | "missing";
 
 /**
  * The binary app-server runs from, first match wins:
  *   1. PROVENANCE_BIN (env), 2. provenanceBin in settings.json, when set to a path other than
  *   the old default; both used as given, even when missing (the banner then says so);
- *   3. ~/.local/bin/provenance when it exists: where a build of the fork is installed
- *   (docs/UPSTREAM.md), so a developer's newer binary beats the app's copy;
- *   4. the copy inside the app (Contents/Resources/agent/provenance, scripts/fetch-agent.ts),
+ *   3. ~/.local/bin/provenance (or %LOCALAPPDATA%\Provenance\bin\provenance.exe on Windows)
+ *   when it exists, so a developer's newer binary beats the app's copy;
+ *   4. the copy inside the app (Resources/agent/provenance[.exe], scripts/fetch-agent.ts),
  *   so the app alone can run threads.
  */
 function resolveAgent(s: Settings): { path: string; source: AgentSource } {
   if (process.env.PROVENANCE_BIN)
     return { path: expandHome(process.env.PROVENANCE_BIN), source: "PROVENANCE_BIN" };
   const configured = s.provenanceBin.trim();
-  if (configured && configured !== LOCAL_BIN)
+  if (configured && configured !== LOCAL_BIN && configured !== "~/.local/bin/provenance")
     return { path: expandHome(configured), source: "settings" };
   const local = expandHome(LOCAL_BIN);
   if (existsSync(local)) return { path: local, source: "~/.local/bin" };
   const bundled = app.isPackaged
-    ? path.join(process.resourcesPath, "agent/provenance")
-    : path.join(app.getAppPath(), "vendor/agent/provenance");
+    ? path.join(process.resourcesPath, "agent", BIN_NAME)
+    : path.join(app.getAppPath(), "vendor/agent", BIN_NAME);
   if (existsSync(bundled)) return { path: bundled, source: "bundled" };
   return { path: local, source: "missing" };
 }
@@ -234,18 +239,23 @@ async function loginShellPath(): Promise<string | undefined> {
 }
 
 async function fixPath(): Promise<void> {
+  if (IS_WIN) {
+    const parts = [path.dirname(bin), ...(process.env.PATH ?? "").split(path.delimiter)];
+    process.env.PATH = [...new Set(parts.filter(Boolean))].join(path.delimiter);
+    return;
+  }
   const fromShell = await loginShellPath();
   const extra = [
     path.dirname(bin),
     path.join(homedir(), ".local/bin"),
-    "/opt/homebrew/bin",
+    ...(IS_MAC ? ["/opt/homebrew/bin"] : []),
     "/usr/local/bin",
   ];
   const parts = [
-    ...(fromShell ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(":"),
+    ...(fromShell ?? process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(path.delimiter),
     ...extra,
   ];
-  process.env.PATH = [...new Set(parts.filter(Boolean))].join(":");
+  process.env.PATH = [...new Set(parts.filter(Boolean))].join(path.delimiter);
   console.log(`PATH from ${fromShell ? "login shell" : "fallback"}`);
 }
 
@@ -352,15 +362,23 @@ function isAppUrl(url: string): boolean {
 function createWindow(): void {
   if (!ui || headless) return;
   const state = loadWindowState();
+  const iconPath = path.join(app.getAppPath(), "design/icon/icon-512.png");
   const w = new BrowserWindow({
     ...state,
     minWidth: 720,
     minHeight: 480,
     show: false,
     title: "Provenance",
-    titleBarStyle: "hiddenInset",
-    // Centred on the 40 px header (--header-height in tokens.css).
-    trafficLightPosition: { x: 14, y: 13 },
+    ...(IS_MAC
+      ? {
+          titleBarStyle: "hiddenInset" as const,
+          // Centred on the 40 px header (--header-height in tokens.css).
+          trafficLightPosition: { x: 14, y: 13 },
+        }
+      : {
+          autoHideMenuBar: true,
+          ...(existsSync(iconPath) ? { icon: iconPath } : {}),
+        }),
     backgroundColor: "#0d0b0a",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -428,33 +446,40 @@ function buildMenu(): void {
     if (!win && ui) createWindow();
     win?.webContents.send(channel, ...args);
   };
-  const template: MenuItemConstructorOptions[] = [
+  const appSettingsItems: MenuItemConstructorOptions[] = [
+    { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: openPreferences },
+    { label: "Models & Accounts…", click: () => send("app:open-accounts") },
+    { label: "Welcome…", click: () => send("app:open-welcome") },
     {
-      label: "Provenance",
-      submenu: [
-        { role: "about" },
-        { type: "separator" },
-        { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: openPreferences },
-        { label: "Models & Accounts…", click: () => send("app:open-accounts") },
-        { label: "Welcome…", click: () => send("app:open-welcome") },
-        {
-          label: "Show activity in Discord",
-          type: "checkbox",
-          checked: settings.discordPresence,
-          // Hidden until a Discord client id is configured: presence is off without one.
-          visible: !!discordClientId(settings),
-          click: (item) => setDiscordPresence(item.checked),
-        },
-        { type: "separator" },
-        { role: "services" },
-        { type: "separator" },
-        { role: "hide" },
-        { role: "hideOthers" },
-        { role: "unhide" },
-        { type: "separator" },
-        { role: "quit" },
-      ],
+      label: "Show activity in Discord",
+      type: "checkbox",
+      checked: settings.discordPresence,
+      // Hidden until a Discord client id is configured: presence is off without one.
+      visible: !!discordClientId(settings),
+      click: (item) => setDiscordPresence(item.checked),
     },
+  ];
+  const template: MenuItemConstructorOptions[] = [
+    ...(IS_MAC
+      ? ([
+          {
+            label: "Provenance",
+            submenu: [
+              { role: "about" },
+              { type: "separator" },
+              ...appSettingsItems,
+              { type: "separator" },
+              { role: "services" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              { role: "quit" },
+            ],
+          },
+        ] as MenuItemConstructorOptions[])
+      : []),
     {
       label: "File",
       submenu: [
@@ -467,8 +492,11 @@ function buildMenu(): void {
             if (dir) send("app:set-cwd", dir);
           },
         },
+        ...(!IS_MAC
+          ? ([{ type: "separator" }, ...appSettingsItems] as MenuItemConstructorOptions[])
+          : []),
         { type: "separator" },
-        { role: "close" },
+        { role: IS_MAC ? "close" : "quit" },
       ],
     },
     { role: "editMenu" },
@@ -644,4 +672,7 @@ app.on("before-quit", (e) => {
   void Promise.all([uiClosed, router.stop(), presence.shutdown()]).finally(() => app.quit());
 });
 process.on("exit", () => router.killNow());
-for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => app.quit());
+for (const sig of IS_WIN
+  ? (["SIGTERM", "SIGINT"] as const)
+  : (["SIGTERM", "SIGINT", "SIGHUP"] as const))
+  process.on(sig, () => app.quit());

@@ -33,6 +33,7 @@ import http from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
 import { WebSocketServer } from "ws";
+import { isHyperexperimentalAllowed, type SourceSummary } from "../shared/orchestrator-api.ts";
 import {
   ROUTER_ROUTES,
   type RouterInfo,
@@ -196,6 +197,23 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
       })),
     callModel: makeCallModel(conn),
     caps: capsFromEnv(process.env),
+    isWebChatModel: async (model: string) => {
+      try {
+        const res = await routerFetch("/v1/sources", { signal: AbortSignal.timeout(2000) });
+        if (!res.ok) return null;
+        const body = (await res.json()) as {
+          tiers?: { tier?: string; sources?: SourceSummary[] }[];
+        };
+        if (!Array.isArray(body.tiers)) return null;
+        const map: Record<string, SourceSummary[]> = {};
+        for (const t of body.tiers) {
+          if (typeof t?.tier === "string" && Array.isArray(t.sources)) map[t.tier] = t.sources;
+        }
+        return isHyperexperimentalAllowed(model, map);
+      } catch {
+        return null;
+      }
+    },
   });
 
   async function fetchTiers(): Promise<{ tiers: string[]; source: string }> {

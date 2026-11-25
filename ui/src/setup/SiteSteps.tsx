@@ -64,7 +64,7 @@ export function SitesStep({
     <div className="setup-step">
       <p className="setup-lead">
         {firstRun || !data.providers.some((p) => p.accounts.some((a) => a.signed_in === true))
-          ? "Nothing is signed in yet. Sign in to a chat site, and its models serve your threads."
+          ? "Nothing's connected yet. Sign in to a chat site to use its models."
           : "Sign in to a chat site to use its models in Provenance."}
       </p>
       <BrowserStrip browser={data.browser} onPrepare={onPrepare} />
@@ -96,7 +96,7 @@ export function SitesStep({
             </span>
             <span className="setup-site-text">
               <span className="setup-site-name">Token pool</span>
-              <span className="meta">Free API tiers of {pool.length} providers, pooled</span>
+              <span className="meta">Pooled free API tiers across {pool.length} providers</span>
             </span>
             <PoolStatus pool={pool} />
             <IconNext />

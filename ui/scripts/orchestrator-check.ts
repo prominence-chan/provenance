@@ -2108,7 +2108,7 @@ const turnDone = (threadId: string, ms = 20_000) =>
 const text = (s: string) => [{ type: "text", text: s, text_elements: [] }];
 const start = async (orchestrator: string, extra: Record<string, unknown> = {}) => {
   const r = await call("thread/start", {
-    model: "pool/spark",
+    model: orchestrator === "hyperexperimental" ? "luna/solstice" : "pool/spark",
     cwd: work,
     approvalPolicy: "on-request",
     sandbox: "workspace-write",
@@ -2631,6 +2631,20 @@ check(
 );
 
 // ---- Hyperexperimental ----------------------------------------------------------------------------
+log("hyperexperimental: web chat models only");
+{
+  const rejected = await call("thread/start", {
+    model: "pool/spark",
+    cwd: work,
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
+    config: { orchestrator: "hyperexperimental" },
+  });
+  check(
+    !!rejected.error && /web chat models/i.test(rejected.error.message),
+    `pool/spark rejected for hyperexperimental (${rejected.error?.message ?? "allowed"})`,
+  );
+}
 log("hyperexperimental: a job over three steps");
 seen.length = 0;
 writeFileSync(fakeLog, "");
@@ -4219,7 +4233,7 @@ const resumed = (await backend.handle("thread/resume", { threadId: hy.id })) as 
   sandbox: { type: string };
 };
 check(
-  resumed.model === "pool/spark" &&
+  resumed.model === "luna/solstice" &&
     resumed.orchestrator === "hyperexperimental" &&
     resumed.sandbox.type === "workspaceWrite",
   "thread/resume gives the model, orchestrator and sandbox",

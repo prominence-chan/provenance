@@ -117,8 +117,10 @@ export function Sidebar() {
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Hide child subagent threads from the top-level list unless searched or currently selected.
+    const visibleThreads = threads.filter((t) => !t.parentThreadId || t.id === selected || !!q);
     if (mostRecent) {
-      let list = sortByMostRecent(threads);
+      let list = sortByMostRecent(visibleThreads);
       if (q) {
         list = list.filter(
           (t) => threadTitle(t).toLowerCase().includes(q) || t.cwd.toLowerCase().includes(q),
@@ -126,7 +128,7 @@ export function Sidebar() {
       }
       return { kind: "flat" as const, threads: list };
     }
-    let list = threads;
+    let list = visibleThreads;
     if (q) {
       list = list.filter(
         (t) => threadTitle(t).toLowerCase().includes(q) || t.cwd.toLowerCase().includes(q),
@@ -134,7 +136,7 @@ export function Sidebar() {
     }
     const grouped = applyOrder(groupByProject(list), folderOrder);
     return { kind: "grouped" as const, groups: grouped };
-  }, [threads, query, mostRecent, folderOrder]);
+  }, [threads, query, mostRecent, folderOrder, selected]);
 
   const toggleGroup = (cwd: string) => {
     setCollapsed((prev) => {
@@ -267,62 +269,59 @@ export function Sidebar() {
           </div>
         </div>
         <nav className="thread-list">
-          {groups.kind === "flat" && groups.threads.map((t) => (
-            <ThreadRow
-              key={t.id}
-              thread={t}
-              selected={t.id === selected}
-              query={query.trim()}
-            />
-          ))}
-          {groups.kind === "grouped" && groups.groups.map((g) => {
-            const open = !collapsed.has(g.cwd) || !!query.trim();
-            return (
-              <div
-                key={g.cwd}
-                className="project"
-                draggable
-                onDragStart={handleDragStart(g.cwd)}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop(g.cwd)}
-                style={dragging === g.cwd ? { opacity: 0.5 } : undefined}
-              >
-                <button
-                  className="project-head"
-                  title={shortPath(g.cwd)}
-                  aria-expanded={open}
-                  onClick={() => toggleGroup(g.cwd)}
+          {groups.kind === "flat" &&
+            groups.threads.map((t) => (
+              <ThreadRow key={t.id} thread={t} selected={t.id === selected} query={query.trim()} />
+            ))}
+          {groups.kind === "grouped" &&
+            groups.groups.map((g) => {
+              const open = !collapsed.has(g.cwd) || !!query.trim();
+              return (
+                <div
+                  key={g.cwd}
+                  className="project"
+                  draggable
+                  onDragStart={handleDragStart(g.cwd)}
+                  onDragOver={handleDragOver}
+                  onDrop={handleDrop(g.cwd)}
+                  style={dragging === g.cwd ? { opacity: 0.5 } : undefined}
                 >
-                  <span className="project-icon">
-                    <IconFolder size={13} />
-                    <IconChevron size={11} />
-                  </span>
-                  <span className="project-name">{baseName(g.cwd) || g.cwd}</span>
-                  {!open && <span className="project-count">{g.threads.length}</span>}
                   <button
-                    className="icon-btn project-delete"
-                    title="Delete folder"
-                    aria-label="Delete folder"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleDeleteFolder(g.cwd);
-                    }}
+                    className="project-head"
+                    title={shortPath(g.cwd)}
+                    aria-expanded={open}
+                    onClick={() => toggleGroup(g.cwd)}
                   >
-                    <IconTrash size={11} />
+                    <span className="project-icon">
+                      <IconFolder size={13} />
+                      <IconChevron size={11} />
+                    </span>
+                    <span className="project-name">{baseName(g.cwd) || g.cwd}</span>
+                    {!open && <span className="project-count">{g.threads.length}</span>}
+                    <button
+                      className="icon-btn project-delete"
+                      title="Delete folder"
+                      aria-label="Delete folder"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDeleteFolder(g.cwd);
+                      }}
+                    >
+                      <IconTrash size={11} />
+                    </button>
                   </button>
-                </button>
-                {open &&
-                  g.threads.map((t) => (
-                    <ThreadRow
-                      key={t.id}
-                      thread={t}
-                      selected={t.id === selected}
-                      query={query.trim()}
-                    />
-                  ))}
-              </div>
-            );
-          })}
+                  {open &&
+                    g.threads.map((t) => (
+                      <ThreadRow
+                        key={t.id}
+                        thread={t}
+                        selected={t.id === selected}
+                        query={query.trim()}
+                      />
+                    ))}
+                </div>
+              );
+            })}
           {((groups.kind === "flat" && !groups.threads.length) ||
             (groups.kind === "grouped" && !groups.groups.length)) && (
             <div className="thread-empty">

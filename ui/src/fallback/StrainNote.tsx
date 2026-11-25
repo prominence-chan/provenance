@@ -25,9 +25,7 @@ export function StrainNote({ threadId }: { threadId: string }) {
   const ready = fallbacks(prefs, info).filter((f) => f.ready);
   return (
     <div className="strain-note" role="status" title={strain.reasons.join("; ")}>
-      <span className="strain-text">
-        This thread has grown too large for the free models to handle well.
-      </span>
+      <span className="strain-text">This thread has grown too large for the free models.</span>
       <span className="strain-actions">
         {ready.length ? (
           ready.map((f) => (

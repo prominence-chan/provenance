@@ -175,8 +175,8 @@ function Intro({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
       <HeroSun size={112} />
       <h3 className="setup-title">Provenance runs on free models</h3>
       <p className="setup-text">
-        A coding agent on chat sites you sign in to and free API tiers, pooled into four tiers. When
-        a thread outgrows them, it can continue in Claude Code or Codex.
+        Pool your chat-site accounts and free API keys into four model tiers. If a thread gets too
+        big, hand it off to Claude Code or Codex.
       </p>
       <div className="setup-actions">
         <button className="btn-primary setup-cta" onClick={onNext} autoFocus>
@@ -211,8 +211,8 @@ function Models({
     <div className="setup-step">
       <p className="setup-lead">
         {some
-          ? "You can start with what's ready. Another site or free API keys add more."
-          : "Sign in to a chat site or add free API keys. One is enough to start."}
+          ? "Start with what's ready, or add another site or API key for extra headroom."
+          : "Sign in to a chat site or add a free API key — one is enough to start."}
       </p>
       {down ? (
         <p className="setup-note">

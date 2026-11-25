@@ -149,3 +149,19 @@ export const IconClock = ({ size }: P) => (
     <path d="M12 7v5l3 2" />
   </svg>
 );
+
+export const IconAgents = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <circle cx="6" cy="12" r="2.5" />
+    <circle cx="18" cy="6.5" r="2.2" />
+    <circle cx="18" cy="17.5" r="2.2" />
+    <path d="M8.5 11.2 15.8 7.5M8.5 12.8l7.3 3.7" />
+  </svg>
+);
+
+export const IconPanelRight = ({ size }: P) => (
+  <svg {...base(size)} strokeWidth={1.8}>
+    <rect x="3" y="4" width="18" height="16" rx="3" />
+    <path d="M15 4v16" />
+  </svg>
+);
