@@ -164,6 +164,13 @@ jobs:
           set -euo pipefail
           if [[ "${{ matrix.platform }}" == "win32" ]]; then
             export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          elif [[ "${{ matrix.platform }}" == "darwin" ]]; then
+            # fetch-agent.ts strips binaries; skipping DWARF + ThinLTO on slow Intel macOS prevents 3h+ builds.
+            export CARGO_PROFILE_RELEASE_DEBUG=0
+            if [[ "${{ matrix.arch }}" == "x64" ]]; then
+              export CARGO_PROFILE_RELEASE_LTO=false
+              export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            fi
           fi
           cargo build --release -p codex-cli --bin provenance
           cargo build --release -p codex-code-mode-host
