@@ -145,6 +145,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     codexHome,
     codexLoginHome: opts.codexLoginHome,
     router: conn(),
+    usageFile: path.join(dataDir, "fallback", "usage.json"),
   });
   const fallback = new FallbackBackend({
     dir: path.join(dataDir, "fallback"),

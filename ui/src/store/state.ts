@@ -1,7 +1,7 @@
 // Shape of the whole UI state. Protocol objects (Thread, ThreadItem, ...) are
 // stored as-is from app-server; the "View" types only add what the UI needs on top.
 
-import type { FallbackCli, FallbacksInfo } from "../../shared/fallback-api";
+import type { FallbackCli, FallbacksInfo, FallbackUsage } from "../../shared/fallback-api";
 import {
   DEFAULT_ORCHESTRATOR,
   isFallbackEffort,
@@ -110,6 +110,7 @@ export interface FallbackPrefs {
   claude: boolean;
   /** off; background: the codex CLI runs turns; provenance: Provenance runs them on your Codex login. */
   codex: "off" | "background" | "provenance";
+  antigravity: boolean;
 }
 
 export interface Settings {
@@ -150,8 +151,10 @@ export interface AppState {
   notices: Notice[];
   /** Per turn id: which models served it (absent = not fetched yet). */
   usage: Record<string, TurnUsage>;
-  /** Claude Code / Codex health and models (GET /api/fallbacks); null until checked. */
+  /** Claude Code / Codex / Antigravity health and models (GET /api/fallbacks); null until checked. */
   fallbackInfo: FallbacksInfo | null;
+  /** Latest known usage window per fallback (weekly remaining, resetsAt). */
+  fallbackUsage: Partial<Record<FallbackCli, FallbackUsage>>;
   /** Which backend each known thread lives on (fallback/model.ts). */
   threadBackend: Record<string, BackendId>;
   /**
@@ -195,11 +198,12 @@ export function initialState(): AppState {
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
       ...saved,
-      fallbacks: { claude: false, codex: "off", ...saved.fallbacks },
+      fallbacks: { claude: false, codex: "off", antigravity: false, ...saved.fallbacks },
       orchestrator: isOrchestrator(saved.orchestrator) ? saved.orchestrator : DEFAULT_ORCHESTRATOR,
       fallbackEffort: {
         claude: isFallbackEffort(effort.claude) ? effort.claude : null,
         codex: isFallbackEffort(effort.codex) ? effort.codex : null,
+        antigravity: isFallbackEffort(effort.antigravity) ? effort.antigravity : null,
       },
     },
     tiers: ["nova", "solstice", "ember", "spark"],
@@ -207,6 +211,7 @@ export function initialState(): AppState {
     notices: [],
     usage: {},
     fallbackInfo: null,
+    fallbackUsage: {},
     threadBackend: {},
     links: {},
     backendReady: { main: false, codex: false, fallback: false, orchestrator: false },

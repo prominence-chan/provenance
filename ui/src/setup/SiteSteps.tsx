@@ -112,7 +112,7 @@ export function SitesStep({
         <Monogram name="F" />
         <span className="setup-site-text">
           <span className="setup-site-name">Fallbacks</span>
-          <span className="meta">Claude Code and Codex</span>
+          <span className="meta">Claude Code, Codex, and Antigravity</span>
         </span>
         <FallbackStatus />
         <IconNext />

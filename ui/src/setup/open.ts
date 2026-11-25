@@ -125,7 +125,8 @@ export interface SetupGaps {
   fallbacks: boolean;
 }
 
-export const fallbacksDecided = (f: FallbackPrefs) => f.claude || f.codex !== "off";
+export const fallbacksDecided = (f: FallbackPrefs) =>
+  f.claude || f.codex !== "off" || f.antigravity;
 
 /** What the router's answers say is set up (the welcome's own reads come through here too). */
 export function noteSetup(accounts: WebAccounts, pool: PoolProvider[] | null): void {

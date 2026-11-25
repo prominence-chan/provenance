@@ -1,10 +1,13 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
+import { parseFallbackModel } from "../../shared/fallback-api";
 import { carriedTitle } from "../fallback/brief";
+import { fallbackOf, MODE_NAME } from "../fallback/model";
 import type { Thread } from "../protocol";
 import { archiveThread, newThread, openThread, refreshThreads } from "../store/actions";
-import { isThreadActive } from "../store/state";
+import { isThreadActive, type Source } from "../store/state";
 import { useAppState } from "../store/store";
 import { setTheme, useTheme } from "../theme/theme";
+import { splitModel, tierOf } from "../theme/tiers";
 import { closeDrawer, toggleSidebar, useSidebar } from "../theme/ui";
 import { baseName, relativeTime, shortPath } from "./format";
 import {
@@ -114,6 +117,9 @@ export function Sidebar() {
   const [mostRecent, setMostRecent] = useState(loadMostRecent);
   const [folderOrder, setFolderOrder] = useState(loadOrder);
   const [dragging, setDragging] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<{ cwd: string; position: "before" | "after" } | null>(
+    null,
+  );
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -183,26 +189,41 @@ export function Sidebar() {
     }
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOverProject = (cwd: string) => (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     try {
       e.dataTransfer.dropEffect = "move";
     } catch {
       // ignore
     }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const position: "before" | "after" =
+      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setDragOver((prev) =>
+      prev && prev.cwd === cwd && prev.position === position ? prev : { cwd, position },
+    );
   };
 
-  const handleDrop = (targetCwd: string) => async (e: React.DragEvent) => {
-    e.preventDefault();
-    const src = dragging || e.dataTransfer.getData("text/plain");
+  const handleDragEnd = () => {
     setDragging(null);
+    setDragOver(null);
+  };
+
+  const handleDropProject = (targetCwd: string) => (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const src = dragging || e.dataTransfer.getData("text/plain");
+    const position = dragOver?.cwd === targetCwd ? dragOver.position : "before";
+    setDragging(null);
+    setDragOver(null);
     if (!src || src === targetCwd) return;
-    // reorder
     const current = groups.kind === "grouped" ? groups.groups.map((g) => g.cwd) : [];
     const next = current.filter((c) => c !== src);
     const idx = next.indexOf(targetCwd);
     if (idx < 0) next.push(src);
-    else next.splice(idx, 0, src);
+    else if (position === "before") next.splice(idx, 0, src);
+    else next.splice(idx + 1, 0, src);
     setFolderOrder(next);
     saveOrder(next);
   };
@@ -276,50 +297,70 @@ export function Sidebar() {
           {groups.kind === "grouped" &&
             groups.groups.map((g) => {
               const open = !collapsed.has(g.cwd) || !!query.trim();
+              const isDragging = dragging === g.cwd;
+              const isDropTarget =
+                dragOver?.cwd === g.cwd && dragging !== null && dragging !== g.cwd;
+              const dropLineBefore = isDropTarget && dragOver?.position === "before";
+              const dropLineAfter = isDropTarget && dragOver?.position === "after";
               return (
-                <div
-                  key={g.cwd}
-                  className="project"
-                  draggable
-                  onDragStart={handleDragStart(g.cwd)}
-                  onDragOver={handleDragOver}
-                  onDrop={handleDrop(g.cwd)}
-                  style={dragging === g.cwd ? { opacity: 0.5 } : undefined}
-                >
-                  <button
-                    className="project-head"
-                    title={shortPath(g.cwd)}
-                    aria-expanded={open}
-                    onClick={() => toggleGroup(g.cwd)}
+                <Fragment key={g.cwd}>
+                  {dropLineBefore && <div className="project-drop-line" aria-hidden />}
+                  <div
+                    className={`project${isDragging ? " project-dragging" : ""}${isDropTarget ? " project-drop-target" : ""}`}
+                    draggable
+                    onDragStart={handleDragStart(g.cwd)}
+                    onDragOver={handleDragOverProject(g.cwd)}
+                    onDragLeave={() => setDragOver((prev) => (prev?.cwd === g.cwd ? null : prev))}
+                    onDrop={handleDropProject(g.cwd)}
+                    onDragEnd={handleDragEnd}
                   >
-                    <span className="project-icon">
-                      <IconFolder size={13} />
-                      <IconChevron size={11} />
-                    </span>
-                    <span className="project-name">{baseName(g.cwd) || g.cwd}</span>
-                    {!open && <span className="project-count">{g.threads.length}</span>}
-                    <button
-                      className="icon-btn project-delete"
-                      title="Delete folder"
-                      aria-label="Delete folder"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void handleDeleteFolder(g.cwd);
+                    <div
+                      className="project-head"
+                      role="button"
+                      tabIndex={0}
+                      title={shortPath(g.cwd)}
+                      aria-expanded={open}
+                      onClick={() => toggleGroup(g.cwd)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          toggleGroup(g.cwd);
+                        }
                       }}
                     >
-                      <IconTrash size={11} />
-                    </button>
-                  </button>
-                  {open &&
-                    g.threads.map((t) => (
-                      <ThreadRow
-                        key={t.id}
-                        thread={t}
-                        selected={t.id === selected}
-                        query={query.trim()}
-                      />
-                    ))}
-                </div>
+                      <span className="project-icon">
+                        <IconFolder size={13} />
+                        <IconChevron size={11} />
+                      </span>
+                      <span className="project-name">{baseName(g.cwd) || g.cwd}</span>
+                      <span className="project-end">
+                        {!open && <span className="project-count">{g.threads.length}</span>}
+                        <button
+                          type="button"
+                          className="icon-btn project-delete"
+                          title="Delete folder"
+                          aria-label="Delete folder"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDeleteFolder(g.cwd);
+                          }}
+                        >
+                          <IconTrash size={11} />
+                        </button>
+                      </span>
+                    </div>
+                    {open &&
+                      g.threads.map((t) => (
+                        <ThreadRow
+                          key={t.id}
+                          thread={t}
+                          selected={t.id === selected}
+                          query={query.trim()}
+                        />
+                      ))}
+                  </div>
+                  {dropLineAfter && <div className="project-drop-line" aria-hidden />}
+                </Fragment>
               );
             })}
           {((groups.kind === "flat" && !groups.threads.length) ||
@@ -476,27 +517,164 @@ function SetupRing({ done, of }: { done: number; of: number }) {
   );
 }
 
+function formatResetDelta(ms: number | null | undefined): string | null {
+  if (ms == null) return null;
+  const diff = Math.max(0, ms - Date.now());
+  const mins = Math.round(diff / 60_000);
+  if (mins < 60) return `resets in ${Math.max(1, mins)}m`;
+  const hrs = Math.floor(mins / 60);
+  const remM = mins % 60;
+  if (hrs < 24) return remM ? `resets in ${hrs}h ${remM}m` : `resets in ${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  const remH = hrs % 24;
+  return remH ? `resets in ${days}d ${remH}h` : `resets in ${days}d`;
+}
+
 function ConnectionStatus() {
   const socketOpen = useAppState((s) => s.socketOpen);
   const bridge = useAppState((s) => s.bridge);
-  let label = "Connecting…";
-  let cls = "dot-warn";
-  if (!socketOpen) {
-    label = "Bridge disconnected";
-    cls = "dot-err";
-  } else if (bridge?.state === "ready") {
-    label = "app-server ready";
-    cls = "dot-ok";
-  } else if (bridge?.state === "down") {
-    label = `app-server down: ${bridge.error}`;
-    cls = "dot-err";
-  } else if (bridge?.state === "starting") {
-    label = "Starting app-server…";
+  const model = useAppState((s) => s.settings.model);
+  const sources = useAppState((s) => s.sources);
+  const fallbackUsage = useAppState((s) => s.fallbackUsage);
+  const fallbackInfo = useAppState((s) => s.fallbackInfo);
+
+  if (!socketOpen || bridge?.state !== "ready") {
+    let label = "Connecting…";
+    let cls = "dot-warn";
+    if (!socketOpen) {
+      label = "Bridge disconnected";
+      cls = "dot-err";
+    } else if (bridge?.state === "down") {
+      label = `app-server down: ${bridge.error}`;
+      cls = "dot-err";
+    } else if (bridge?.state === "starting") {
+      label = "Starting app-server…";
+    }
+    return (
+      <div className="conn" title={label}>
+        <span className={`dot ${cls}`} />
+        <span className="conn-label">{label}</span>
+      </div>
+    );
   }
+
+  const fb = parseFallbackModel(model);
+  const fbCli = fallbackOf(model);
+  const tier = fb ? null : tierOf(model);
+
+  let label: string;
+  let remaining: number | null = null;
+  let valueText = "—";
+  let tooltip = "";
+
+  if (fb && fbCli) {
+    const name = MODE_NAME[fb.mode];
+    const u = fallbackUsage[fbCli] ?? fallbackInfo?.[fbCli]?.usage ?? null;
+    label = "Weekly";
+    if (u && u.weeklyRemaining != null) {
+      remaining = Math.max(0, Math.min(1, u.weeklyRemaining));
+      const pct = Math.round(remaining * 100);
+      valueText = `${pct}%`;
+      const parts = [`${name} weekly remaining: ${pct}%`];
+      const reset = formatResetDelta(u.weeklyResetsAt);
+      if (reset) parts.push(reset);
+      if (u.primaryRemaining != null) {
+        parts.push(`5h window: ${Math.round(u.primaryRemaining * 100)}% left`);
+      }
+      tooltip = parts.join(" · ");
+    } else if (u && u.primaryRemaining != null) {
+      remaining = Math.max(0, Math.min(1, u.primaryRemaining));
+      const pct = Math.round(remaining * 100);
+      valueText = `${pct}%`;
+      const reset = formatResetDelta(u.primaryResetsAt);
+      tooltip = `${name} remaining: ${pct}%${reset ? ` · ${reset}` : ""}`;
+    } else {
+      tooltip =
+        fb.mode === "codex"
+          ? `${name} weekly usage appears after a turn or when running through Provenance`
+          : `${name} weekly usage will appear once reported`;
+    }
+  } else {
+    const { tier: tierName, source: pinnedSource } = splitModel(model);
+    const list: Source[] = sources[tierName] ?? [];
+    if (pinnedSource) {
+      const s = list.find((x) => x.model === model);
+      label = s?.label ?? pinnedSource;
+      if (s) {
+        if (!s.available) {
+          remaining = 0;
+          valueText = s.needs ? "Setup" : "0%";
+          tooltip = `${s.label}: ${s.needs === "keys" ? "Add API keys" : s.needs === "signin" ? "Sign in required" : "Unavailable"}`;
+        } else if (s.remaining != null) {
+          remaining = Math.max(0, Math.min(1, s.remaining));
+          const pct = Math.round(remaining * 100);
+          valueText = `${pct}%`;
+          tooltip = `${s.label} (${tierName}): ${pct}% daily usage left${s.busy ? ` · ${s.busy} busy` : ""}`;
+        } else {
+          tooltip = `${s.label} (${tierName}): usage not reported`;
+        }
+      } else {
+        tooltip = `${model}: usage not reported`;
+      }
+    } else {
+      label = tierName;
+      const measured = list.filter((x) => !x.needs && x.remaining != null);
+      if (measured.length) {
+        const avg =
+          measured.reduce((sum, x) => sum + Math.max(0, Math.min(1, x.remaining!)), 0) /
+          measured.length;
+        remaining = avg;
+        const pct = Math.round(avg * 100);
+        valueText = `${pct}%`;
+        const detail = measured
+          .map((x) => `${x.label}: ${Math.round(x.remaining! * 100)}%`)
+          .join("\n");
+        tooltip = `${tierName} remaining: ${pct}%\n${detail}`;
+      } else if (list.length && list.every((x) => !x.available)) {
+        remaining = 0;
+        valueText = "0%";
+        tooltip = `${tierName}: no sources available`;
+      } else {
+        tooltip = `${tierName}: usage not reported`;
+      }
+    }
+  }
+
+  const pctWidth = remaining != null ? Math.round(remaining * 100) : 0;
+  const level =
+    remaining == null
+      ? "unknown"
+      : remaining <= 0.05
+        ? "critical"
+        : remaining <= 0.2
+          ? "low"
+          : "ok";
+
   return (
-    <div className="conn" title={label}>
-      <span className={`dot ${cls}`} />
-      <span className="conn-label">{label}</span>
+    <div
+      className="conn conn-usage"
+      data-tier={tier?.id}
+      data-fallback={fbCli ?? undefined}
+      data-level={level}
+      title={tooltip}
+    >
+      <span className="dot dot-ok" />
+      <div className="usage-stack">
+        <div className="usage-head">
+          <span className="usage-name">{label}</span>
+          <span className="usage-pct">{valueText}</span>
+        </div>
+        <div
+          className="usage-track"
+          role="progressbar"
+          aria-label={`${label} remaining usage`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={remaining != null ? pctWidth : undefined}
+        >
+          <div className="usage-fill" style={{ width: `${pctWidth}%` }} />
+        </div>
+      </div>
     </div>
   );
 }

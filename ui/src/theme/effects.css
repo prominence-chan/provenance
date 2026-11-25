@@ -47,6 +47,10 @@
   --fx-hot: var(--fx-codex-hot);
   --fx-mid: var(--fx-codex-mid);
 }
+.composer-shell[data-fallback="antigravity"] {
+  --fx-hot: var(--fx-antigravity-hot);
+  --fx-mid: var(--fx-antigravity-mid);
+}
 
 /* Static fallback: a faint tier tint on the border, a little stronger while a turn
    streams. No movement. */

@@ -176,7 +176,7 @@ function Intro({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
       <h3 className="setup-title">Provenance runs on free models</h3>
       <p className="setup-text">
         Pool your chat-site accounts and free API keys into four model tiers. If a thread gets too
-        big, hand it off to Claude Code or Codex.
+        big, hand it off to Claude Code, Codex, or Antigravity.
       </p>
       <div className="setup-actions">
         <button className="btn-primary setup-cta" onClick={onNext} autoFocus>

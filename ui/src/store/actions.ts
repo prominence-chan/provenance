@@ -11,7 +11,7 @@
 // store/segments.ts): its later sessions' threads are hidden from the list, their events are
 // shown in the conversation, and each message goes to the session serving it now.
 
-import type { FallbacksInfo } from "../../shared/fallback-api";
+import type { FallbackCli, FallbacksInfo, FallbackUsage } from "../../shared/fallback-api";
 import { DEFAULT_ORCHESTRATOR, isHyperexperimentalAllowed } from "../../shared/orchestrator-api";
 import type { LinkSegment, ThreadLinks } from "../../shared/thread-links";
 import { CARRY_ON, threadBrief } from "../fallback/brief";
@@ -27,6 +27,7 @@ import type {
   ServerRequest,
   Thread,
   Turn,
+  v2,
 } from "../protocol";
 import { RpcClient } from "../rpc/client";
 import { isAssistView } from "../setup/assist-text";
@@ -166,6 +167,11 @@ function onNotification(id: BackendId, n: ServerNotification): void {
       return;
     n = { ...n, params: { ...n.params, threadId: owner.id } } as ServerNotification;
   }
+  if (n.method === "account/rateLimits/updated" && id === "codex") {
+    const u = rateLimitToUsage(n.params.rateLimits);
+    if (u) setState((s) => ({ ...s, fallbackUsage: { ...s.fallbackUsage, codex: u } }));
+    return;
+  }
   setState((s) => {
     let next = applyNotification(s, n);
     if (n.method === "thread/started" && next.threadBackend[n.params.thread.id] !== id)
@@ -173,6 +179,11 @@ function onNotification(id: BackendId, n: ServerNotification): void {
     if (owner) next = tagTurn(next, owner.id, turnIdOf(n), owner.segment);
     return next;
   });
+  if (n.method === "turn/completed") {
+    if (id === "main" || id === "orchestrator") void refreshSources();
+    else if (id === "fallback") void refreshFallbacks();
+    else if (id === "codex") void refreshCodexRateLimits();
+  }
   if (n.method === "warning" || n.method === "configWarning" || n.method === "deprecationNotice") {
     const p = n.params as { message?: string; summary?: string };
     notify("warn", p.message ?? p.summary ?? n.method);
@@ -266,6 +277,7 @@ async function onReady(id: BackendId, reconnected: boolean): Promise<void> {
   });
   for (const w of readyWaiters[id].splice(0)) w();
   void refreshThreads();
+  if (id === "codex") void refreshCodexRateLimits();
   // After a reconnect/restart app-server may not have the thread loaded: re-attach.
   const sel = getState().selectedThreadId;
   if (sel && segmentsOf(getState(), sel).some((x) => x.backend === id))
@@ -328,14 +340,76 @@ async function saveLinks(id: string, segments: LinkSegment[] | null): Promise<vo
   });
 }
 
-/** Claude Code / Codex health and models (GET /api/fallbacks); `force` checks again now. */
+/** Convert a Codex app-server RateLimitSnapshot into a FallbackUsage entry. */
+function rateLimitToUsage(rl: v2.RateLimitSnapshot | null | undefined): FallbackUsage | null {
+  if (!rl) return null;
+  const rem = (w: v2.RateLimitWindow | null | undefined) =>
+    w && Number.isFinite(w.usedPercent) ? Math.max(0, Math.min(1, 1 - w.usedPercent / 100)) : null;
+  const ts = (n: number | null | undefined) =>
+    typeof n === "number" && Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : null;
+  const secondaryIsWeekly = !!rl.secondary;
+  const primaryIsWeekly =
+    !secondaryIsWeekly &&
+    !!rl.primary &&
+    (rl.primary.windowDurationMins == null || rl.primary.windowDurationMins >= 1440);
+  const weekly = secondaryIsWeekly ? rl.secondary : primaryIsWeekly ? rl.primary : null;
+  const primary = primaryIsWeekly ? null : rl.primary;
+  const weeklyRemaining = rem(weekly);
+  const primaryRemaining = rem(primary);
+  if (weeklyRemaining == null && primaryRemaining == null) return null;
+  return {
+    weeklyRemaining,
+    weeklyResetsAt: ts(weekly?.resetsAt),
+    primaryRemaining,
+    primaryResetsAt: ts(primary?.resetsAt),
+    updatedAt: Date.now(),
+  };
+}
+
+/** Read Codex through Provenance's account rate limits (weekly + 5h windows). */
+export async function refreshCodexRateLimits(): Promise<void> {
+  if (!getState().backendReady.codex) return;
+  try {
+    const res = (await clients.codex.request("account/rateLimits/read", undefined)) as
+      v2.GetAccountRateLimitsResponse | null | undefined;
+    const u = rateLimitToUsage(res?.rateLimits);
+    if (u) setState((s) => ({ ...s, fallbackUsage: { ...s.fallbackUsage, codex: u } }));
+  } catch {
+    // older app-server or signed out
+  }
+}
+
+/** Merge newly fetched usage snapshots into state, preferring the freshest timestamp. */
+function mergeFallbackUsage(
+  prev: Partial<Record<FallbackCli, FallbackUsage>>,
+  info: FallbacksInfo,
+): Partial<Record<FallbackCli, FallbackUsage>> {
+  const next = { ...prev };
+  const entries: [FallbackCli, FallbackUsage | null | undefined][] = [
+    ["claude", info.claude.usage],
+    ["codex", info.codex.usage],
+    ["antigravity", info.antigravity?.usage],
+  ];
+  for (const [cli, u] of entries) {
+    if (!u) continue;
+    const cur = next[cli];
+    if (!cur || (u.updatedAt ?? 0) >= (cur.updatedAt ?? 0)) next[cli] = u;
+  }
+  return next;
+}
+
+/** Claude Code / Codex / Antigravity health and models (GET /api/fallbacks); `force` checks again now. */
 export async function refreshFallbacks(force = false): Promise<FallbacksInfo | null> {
   try {
     const info = (await (
       await fetch(`/api/fallbacks${force ? "?refresh=1" : ""}`)
     ).json()) as FallbacksInfo;
     if (!info?.claude || !info?.codex) return null;
-    setState((s) => ({ ...s, fallbackInfo: info }));
+    setState((s) => ({
+      ...s,
+      fallbackInfo: info,
+      fallbackUsage: mergeFallbackUsage(s.fallbackUsage, info),
+    }));
     return info;
   } catch {
     return null;
@@ -347,11 +421,12 @@ export function setFallbackPrefs(patch: Partial<Settings["fallbacks"]>): void {
   const fallbacks = { ...getState().settings.fallbacks, ...patch };
   const model = getState().settings.model;
   // A model of a fallback that was just turned off goes back to the default tier.
-  const m = /^(claude|codex|codex-pv):/.exec(model)?.[1];
+  const m = /^(claude|codex|codex-pv|antigravity):/.exec(model)?.[1];
   const off =
     (m === "claude" && !fallbacks.claude) ||
     (m === "codex" && fallbacks.codex !== "background") ||
-    (m === "codex-pv" && fallbacks.codex !== "provenance");
+    (m === "codex-pv" && fallbacks.codex !== "provenance") ||
+    (m === "antigravity" && !fallbacks.antigravity);
   updateSettings({ fallbacks, ...(off ? { model: validModel(null, getState().tiers) } : {}) });
   if (fallbacks.codex === "provenance") connect("codex");
 }
@@ -359,7 +434,8 @@ export function setFallbackPrefs(patch: Partial<Settings["fallbacks"]>): void {
 /** Keep a saved model whose tier still exists (pinned "luna/solstice" included), else the default. */
 function validModel(model: unknown, tiers: string[]): string {
   if (typeof model === "string" && tiers.includes(splitModel(model).tier)) return model;
-  if (typeof model === "string" && /^(claude|codex|codex-pv):/.test(model)) return model; // a fallback
+  if (typeof model === "string" && /^(claude|codex|codex-pv|antigravity):/.test(model))
+    return model; // a fallback
   return tiers.includes("solstice") ? "solstice" : tiers[0];
 }
 
@@ -595,6 +671,67 @@ export async function openThread(threadId: string, opts: { force?: boolean } = {
         ? {
             ...s,
             views: { ...s.views, [threadId]: { ...prev, load: "error", loadError: errText(e) } },
+          }
+        : s;
+    });
+  }
+}
+
+/**
+ * Load a subagent child thread's turns and subscribe to its live events in `state.views[id]`
+ * without changing `selectedThreadId`, so the right panel can inspect it in place.
+ */
+export async function loadSubagentPreview(
+  agentThreadId: string,
+  opts: { force?: boolean } = {},
+): Promise<void> {
+  const existing = getState().views[agentThreadId];
+  if (existing && existing.load !== "error" && !opts.force) return;
+  const listed = getState().threads.find((t) => t.id === agentThreadId);
+  setState((s) => ({
+    ...s,
+    views: {
+      ...s.views,
+      [agentThreadId]: existing
+        ? { ...existing, load: "loading" }
+        : listed
+          ? blankView(listed, "loading")
+          : blankView({ id: agentThreadId } as Thread, "loading"),
+    },
+  }));
+  const segs = segmentsOf(getState(), agentThreadId);
+  try {
+    const loaded = await loadSegment(segs[segs.length - 1]);
+    const turns = loaded.turns.map((t) => ({ ...t, model: t.model ?? loaded.model }));
+    setState((s) => {
+      const prev = s.views[agentThreadId];
+      const thread =
+        loaded.resumed.thread ?? prev?.thread ?? listed ?? ({ id: agentThreadId } as Thread);
+      const live = (prev?.turns ?? []).filter((t) => !turns.some((h) => h.id === t.id));
+      const view: ThreadView = {
+        ...(prev ?? blankView(thread, "ready")),
+        thread,
+        load: "ready",
+        turns: [...turns, ...live],
+        model: loaded.model,
+        cwd: loaded.resumed.cwd,
+      };
+      return {
+        ...s,
+        views: { ...s.views, [agentThreadId]: view },
+        threadBackend: { ...s.threadBackend, [agentThreadId]: segs[segs.length - 1].backend },
+      };
+    });
+  } catch (e) {
+    setState((s) => {
+      const prev = s.views[agentThreadId];
+      return prev
+        ? {
+            ...s,
+            views: {
+              ...s.views,
+              [agentThreadId]: { ...prev, load: "error", loadError: errText(e) },
+            },
           }
         : s;
     });

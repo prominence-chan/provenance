@@ -85,7 +85,11 @@ export function useFx(): FxState {
   );
   if (import.meta.env.DEV && dev)
     return {
-      ...identity(dev.tier === "claude" || dev.tier === "codex" ? `${dev.tier}:` : dev.tier),
+      ...identity(
+        dev.tier === "claude" || dev.tier === "codex" || dev.tier === "antigravity"
+          ? `${dev.tier}:`
+          : dev.tier,
+      ),
       streaming: dev.mode === "active",
       flareKey: dev.key,
     };

@@ -42,15 +42,16 @@ import {
 import path from "node:path";
 import readline from "node:readline";
 import type { WebSocket } from "ws";
-import { parseFallbackModel } from "../../shared/fallback-api.ts";
+import { parseFallbackModel, type FallbackUsage } from "../../shared/fallback-api.ts";
 import { isFallbackEffort, type FallbackEffort } from "../../shared/orchestrator-api.ts";
+import { AgyStream } from "./agy-stream.ts";
 import { ClaudeStream } from "./claude-stream.ts";
 import { findCli } from "./cli.ts";
 import { CodexStream } from "./codex-stream.ts";
 import { contextText, userMessage, type Item, type Sink } from "./items.ts";
 
 type Json = Record<string, unknown>;
-type Mode = "claude" | "codex";
+type Mode = "claude" | "codex" | "antigravity";
 type Sandbox = "read-only" | "workspace-write" | "danger-full-access";
 
 interface TurnRecord {
@@ -98,7 +99,21 @@ export interface FallbackBackendOptions {
   log?: (...a: unknown[]) => void;
 }
 
-const PROVIDER: Record<Mode, string> = { claude: "claude-code", codex: "codex-cli" };
+const PROVIDER: Record<Mode, string> = {
+  claude: "claude-code",
+  codex: "codex-cli",
+  antigravity: "antigravity",
+};
+const MODE_TITLE: Record<Mode, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  antigravity: "Antigravity",
+};
+const MODE_BIN: Record<Mode, string> = {
+  claude: "claude",
+  codex: "codex",
+  antigravity: "agy",
+};
 
 export class FallbackBackend {
   private opts: FallbackBackendOptions;
@@ -220,7 +235,9 @@ export class FallbackBackend {
   private startThread(p: Json): unknown {
     const parsed = parseFallbackModel(typeof p.model === "string" ? p.model : null);
     if (!parsed || parsed.mode === "codex-pv")
-      throw new Error("A fallback thread needs a claude:<model> or codex:<model> model");
+      throw new Error(
+        "A fallback thread needs a claude:<model>, codex:<model>, or antigravity:<model> model",
+      );
     const cwd = typeof p.cwd === "string" && p.cwd ? p.cwd : process.env.HOME || "/";
     if (!isDir(cwd)) throw new Error(`The folder ${cwd} doesn't exist`);
     const now = Math.floor(Date.now() / 1000);
@@ -310,8 +327,7 @@ export class FallbackBackend {
     if (!text.trim() && !context.trim()) throw new Error("Nothing to send");
     if (typeof p.model === "string" && p.model) {
       const m = parseFallbackModel(p.model);
-      if (!m || m.mode !== t.mode)
-        throw new Error(`This thread runs on ${t.mode === "claude" ? "Claude Code" : "Codex"}`);
+      if (!m || m.mode !== t.mode) throw new Error(`This thread runs on ${MODE_TITLE[t.mode]}`);
       t.model = m.model;
       t.thread.model = `${t.mode}:${m.model}`;
     }
@@ -365,7 +381,7 @@ export class FallbackBackend {
     const t0 = Date.now();
     let failure: string | null = null;
     let ended = false;
-    const sink: Sink = {
+    const sink: Sink & { usage?: (u: FallbackUsage) => void } = {
       started: (item) => {
         this.upsert(turn, item);
         this.broadcast("item/started", { threadId, turnId: turn.id, item });
@@ -397,9 +413,13 @@ export class FallbackBackend {
       done: (status, message) => {
         if (status === "failed") failure = message ?? "failed";
       },
+      usage: (u: FallbackUsage) => {
+        this.saveUsage(t.mode, u);
+      },
     };
     const searchPath = this.opts.searchPath();
-    const bin = findCli(t.mode, searchPath);
+    const binName = MODE_BIN[t.mode];
+    const bin = findCli(binName, searchPath);
     const finish = () => {
       if (ended) return;
       ended = true;
@@ -417,15 +437,22 @@ export class FallbackBackend {
       this.broadcast("thread/status/changed", { threadId, status: { type: "idle" } });
     };
     if (!bin) {
-      failure = `${t.mode === "claude" ? "Claude Code" : "Codex"} isn't installed (no \`${t.mode}\` found)`;
+      failure = `${MODE_TITLE[t.mode]} isn't installed (no \`${binName}\` found)`;
       return finish();
     }
     const cwd = isDir(t.thread.cwd) ? t.thread.cwd : process.env.HOME || "/";
-    const args = t.mode === "claude" ? claudeArgs(t) : codexArgs(t, cwd);
+    const args =
+      t.mode === "claude"
+        ? claudeArgs(t)
+        : t.mode === "antigravity"
+          ? agyArgs(t)
+          : codexArgs(t, cwd);
     const parser =
       t.mode === "claude"
         ? new ClaudeStream(sink, cwd, turn.id)
-        : new CodexStream(sink, cwd, turn.id);
+        : t.mode === "antigravity"
+          ? new AgyStream(sink, cwd, turn.id)
+          : new CodexStream(sink, cwd, turn.id);
     const env: NodeJS.ProcessEnv = { ...process.env, PATH: searchPath };
     // A nested Claude Code session (the app started from one) would refuse to run.
     delete env.CLAUDECODE;
@@ -493,6 +520,27 @@ export class FallbackBackend {
     }
   }
 
+  private saveUsage(mode: Mode, usage: FallbackUsage): void {
+    try {
+      mkdirSync(this.opts.dir, { recursive: true });
+      const file = path.join(this.opts.dir, "usage.json");
+      let cur: Record<string, FallbackUsage> = {};
+      if (existsSync(file)) {
+        try {
+          cur = JSON.parse(readFileSync(file, "utf8")) as Record<string, FallbackUsage>;
+        } catch {
+          cur = {};
+        }
+      }
+      cur[mode] = usage;
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify(cur, null, 2));
+      renameSync(tmp, file);
+    } catch {
+      // ignore usage cache write failure
+    }
+  }
+
   private save(t: ThreadRecord): void {
     try {
       mkdirSync(this.threadDir, { recursive: true });
@@ -531,6 +579,22 @@ export function claudeArgs(t: {
   if (t.model) args.push("--model", t.model);
   if (t.effort) args.push("--effort", t.effort);
   if (t.session) args.push("--resume", t.session);
+  return args;
+}
+
+export function agyArgs(t: {
+  model: string;
+  session: string | null;
+  sandbox: Sandbox;
+  effort?: FallbackEffort | null;
+}): string[] {
+  const args = ["-p", "--output-format", "stream-json"];
+  if (t.sandbox === "danger-full-access") args.push("--dangerously-skip-permissions");
+  else if (t.sandbox === "read-only") args.push("--mode", "plan", "--sandbox");
+  else args.push("--mode", "accept-edits");
+  if (t.model) args.push("--model", t.model);
+  if (t.effort) args.push("--effort", t.effort);
+  if (t.session) args.push("--conversation", t.session);
   return args;
 }
 
