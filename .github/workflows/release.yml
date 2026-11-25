@@ -109,6 +109,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: provenance/codex-rs -> target
+          cache-on-failure: true
 
       - name: Setup prebuilt rusty_v8
         shell: bash
@@ -164,7 +165,8 @@ jobs:
           if [[ "${{ matrix.platform }}" == "win32" ]]; then
             export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
           fi
-          cargo build --release -p codex-cli --bin provenance -p codex-code-mode-host
+          cargo build --release -p codex-cli --bin provenance
+          cargo build --release -p codex-code-mode-host
 
       - name: Install UI dependencies
         working-directory: provenance/ui
