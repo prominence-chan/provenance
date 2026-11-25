@@ -1,7 +1,7 @@
 {
   "name": "provenance-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codex-desktop-style web UI for Provenance, driving `provenance app-server` over a local WebSocket bridge.",
   "type": "module",
   "engines": {
