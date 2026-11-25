@@ -43,7 +43,7 @@ jobs:
       matrix:
         include:
           - label: macOS arm64
-            os: macos-14
+            os: macos-15
             platform: darwin
             arch: arm64
             build_script: app:build:mac
