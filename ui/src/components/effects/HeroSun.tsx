@@ -77,8 +77,8 @@ const JUMP = 0.5;
 const COLLAPSE_FROM = 0.25;
 /** Solstice's extra radius. */
 const SOLSTICE_GROWTH = 0.18;
-/** The nebula's canvas resolution, device px per CSS px: soft gas, scaled up by the browser. */
-const NEB_RES = 0.6;
+/** The nebula's canvas resolution, CSS px -> device px: 1:1 keeps filaments and dither fine. */
+const NEB_RES = 1.0;
 /** Loops and jets: NL slots (the last one a jet), NP points per curve. */
 const NL = 8;
 const NP = 11;
@@ -952,7 +952,12 @@ void main() {
   }
   // fade out well before the canvas edge
   float edge = smoothstep(1.0, 0.82, r);
-  outColor = vec4(col * edge, alpha * edge) * uStar.w;
+  vec4 outC = vec4(col * edge, alpha * edge) * uStar.w;
+  if (uLight < 0.5) {
+    float dth = (hash(gl_FragCoord.xy) - 0.5) / 255.0;
+    outC.rgb = max(outC.rgb + dth * step(1e-6, outC.rgb), 0.0);
+  }
+  outColor = outC;
 }
 #else
 void main() {
@@ -986,9 +991,13 @@ void main() {
       alpha = max(alpha, clamp(sk, 0.0, 1.0) * mix(0.5, 0.8, uLight));
     }
   }
-  // Wide white flash bloom on the hero-sized canvas so it never clips to the 200 px sun box.
+  // Wide radial white flash bloom on the hero-sized canvas: uses a smooth radial edge guard
+  // (never the rectangular fx*fy box) and fades cleanly to zero well inside the hero.
   if (uNova.x > 0.001) {
-    float f = (exp(-r * r / 0.24) * 0.48 + exp(-r / 0.95) * 0.26 + exp(-r / 2.8) * 0.1) * uNova.x;
+    float minEdge = min(min(uFade.x, uFade.y), min(uFade.z, uFade.w));
+    float radFade = smoothstep(minEdge, minEdge * 0.25, r);
+    radFade *= radFade;
+    float f = (exp(-r * r / 0.14) * 0.55 + exp(-r / 0.48) * 0.24) * uNova.x * radFade;
     flashCol = mix(vec3(0.95, 0.97, 1.0), vec3(0.6, 0.7, 0.95), uLight) * f;
     flashA = clamp(f, 0.0, 1.0) * mix(0.6, 0.72, uLight);
   }
@@ -1000,7 +1009,12 @@ void main() {
   vec2 tq = abs(p - tc) - th;
   float sd = length(max(tq, 0.0)) + min(max(tq.x, tq.y), 0.0);
   float dim = mix(0.3, 1.0, smoothstep(-0.05, 0.35, sd));
-  outColor = (vec4(col, alpha) * dim + vec4(flashCol, flashA)) * fx * fy * uStar.w;
+  vec4 outC = (vec4(col, alpha) * dim * fx * fy + vec4(flashCol, flashA)) * uStar.w;
+  if (uLight < 0.5) {
+    float dth = (hash(gl_FragCoord.xy) - 0.5) / 255.0;
+    outC.rgb = max(outC.rgb + dth * step(1e-6, outC.rgb), 0.0);
+  }
+  outColor = outC;
 }
 #endif`;
 
