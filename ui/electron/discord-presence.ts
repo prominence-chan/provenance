@@ -31,7 +31,7 @@ export const PRESENCE = {
    */
   clientId: "1574288835871772732",
   /** The state line, under the tier and orchestrator. */
-  credit: "Harness by SkyeNXT · coming soon",
+  credit: "Harness by SkyeNXT · public beta",
   /** Hover text of the app icon. */
   largeText: "Provenance · harness by SkyeNXT",
   /** Clicking the app icon (newer Discord clients) opens this. */

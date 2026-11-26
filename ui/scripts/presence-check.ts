@@ -188,7 +188,7 @@ await step("activity: the literal lines, images, hover texts and button", () => 
   assert.deepEqual(a, {
     type: 0,
     details: "Solstice · Provenance Orchestrator",
-    state: "Harness by SkyeNXT · coming soon",
+    state: "Harness by SkyeNXT · public beta",
     assets: {
       large_image: img("provenance"),
       large_text: "Provenance · harness by SkyeNXT",
