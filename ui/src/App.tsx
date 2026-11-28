@@ -5,9 +5,11 @@ import { HealthBanner } from "./components/HealthBanner";
 import { HeroSun } from "./components/effects/HeroSun";
 import { useFx } from "./components/effects/useFx";
 import { Notices } from "./components/Notices";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { SubagentsPanel } from "./components/SubagentsPanel";
 import { ThreadHeader } from "./components/ThreadHeader";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { WelcomeDialog } from "./fallback/WelcomeDialog";
 import { SetupDialog } from "./setup/SetupDialog";
 import { useAppState } from "./store/store";
@@ -29,6 +31,7 @@ export function App() {
         <FlameFx fx={fx} />
         <ThreadHeader />
         <HealthBanner />
+        <UpdateBanner />
         {selected ? (
           <Conversation threadId={selected} />
         ) : (
@@ -39,6 +42,7 @@ export function App() {
       <SubagentsPanel />
       <Notices />
       <SetupDialog />
+      <SettingsDialog />
       <WelcomeDialog />
     </div>
   );

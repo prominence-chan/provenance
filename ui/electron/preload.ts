@@ -3,6 +3,12 @@
 // Keep in sync with src/app-shell.ts.
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import type {
+  AppSettingsPatch,
+  AppSettingsSnapshot,
+  SettingsTab,
+  UpdateState,
+} from "../shared/updater-api.ts";
 
 function on(channel: string, cb: (...args: unknown[]) => void): () => void {
   const listener = (_e: IpcRendererEvent, ...args: unknown[]) => cb(...args);
@@ -15,10 +21,26 @@ contextBridge.exposeInMainWorld("provenanceApp", {
   pickDirectory: (defaultPath?: string) => ipcRenderer.invoke("app:pick-directory", defaultPath),
   startRouter: () => ipcRenderer.invoke("app:start-router"),
   openPreferences: () => ipcRenderer.invoke("app:open-preferences"),
+  openLogs: () => ipcRenderer.invoke("app:open-logs"),
+  relaunch: () => ipcRenderer.invoke("app:relaunch"),
+  getAppSettings: () => ipcRenderer.invoke("app:get-settings"),
+  updateAppSettings: (patch: AppSettingsPatch) => ipcRenderer.invoke("app:update-settings", patch),
+  getUpdateState: () => ipcRenderer.invoke("app:update-state"),
+  checkForUpdates: () => ipcRenderer.invoke("app:update-check"),
+  downloadUpdate: () => ipcRenderer.invoke("app:update-download"),
+  installUpdate: () => ipcRenderer.invoke("app:update-install"),
   onSetCwd: (cb: (cwd: string) => void) => on("app:set-cwd", (cwd) => cb(String(cwd))),
   onNewThread: (cb: () => void) => on("app:new-thread", () => cb()),
   onOpenAccounts: (cb: () => void) => on("app:open-accounts", () => cb()),
   onOpenWelcome: (cb: () => void) => on("app:open-welcome", () => cb()),
+  onOpenSettings: (cb: (tab?: SettingsTab) => void) =>
+    on("app:open-settings", (tab) =>
+      cb(typeof tab === "string" ? (tab as SettingsTab) : undefined),
+    ),
+  onUpdateState: (cb: (state: UpdateState) => void) =>
+    on("app:update-changed", (state) => cb(state as UpdateState)),
+  onAppSettings: (cb: (snap: AppSettingsSnapshot) => void) =>
+    on("app:settings-changed", (snap) => cb(snap as AppSettingsSnapshot)),
   // Discord presence: only {kind, orchestrator, working, since}; the main process drops anything else.
   setPresence: (s: unknown) => ipcRenderer.send("app:presence", s),
 });

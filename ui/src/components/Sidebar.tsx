@@ -19,12 +19,14 @@ import {
   IconMoon,
   IconRefresh,
   IconSearch,
+  IconSettings,
   IconSidebar,
   IconSun,
   IconTrash,
 } from "./icons";
 import { SolarMark } from "./SolarMark";
 import { firstGapStep, openSetup, openWelcome, useSetupGaps, type SetupGaps } from "../setup/open";
+import { openSettings, useUpdateState } from "../setup/settings-store";
 import { IconAccounts } from "../setup/SetupDialog";
 
 const GROUPS_KEY = "provenance-ui.collapsed-projects";
@@ -381,6 +383,7 @@ export function Sidebar() {
           >
             <IconAccounts size={14} />
           </button>
+          <SettingsButton />
           <ThemeToggle />
         </div>
       </aside>
@@ -686,6 +689,29 @@ function ConnectionStatus() {
         </div>
       </div>
     </div>
+  );
+}
+
+function SettingsButton() {
+  const update = useUpdateState();
+  const isReady = update?.phase === "ready";
+  const hasUpdate = update?.phase === "available" || isReady;
+  return (
+    <button
+      className="icon-btn sidebar-settings-btn"
+      title={
+        isReady
+          ? `Settings — v${update?.available?.version} ready to install`
+          : hasUpdate
+            ? `Settings — update v${update?.available?.version} available`
+            : `Settings (${modKey},)`
+      }
+      aria-label="Settings"
+      onClick={() => openSettings(hasUpdate ? "updates" : "general")}
+    >
+      <IconSettings size={14} />
+      {hasUpdate && <span className={`icon-btn-badge${isReady ? " ready" : ""}`} aria-hidden />}
+    </button>
   );
 }
 

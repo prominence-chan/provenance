@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { RouterInfo, UiHealth as Health } from "../../shared/router-api";
 import { appShell } from "../app-shell";
+import { openSettings } from "../setup/settings-store";
 import { refreshSources, refreshTiers } from "../store/actions";
 import { shortPath } from "./format";
 
@@ -59,8 +60,8 @@ export function HealthBanner() {
   if (!health.bin.exists) {
     issues.push({
       key: `bin:${health.bin.path}`,
-      text: `The provenance agent isn't installed at ${shortPath(health.bin.path)}, so threads can't run. Set provenanceBin in Preferences if it's elsewhere.`,
-      action: appShell && { label: "Preferences", run: () => void appShell!.openPreferences() },
+      text: `The provenance agent isn't installed at ${shortPath(health.bin.path)}, so threads can't run. Set provenanceBin in Settings if it's elsewhere.`,
+      action: appShell && { label: "Settings", run: () => openSettings("advanced") },
     });
   }
   if (!health.router.up) {

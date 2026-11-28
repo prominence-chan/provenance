@@ -33,8 +33,15 @@ import {
   type MenuItemConstructorOptions,
 } from "electron";
 import { startUiServer, type UiServer } from "../server/app.ts";
+import type {
+  AppSettingsSnapshot,
+  DesktopSettings,
+  DesktopSettingsPatch,
+  SettingsTab,
+} from "../shared/updater-api.ts";
 import { DiscordPresence, PRESENCE, sanitizePresence } from "./discord-presence.ts";
 import { RouterSupervisor, type RouterPolicy } from "./router.ts";
+import { AppUpdater } from "./updater.ts";
 
 app.setName("Provenance");
 
@@ -69,31 +76,7 @@ for (const level of ["log", "warn", "error"] as const) {
 
 // ---- settings ----------------------------------------------------------------
 
-interface Settings {
-  /**
-   * The provenance binary (`provenance app-server` is spawned from it). Empty (or the old
-   * default "~/.local/bin/provenance"): ~/.local/bin/provenance when it exists, else the one
-   * inside the app (resolveAgent).
-   */
-  provenanceBin: string;
-  /** Where your own provenance-core (tierlm) router answers, if you run one. */
-  routerUrl: string;
-  /**
-   * auto: use the router at routerUrl when it answers at launch, else the app's own;
-   * external: only routerUrl (never start one); bundled: always the app's own.
-   */
-  router: RouterPolicy;
-  /** A launchd agent that runs your own router: waited for at launch, never started by the app. */
-  routerLaunchdLabel: string;
-  /** Default working directory for new threads (empty: last used, else home). */
-  defaultCwd: string;
-  /** Local port for the UI server (127.0.0.1 only). */
-  port: number;
-  /** Show activity in Discord (the app menu's switch; only with a Discord client id). */
-  discordPresence: boolean;
-  /** The Discord application id for Rich Presence (empty: the one in discord-presence.ts). */
-  discordClientId: string;
-}
+type Settings = DesktopSettings;
 
 const DEFAULT_SETTINGS: Settings = {
   provenanceBin: "",
@@ -104,6 +87,9 @@ const DEFAULT_SETTINGS: Settings = {
   port: 41730,
   discordPresence: true,
   discordClientId: "",
+  autoCheckUpdates: true,
+  autoDownloadUpdates: false,
+  syncCliOnUpdate: true,
 };
 
 function expandHome(p: string): string {
@@ -130,6 +116,15 @@ function loadSettings(): Settings {
   if (r && ["auto", "external", "bundled"].includes(r)) s.router = r;
   s.discordPresence = s.discordPresence !== false;
   if (typeof s.discordClientId !== "string") s.discordClientId = "";
+  s.autoCheckUpdates = s.autoCheckUpdates !== false;
+  s.autoDownloadUpdates = s.autoDownloadUpdates === true;
+  s.syncCliOnUpdate = s.syncCliOnUpdate !== false;
+  if (typeof s.defaultCwd !== "string") s.defaultCwd = "";
+  if (typeof s.provenanceBin !== "string") s.provenanceBin = "";
+  if (typeof s.routerUrl !== "string" || !s.routerUrl.trim())
+    s.routerUrl = DEFAULT_SETTINGS.routerUrl;
+  if (typeof s.port !== "number" || !Number.isInteger(s.port) || s.port < 1024 || s.port > 65535)
+    s.port = DEFAULT_SETTINGS.port;
   return s;
 }
 
@@ -139,6 +134,18 @@ function ensureSettingsFile(): void {
 }
 
 const settings = loadSettings();
+const bootSettings: Settings = { ...settings };
+let selfWriteUntil = 0;
+
+function isRestartRequired(s: Settings): boolean {
+  return (
+    s.router !== bootSettings.router ||
+    s.routerUrl !== bootSettings.routerUrl ||
+    s.provenanceBin !== bootSettings.provenanceBin ||
+    s.port !== bootSettings.port ||
+    s.routerLaunchdLabel !== bootSettings.routerLaunchdLabel
+  );
+}
 
 // ---- which provenance binary -----------------------------------------------------
 
@@ -283,10 +290,60 @@ const presence = new DiscordPresence({
   log: (m) => console.log(m),
 });
 
-/** The menu switch: saved to settings.json (in memory first, so the watcher sees no change). */
-function setDiscordPresence(on: boolean): void {
-  settings.discordPresence = on;
-  presence.configure(headless ? "" : discordClientId(settings), on);
+/** Build the renderer-facing snapshot of desktop settings and runtime paths. */
+function getAppSettingsSnapshot(): AppSettingsSnapshot {
+  return {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    isPackaged: app.isPackaged,
+    settingsPath,
+    logDir,
+    agentPath: bin,
+    agentSource: agent.source,
+    discordConfigured: !!discordClientId(settings),
+    restartRequired: isRestartRequired(settings),
+    settings: { ...settings },
+  };
+}
+
+/** Save a partial patch from the Settings dialog or app menu and apply live keys at once. */
+function updateDesktopSettings(patch: DesktopSettingsPatch): AppSettingsSnapshot {
+  const prevDiscordOn = settings.discordPresence;
+  const prevDiscordId = settings.discordClientId;
+
+  if (typeof patch.discordPresence === "boolean") settings.discordPresence = patch.discordPresence;
+  if (typeof patch.discordClientId === "string")
+    settings.discordClientId = patch.discordClientId.trim();
+  if (typeof patch.autoCheckUpdates === "boolean")
+    settings.autoCheckUpdates = patch.autoCheckUpdates;
+  if (typeof patch.autoDownloadUpdates === "boolean")
+    settings.autoDownloadUpdates = patch.autoDownloadUpdates;
+  if (typeof patch.syncCliOnUpdate === "boolean") settings.syncCliOnUpdate = patch.syncCliOnUpdate;
+  if (typeof patch.defaultCwd === "string") settings.defaultCwd = patch.defaultCwd.trim();
+  if (typeof patch.provenanceBin === "string") settings.provenanceBin = patch.provenanceBin.trim();
+  if (typeof patch.routerUrl === "string" && patch.routerUrl.trim())
+    settings.routerUrl = patch.routerUrl.trim();
+  if (patch.router && ["auto", "external", "bundled"].includes(patch.router))
+    settings.router = patch.router;
+  if (typeof patch.routerLaunchdLabel === "string")
+    settings.routerLaunchdLabel = patch.routerLaunchdLabel.trim();
+  if (
+    typeof patch.port === "number" &&
+    Number.isInteger(patch.port) &&
+    patch.port >= 1024 &&
+    patch.port <= 65535
+  ) {
+    settings.port = patch.port;
+  }
+
+  const discordChanged =
+    settings.discordPresence !== prevDiscordOn || settings.discordClientId !== prevDiscordId;
+  if (discordChanged) {
+    presence.configure(headless ? "" : discordClientId(settings), settings.discordPresence);
+    buildMenu();
+  }
+
   try {
     let raw: Record<string, unknown> = {};
     try {
@@ -294,24 +351,62 @@ function setDiscordPresence(on: boolean): void {
     } catch {
       raw = { ...DEFAULT_SETTINGS };
     }
-    writeFileSync(settingsPath, JSON.stringify({ ...raw, discordPresence: on }, null, 2) + "\n");
+    selfWriteUntil = Date.now() + 1500;
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, ...settings }, null, 2) + "\n");
   } catch (e) {
     console.warn("can't save settings.json:", String(e));
   }
+
+  const snap = getAppSettingsSnapshot();
+  win?.webContents.send("app:settings-changed", snap);
+  return snap;
 }
 
-/** settings.json edited by hand: the Discord keys apply at once, no relaunch. */
-function applyDiscordSettings(next: Settings): void {
-  if (
-    next.discordPresence === settings.discordPresence &&
-    next.discordClientId === settings.discordClientId
-  )
-    return;
+/** The menu switch: saved to settings.json and broadcast to the Settings dialog. */
+function setDiscordPresence(on: boolean): void {
+  updateDesktopSettings({ discordPresence: on });
+}
+
+/** settings.json edited by hand: live-applicable keys apply at once, no relaunch. */
+function applyLiveSettingsFromDisk(next: Settings): void {
+  const discordChanged =
+    next.discordPresence !== settings.discordPresence ||
+    next.discordClientId !== settings.discordClientId;
   settings.discordPresence = next.discordPresence;
   settings.discordClientId = next.discordClientId;
-  presence.configure(headless ? "" : discordClientId(settings), settings.discordPresence);
-  buildMenu();
+  settings.autoCheckUpdates = next.autoCheckUpdates;
+  settings.autoDownloadUpdates = next.autoDownloadUpdates;
+  settings.syncCliOnUpdate = next.syncCliOnUpdate;
+  settings.defaultCwd = next.defaultCwd;
+  if (discordChanged) {
+    presence.configure(headless ? "" : discordClientId(settings), settings.discordPresence);
+    buildMenu();
+  }
+  win?.webContents.send("app:settings-changed", getAppSettingsSnapshot());
 }
+
+// ---- built-in self-updater (electron/updater.ts) -------------------------------
+
+const updater = new AppUpdater({
+  currentVersion: app.getVersion(),
+  userData,
+  platform: process.platform,
+  arch: process.arch,
+  isPackaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+  exePath: app.getPath("exe"),
+  homeDir: homedir(),
+  localAppData: process.env.LOCALAPPDATA,
+  appImagePath: process.env.APPIMAGE,
+  apiUrl: process.env.PROVENANCE_UPDATE_URL || undefined,
+  syncCliEnabled: () => settings.syncCliOnUpdate,
+  log: (m) => console.log(m),
+  onChange: (state) => win?.webContents.send("app:update-changed", state),
+  openExternal: (url) => shell.openExternal(url),
+  showItemInFolder: (filePath) => shell.showItemInFolder(filePath),
+  quitForUpdate: () => app.quit(),
+});
 
 // ---- window --------------------------------------------------------------------
 
@@ -446,8 +541,14 @@ function buildMenu(): void {
     if (!win && ui) createWindow();
     win?.webContents.send(channel, ...args);
   };
+  const openSettingsTab = (tab?: SettingsTab) => send("app:open-settings", tab);
+  const checkUpdatesFromMenu = () => {
+    openSettingsTab("updates");
+    void updater.check();
+  };
   const appSettingsItems: MenuItemConstructorOptions[] = [
-    { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: openPreferences },
+    { label: "Settings…", accelerator: "CmdOrCtrl+,", click: () => openSettingsTab("general") },
+    { label: "Check for Updates…", click: checkUpdatesFromMenu },
     { label: "Models & Accounts…", click: () => send("app:open-accounts") },
     { label: "Welcome…", click: () => send("app:open-welcome") },
     {
@@ -466,8 +567,9 @@ function buildMenu(): void {
             label: "Provenance",
             submenu: [
               { role: "about" },
+              { label: "Check for Updates…", click: checkUpdatesFromMenu },
               { type: "separator" },
-              ...appSettingsItems,
+              ...appSettingsItems.filter((i) => i.label !== "Check for Updates…"),
               { type: "separator" },
               { role: "services" },
               { type: "separator" },
@@ -526,7 +628,10 @@ function buildMenu(): void {
               "https://github.com/prominence-chan/provenance/tree/provenance",
             ),
         },
+        { label: "Check for Updates…", click: checkUpdatesFromMenu },
+        { type: "separator" },
         { label: "Show Logs", click: () => void shell.openPath(logDir) },
+        { label: "Open settings.json…", click: openPreferences },
         {
           label: "Show Settings File",
           click: () => (ensureSettingsFile(), shell.showItemInFolder(settingsPath)),
@@ -542,6 +647,19 @@ function buildMenu(): void {
 ipcMain.handle("app:pick-directory", (_e, defaultPath?: string) => pickDirectory(defaultPath));
 ipcMain.handle("app:start-router", () => router.ensure());
 ipcMain.handle("app:open-preferences", () => openPreferences());
+ipcMain.handle("app:open-logs", () => void shell.openPath(logDir));
+ipcMain.handle("app:relaunch", () => {
+  app.relaunch();
+  app.quit();
+});
+ipcMain.handle("app:get-settings", () => getAppSettingsSnapshot());
+ipcMain.handle("app:update-settings", (_e, patch: DesktopSettingsPatch) =>
+  updateDesktopSettings(patch ?? {}),
+);
+ipcMain.handle("app:update-state", () => updater.getState());
+ipcMain.handle("app:update-check", () => updater.check());
+ipcMain.handle("app:update-download", () => updater.download());
+ipcMain.handle("app:update-install", () => updater.installAndRestart());
 // The page's coarse state for Discord: tier or fallback, working or not, since when. Nothing else.
 let lastPresence = sanitizePresence(null);
 ipcMain.on("app:presence", (e, raw: unknown) => {
@@ -558,11 +676,12 @@ function watchSettings(): void {
   let timer: NodeJS.Timeout | undefined;
   try {
     watch(userData, (_ev, name) => {
-      if (name !== "settings.json" || prompted) return;
+      if (name !== "settings.json" || prompted || Date.now() < selfWriteUntil) return;
       clearTimeout(timer);
       timer = setTimeout(async () => {
+        if (Date.now() < selfWriteUntil) return;
         const next = loadSettings();
-        applyDiscordSettings(next);
+        applyLiveSettingsFromDisk(next);
         if (JSON.stringify(next) === JSON.stringify(settings)) return;
         prompted = true;
         const r = await dialog.showMessageBox({
@@ -635,8 +754,21 @@ app
     }
     console.log(`ui server on ${ui.url}`);
     createWindow();
-    if (!headless) watchSettings();
-    else
+    if (!headless) {
+      watchSettings();
+      void updater.syncCliAtLaunch();
+      if (settings.autoCheckUpdates) {
+        setTimeout(() => void updater.check({ autoDownload: settings.autoDownloadUpdates }), 4_000);
+      }
+      setInterval(
+        () => {
+          if (settings.autoCheckUpdates) {
+            void updater.check({ autoDownload: settings.autoDownloadUpdates });
+          }
+        },
+        6 * 60 * 60 * 1000,
+      ).unref();
+    } else
       process.stdout.write(
         `PROVENANCE_READY ${JSON.stringify({ ui: ui.url, router: router.connection().url, mode: router.status().mode, routerPid: router.pid ?? null, bin, binSource: agent.source })}\n`,
       );

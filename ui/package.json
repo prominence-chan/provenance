@@ -1,7 +1,7 @@
 {
   "name": "provenance-ui",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Codex-desktop-style web UI for Provenance, driving `provenance app-server` over a local WebSocket bridge.",
   "type": "module",
   "engines": {
@@ -25,6 +25,7 @@
     "e2e:subagents": "node scripts/subagents-e2e.ts",
     "e2e:carry": "node scripts/carry-e2e.ts",
     "check:presence": "node scripts/presence-check.ts",
+    "check:updater": "node scripts/updater-check.ts",
     "mock:router": "node scripts/mock-router.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
