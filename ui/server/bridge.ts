@@ -178,6 +178,7 @@ export class AppServerBridge {
     const child = spawn(this.opts.bin, ["app-server", ...args], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...this.opts.env?.() },
+      windowsHide: true,
     });
     this.child = child;
     const gen = ++this.generation;

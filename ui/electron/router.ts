@@ -206,8 +206,12 @@ export class RouterSupervisor {
       PCORE_CHATGPT_WEB: "1", // the web chats are on; a site can be turned off in Models & accounts
       PCORE_CHATGPT_WEB_DRIVER: "patchright", // the stock driver is stopped by chatgpt.com's browser check
       PCORE_BROWSER_APP: path.join(this.opts.resources, "browser"),
-      PLAYWRIGHT_NODEJS_PATH: nodeWrapper(dir),
-      PROVENANCE_ELECTRON: process.execPath, // what that wrapper runs (in a checkout: node_modules' Electron)
+      ...(process.platform !== "win32"
+        ? {
+            PLAYWRIGHT_NODEJS_PATH: nodeWrapper(dir),
+            PROVENANCE_ELECTRON: process.execPath, // what that wrapper runs (in a checkout: node_modules' Electron)
+          }
+        : {}),
     });
     const args = [
       "-I",
@@ -229,6 +233,7 @@ export class RouterSupervisor {
       cwd: this.opts.home,
       env,
       stdio: ["pipe", out, out], // stdin stays open while the app lives: its EOF stops the router
+      windowsHide: true,
     });
     closeSync(out);
     this.child = child;

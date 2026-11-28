@@ -116,6 +116,7 @@ export class AppServerProcess implements AppServer {
       cwd: this.opts.runDir,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...this.opts.env() },
+      windowsHide: true,
     });
     const pending: Proc["pending"] = new Map();
     let readyResolve!: () => void;

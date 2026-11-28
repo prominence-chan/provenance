@@ -204,9 +204,11 @@ async function buildPython(stamp: string): Promise<void> {
       throw new Error(`pip installed more than router-requirements.txt pins: ${extra.join(", ")}`);
     run(py, ["-I", "-m", "pip", "uninstall", "-y", "-q", "pip"]);
     const site = path.join(tmp, "python", PYLIB, "site-packages");
-    rmSync(path.join(site, IS_WIN ? "patchright/driver/node.exe" : "patchright/driver/node"), {
-      force: true,
-    }); // Electron's Node runs it
+    if (!IS_WIN) {
+      // Unix: patchright's driver runs on Electron in Node mode via our POSIX sh wrapper.
+      // Windows: keep patchright's native node.exe (asyncio.create_subprocess_exec cannot exec .cmd directly).
+      rmSync(path.join(site, "patchright/driver/node"), { force: true });
+    }
     for (const p of RM_FROM_PYTHON)
       rmSync(path.join(tmp, "python", p), { recursive: true, force: true });
     if (!IS_WIN) {
